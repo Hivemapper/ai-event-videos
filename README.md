@@ -41,7 +41,7 @@ Base URL: [Bee Maps AI Event Videos](https://beemaps.com/api/developer/docs#tag/
 | [/aievents/search](https://beemaps.com/api/developer/docs#tag/aievents/POST/aievents/search) | POST | Search for AI events by date range, event type, and geographic polygon |
 | [/aievents/{id}](https://beemaps.com/api/developer/docs#tag/ai-events/GET/aievents/{id}) | GET | Get a single event by ID, optionally including GNSS and IMU data |
 | [/map-data](https://beemaps.com/api/developer/docs#POST/mapFeatures/poly) | POST | Query map features (stop signs, speed signs, etc.) within a geographic polygon |
-| `/devices` | GET | Get camera intrinsic parameters (focal length, distortion coefficients) for Hivemapper devices |
+| [/devices](https://beemaps.com/api/developer/docs#GET/devices) | GET | Get camera intrinsic parameters (focal length, distortion coefficients) for Hivemapper Bee devices |
 
 Authentication: BeeMaps API key.  Get API Key https://beemaps.com/developers
 
