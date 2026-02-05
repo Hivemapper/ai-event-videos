@@ -1,6 +1,6 @@
-# AI Event Videos from Bee Maps
+# Using the AI Event Videos API from Bee Maps
 
-A Next.js web application for browsing, filtering, and analyzing AI-detected driving events videos captured by Hivemapper dashcams. 
+This is a web application for browsing, filtering, and analyzing AI-detected driving events videos captured by Hivemapper dashcams. 
 View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see nearby map features — all on an interactive map.
 
 
