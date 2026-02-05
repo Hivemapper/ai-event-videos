@@ -34,7 +34,7 @@ This application uses the following external APIs:
 
 ### BeeMaps API
 
-Base URL: `https://beemaps.com/api/developer`
+Base URL: `[https://beemaps.com/api/developer](https://beemaps.com/api/developer/docs#tag/aievents/POST/aievents/search)`
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -43,7 +43,7 @@ Base URL: `https://beemaps.com/api/developer`
 | `/map-data` | POST | Query map features (stop signs, speed signs, etc.) within a geographic polygon |
 | `/devices` | GET | Get camera intrinsic parameters (focal length, distortion coefficients) for Hivemapper devices |
 
-Authentication: BeeMaps API key.
+Authentication: BeeMaps API key.  Get API Key https://beemaps.com/developers
 
 ### Mapbox APIs
 
