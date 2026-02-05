@@ -7,6 +7,8 @@ View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see
 
 ## Features
 
+![AI Event Video Detail](ai-video-events-homepage.png)
+
 ![AI Event Video Detail](ai-event-video-detail.png)
 
 - **Event Gallery** — Browse events in a grid view with video thumbnails, or switch to an interactive map view
