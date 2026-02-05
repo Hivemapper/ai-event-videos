@@ -10,6 +10,8 @@ View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see
 ![AI Event Video Detail](ai-event-video-detail.png)
 
 - **Event Gallery** — Browse events in a grid view with video thumbnails, or switch to an interactive map view
+- **AI Filter Agent** — Natural language search powered by Claude. Ask questions like "Harsh braking in London last week" and the agent translates your query into structured filters to find matching events
+- **Highlights** — Curated collections of notable events including extreme braking, highest g-force, and international highlights from around the world
 - **Filtering** — Filter by date range, event type, time of day (day/dawn/dusk/night), country, and geographic coordinates with radius
 - **Event Detail View** — Play event videos with synchronized map playback showing the GNSS track
 - **Speed Profile** — Visualize speed data over the duration of an event, with speed limit violation highlighting
@@ -31,6 +33,25 @@ View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see
 | Traffic Light Violation | Running a red light |
 | Tailgating | Following too closely |
 | Manual Request | Driver-triggered recording |
+
+## AI Filter Agent
+
+The Agent tab opens a chat interface where you can describe what you're looking for in plain English. The agent uses Claude (Sonnet 4.5) to parse your query into structured filters — event types, date ranges, time of day, and geographic coordinates — then fetches matching events from the Bee Maps API.
+
+Example queries:
+- "Harsh braking in London last week"
+- "Stop sign violations in the past 3 days"
+- "High speed events at night near 37.7749, -122.4194"
+
+Requires an [Anthropic API key](https://console.anthropic.com), which can be configured in the settings dialog.
+
+## Highlights
+
+The Highlights tab showcases curated collections of notable driving events across three categories:
+
+- **Extreme Braking** — Events with the largest speed drops (60+ km/h deceleration)
+- **Highest G-Force** — Events with the most intense acceleration moments
+- **International Highlights** — Notable events from cities around the world (London, Berlin, Tokyo, Sydney, Toronto, Sao Paulo)
 
 ## External APIs
 
@@ -59,6 +80,14 @@ Authentication: BeeMaps API key.  Get API Key https://beemaps.com/developers
 
 Authentication: Mapbox access token.
 
+### Anthropic API
+
+| API | Description |
+|-----|-------------|
+| [Messages API](https://docs.anthropic.com/en/api/messages) | Powers the AI Filter Agent — Claude Sonnet 4.5 interprets natural language queries and extracts structured filter parameters using tool use |
+
+Authentication: Anthropic API key. Get one at [console.anthropic.com](https://console.anthropic.com).
+
 ### FFmpeg (local)
 
 Used server-side to extract video frames and generate thumbnails. Must be installed on the host machine.
@@ -71,6 +100,7 @@ Used server-side to extract video frames and generate thumbnails. Must be instal
 - FFmpeg installed and available on `PATH`
 - A [Bee Maps API key](https://beemaps.com/developers)
 - A [Mapbox access token](https://account.mapbox.com)
+- An [Anthropic API key](https://console.anthropic.com) (optional, for AI Filter Agent)
 
 ### Setup
 
@@ -99,7 +129,7 @@ Edit `.env.local` and add your Mapbox token:
 NEXT_PUBLIC_MAPBOX_TOKEN=your_mapbox_token_here
 ```
 
-The BeeMaps API key can be set via the `.env.local` file or configured through the settings dialog in the UI.
+The Bee Maps API key and Anthropic API key can be set via the `.env.local` file or configured through the settings dialog in the UI.
 
 4. Start the development server:
 
@@ -115,27 +145,31 @@ Open [http://localhost:3000](http://localhost:3000) to view the app.
 src/
 ├── app/
 │   ├── api/
-│   │   ├── events/          # Proxy for BeeMaps AI events API
+│   │   ├── agent/           # AI Filter Agent endpoint (Claude-powered query parsing)
+│   │   ├── events/          # Proxy for Bee Maps AI events API
 │   │   ├── frames/          # FFmpeg frame extraction at specific timestamps
 │   │   ├── labeled-frame/   # Frame extraction + nearby map feature labels
-│   │   ├── map-features/    # Proxy for BeeMaps map data API
+│   │   ├── map-features/    # Proxy for Bee Maps map data API
 │   │   ├── road-type/       # Mapbox road classification lookup
 │   │   ├── thumbnail/       # FFmpeg thumbnail generation
 │   │   └── video/           # Video proxy for CORS-free playback
 │   ├── event/[id]/          # Event detail page
-│   └── page.tsx             # Home page (event gallery)
+│   ├── highlights/          # Curated highlights page
+│   └── page.tsx             # Home page (event gallery + agent view)
 ├── components/
-│   ├── events/              # Event grid, cards, filters, settings
+│   ├── events/              # Event grid, cards, filters, agent dialog, settings
+│   ├── layout/              # Header with tab navigation
 │   ├── map/                 # Mapbox map components
 │   └── ui/                  # Reusable UI components (shadcn/ui)
 ├── hooks/                   # React hooks for data fetching
-├── lib/                     # Utilities, constants, API helpers
+├── lib/                     # Utilities, constants, agent skills, highlights data
 └── types/                   # TypeScript type definitions
 ```
 
 ## Tech Stack
 
 - **Data API**: [Bee Maps](https://docs.beemaps.com/platform/road-intelligence-api)
+- **AI**: [Anthropic Claude](https://docs.anthropic.com) (Sonnet 4.5 for natural language filter agent)
 - **Framework**: [Next.js](https://nextjs.org) 16 (App Router)
 - **Language**: TypeScript
 - **Styling**: [Tailwind CSS](https://tailwindcss.com) 4
