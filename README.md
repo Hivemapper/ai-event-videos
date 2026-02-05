@@ -15,6 +15,8 @@ View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see
 
 ![AI Event Video Detail](ai-event-video-detail.png)
 
+**Full Feature List**
+
 - **Event Gallery** — Browse events in a grid view with video thumbnails, or switch to an interactive map view
 - **AI Filter Agent** — Natural language search powered by Claude. Ask questions like "Harsh braking in London last week" and the agent translates your query into structured filters to find matching events
 - **Highlights** — Curated collections of notable events including extreme braking, highest g-force, and international highlights from around the world
@@ -38,7 +40,6 @@ View event videos, inspect speed profiles, explore GNSS/IMU sensor data, and see
 | Stop Sign Violation | Failure to stop at stop sign |
 | Traffic Light Violation | Running a red light |
 | Tailgating | Following too closely |
-| Manual Request | Driver-triggered recording |
 
 ## AI Filter Agent
 
