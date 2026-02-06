@@ -2,6 +2,7 @@ import { AIEventsRequest, AIEventsResponse } from "@/types/events";
 
 const API_KEY_STORAGE_KEY = "beemaps-api-key";
 const MAPBOX_TOKEN_STORAGE_KEY = "mapbox-token";
+const ANTHROPIC_KEY_STORAGE_KEY = "anthropic-api-key";
 const CAMERA_INTRINSICS_STORAGE_KEY = "camera-intrinsics";
 
 export interface CameraIntrinsics {
@@ -61,6 +62,21 @@ export function setMapboxToken(token: string): void {
 export function clearMapboxToken(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(MAPBOX_TOKEN_STORAGE_KEY);
+}
+
+export function getAnthropicKey(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(ANTHROPIC_KEY_STORAGE_KEY);
+}
+
+export function setAnthropicKey(key: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(ANTHROPIC_KEY_STORAGE_KEY, key);
+}
+
+export function clearAnthropicKey(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(ANTHROPIC_KEY_STORAGE_KEY);
 }
 
 export function getCameraIntrinsics(): DevicesResponse | null {

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Video, RefreshCw, AlertCircle } from "lucide-react";
+import { RefreshCw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -10,7 +10,9 @@ import {
   FilterBar,
   NewEventsBanner,
   SettingsDialog,
+  AgentView,
 } from "@/components/events";
+import { Header } from "@/components/layout/header";
 import { EventsMap } from "@/components/map/events-map";
 import { Coordinates } from "@/components/events/filter-bar";
 import { useEvents } from "@/hooks/use-events";
@@ -66,6 +68,7 @@ function HomeContent() {
   const [view, setView] = useState<"list" | "map">(
     (searchParams.get("view") as "list" | "map") || "list"
   );
+  const agentOpen = searchParams.has("agent");
 
   // Update URL when filters change
   const updateUrl = useCallback(() => {
@@ -133,30 +136,25 @@ function HomeContent() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Video className="w-6 h-6 text-primary" />
-            <h1 className="font-semibold text-lg">AI Event Videos</h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={refresh}
-              disabled={isLoading}
-            >
-              <RefreshCw
-                className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
-              />
-            </Button>
-            <SettingsDialog onApiKeyChange={refresh} filteredEvents={filteredEvents} />
-          </div>
-        </div>
-      </header>
+      <Header>
+        {!agentOpen && (
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={refresh}
+            disabled={isLoading}
+          >
+            <RefreshCw
+              className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
+            />
+          </Button>
+        )}
+        <SettingsDialog onApiKeyChange={refresh} filteredEvents={filteredEvents} />
+      </Header>
 
-      {/* Main content */}
+      {agentOpen ? (
+        <AgentView />
+      ) : (
       <main className="container mx-auto px-4 py-6 space-y-6">
         {/* Filter bar */}
         <FilterBar
@@ -220,6 +218,7 @@ function HomeContent() {
           />
         )}
       </main>
+      )}
     </div>
   );
 }
@@ -227,14 +226,7 @@ function HomeContent() {
 function HomeSkeleton() {
   return (
     <div className="min-h-screen bg-background">
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-        <div className="container mx-auto px-4 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Video className="w-6 h-6 text-primary" />
-            <h1 className="font-semibold text-lg">AI Event Videos</h1>
-          </div>
-        </div>
-      </header>
+      <div className="sticky top-0 z-50 w-full border-b bg-background/95 h-14" />
       <main className="container mx-auto px-4 py-6 space-y-6">
         <Skeleton className="h-10 w-32" />
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">

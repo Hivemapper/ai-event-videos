@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useTheme } from "next-themes";
-import { Settings, Key, Map, Check, AlertCircle, Moon, Sun, Download, Camera, RefreshCw } from "lucide-react";
+import { Settings, Key, Map, Check, AlertCircle, Moon, Sun, Download, Camera, RefreshCw, Sparkles } from "lucide-react";
 import { AIEvent } from "@/types/events";
 import { exportEventsToCSV } from "@/lib/export";
 import {
@@ -23,6 +23,9 @@ import {
   getMapboxToken,
   setMapboxToken,
   clearMapboxToken,
+  getAnthropicKey,
+  setAnthropicKey,
+  clearAnthropicKey,
   getCameraIntrinsics,
   setCameraIntrinsics,
   fetchCameraIntrinsics,
@@ -50,6 +53,11 @@ export function SettingsDialog({ onApiKeyChange, filteredEvents = [] }: Settings
   const [hasMapboxToken, setHasMapboxToken] = useState(false);
   const [mapboxSaved, setMapboxSaved] = useState(false);
 
+  // Anthropic API Key state
+  const [anthropicInput, setAnthropicInput] = useState("");
+  const [hasAnthropicKey, setHasAnthropicKey] = useState(false);
+  const [anthropicSaved, setAnthropicSaved] = useState(false);
+
   // Camera Intrinsics state
   const [cameraIntrinsics, setCameraIntrinsicsState] = useState<DevicesResponse | null>(null);
   const [isLoadingIntrinsics, setIsLoadingIntrinsics] = useState(false);
@@ -72,6 +80,15 @@ export function SettingsDialog({ onApiKeyChange, filteredEvents = [] }: Settings
       setMapboxInput("••••••••" + token.slice(-4));
     } else {
       setMapboxInput("");
+    }
+
+    // Load Anthropic API key
+    const anthropic = getAnthropicKey();
+    setHasAnthropicKey(!!anthropic);
+    if (anthropic) {
+      setAnthropicInput("••••••••" + anthropic.slice(-4));
+    } else {
+      setAnthropicInput("");
     }
 
     // Load camera intrinsics
@@ -124,6 +141,29 @@ export function SettingsDialog({ onApiKeyChange, filteredEvents = [] }: Settings
       setMapboxInput(value.slice(mapboxInput.length));
     } else {
       setMapboxInput(value);
+    }
+  };
+
+  const handleSaveAnthropic = () => {
+    if (anthropicInput && !anthropicInput.startsWith("••••")) {
+      setAnthropicKey(anthropicInput);
+      setHasAnthropicKey(true);
+      setAnthropicSaved(true);
+      setTimeout(() => setAnthropicSaved(false), 2000);
+    }
+  };
+
+  const handleClearAnthropic = () => {
+    clearAnthropicKey();
+    setAnthropicInput("");
+    setHasAnthropicKey(false);
+  };
+
+  const handleAnthropicInputChange = (value: string) => {
+    if (anthropicInput.startsWith("••••") && value.length > anthropicInput.length) {
+      setAnthropicInput(value.slice(anthropicInput.length));
+    } else {
+      setAnthropicInput(value);
     }
   };
 
@@ -306,6 +346,55 @@ export function SettingsDialog({ onApiKeyChange, filteredEvents = [] }: Settings
               )}
             </div>
 
+            {/* Anthropic API Key */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <Sparkles className="w-4 h-4" />
+                Anthropic API Key
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  type="password"
+                  placeholder="Enter your Anthropic API key"
+                  value={anthropicInput}
+                  onChange={(e) => handleAnthropicInputChange(e.target.value)}
+                  className="flex-1"
+                />
+                <Button
+                  onClick={handleSaveAnthropic}
+                  disabled={!anthropicInput || anthropicInput.startsWith("••••")}
+                >
+                  {anthropicSaved ? (
+                    <>
+                      <Check className="w-4 h-4 mr-1" />
+                      Saved
+                    </>
+                  ) : (
+                    "Save"
+                  )}
+                </Button>
+              </div>
+              {hasAnthropicKey && (
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-green-600 flex items-center gap-1">
+                    <Check className="w-3 h-3" />
+                    Anthropic key configured
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={handleClearAnthropic}
+                    className="text-destructive hover:text-destructive"
+                  >
+                    Clear
+                  </Button>
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Required for the AI Filter Agent. Uses Claude to interpret natural language queries.
+              </p>
+            </div>
+
             <div
               className={cn(
                 "p-3 rounded-lg text-sm",
@@ -337,6 +426,18 @@ export function SettingsDialog({ onApiKeyChange, filteredEvents = [] }: Settings
                       className="text-primary hover:underline"
                     >
                       Mapbox Account
+                    </a>
+                    .
+                  </p>
+                  <p>
+                    Get your Anthropic API key from the{" "}
+                    <a
+                      href="https://console.anthropic.com/settings/keys"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary hover:underline"
+                    >
+                      Anthropic Console
                     </a>
                     .
                   </p>

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
+import { Header } from "@/components/layout/header";
 import {
   ArrowLeft,
   MapPin,
@@ -262,6 +263,36 @@ function MetadataTable({ metadata }: MetadataTableProps) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function SpeedOverlay({
+  speedData,
+  currentTime,
+  duration,
+}: {
+  speedData: SpeedDataPoint[];
+  currentTime: number;
+  duration: number;
+}) {
+  if (!speedData.length || duration <= 0) return null;
+
+  const progress = Math.min(Math.max(currentTime / duration, 0), 1);
+  const exactIndex = progress * (speedData.length - 1);
+  const lowIndex = Math.floor(exactIndex);
+  const highIndex = Math.min(lowIndex + 1, speedData.length - 1);
+  const fraction = exactIndex - lowIndex;
+
+  const speedMs =
+    speedData[lowIndex].AVG_SPEED_MS * (1 - fraction) +
+    speedData[highIndex].AVG_SPEED_MS * fraction;
+  const speedKmh = Math.round(speedMs * 3.6);
+
+  return (
+    <div className="absolute bottom-4 left-4 bg-black/60 backdrop-blur-sm text-white rounded-lg px-3 py-1.5 flex items-baseline gap-1 pointer-events-none">
+      <span className="font-mono text-lg font-bold">{speedKmh}</span>
+      <span className="text-xs text-white/70">km/h</span>
     </div>
   );
 }
@@ -822,6 +853,7 @@ export default function EventDetailPage({
   } | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   // Track video playback time
   useEffect(() => {
@@ -995,6 +1027,26 @@ export default function EventDetailPage({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const downloadVideo = async () => {
+    if (!event?.videoUrl) return;
+    setIsDownloading(true);
+    try {
+      const response = await fetch(getProxyVideoUrl(event.videoUrl));
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `event_${event.id}.mp4`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      // Fallback: open in new tab
+      window.open(getProxyVideoUrl(event.videoUrl), "_blank");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
   if (isLoading) {
     return <EventDetailSkeleton />;
   }
@@ -1002,16 +1054,14 @@ export default function EventDetailPage({
   if (error || !event) {
     return (
       <div className="min-h-screen bg-background">
-        <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-          <div className="container mx-auto px-4 h-14 flex items-center">
-            <Link href="/">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                Back
-              </Button>
-            </Link>
-          </div>
-        </header>
+        <Header>
+          <Link href="/">
+            <Button variant="ghost" size="sm">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back
+            </Button>
+          </Link>
+        </Header>
         <main className="container mx-auto px-4 py-8">
           <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
             <p className="text-lg">{error || "Event not found"}</p>
@@ -1034,17 +1084,14 @@ export default function EventDetailPage({
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-        <div className="container mx-auto px-4 h-14 flex items-center">
-          <Link href="/">
-            <Button variant="ghost" size="sm">
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              Back to Gallery
-            </Button>
-          </Link>
-        </div>
-      </header>
+      <Header>
+        <Link href="/">
+          <Button variant="ghost" size="sm">
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to Gallery
+          </Button>
+        </Link>
+      </Header>
 
       {/* Main content */}
       <main className="container mx-auto px-4 py-6">
@@ -1071,7 +1118,31 @@ export default function EventDetailPage({
                       No video available
                     </div>
                   )}
+                  {speedData && speedData.length > 0 && (
+                    <SpeedOverlay
+                      speedData={speedData}
+                      currentTime={videoCurrentTime}
+                      duration={videoDuration}
+                    />
+                  )}
                 </div>
+                {event.videoUrl && (
+                  <div className="flex justify-end px-3 py-2 border-t">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={downloadVideo}
+                      disabled={isDownloading}
+                    >
+                      {isDownloading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4 mr-2" />
+                      )}
+                      {isDownloading ? "Downloading..." : "Download"}
+                    </Button>
+                  </div>
+                )}
               </CardContent>
             </Card>
 
@@ -1348,11 +1419,9 @@ function EventDetailSkeleton() {
       <div className="fixed top-0 left-0 right-0 z-[60] h-0.5 bg-muted overflow-hidden">
         <div className="h-full w-1/3 bg-primary/50 animate-[loading_1s_ease-in-out_infinite]" />
       </div>
-      <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur">
-        <div className="container mx-auto px-4 h-14 flex items-center">
-          <Skeleton className="h-8 w-32" />
-        </div>
-      </header>
+      <Header>
+        <Skeleton className="h-8 w-32" />
+      </Header>
       <main className="container mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="space-y-6">
