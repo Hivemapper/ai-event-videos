@@ -1,23 +1,30 @@
 "use client";
 
-import { useState, useCallback, useEffect, Suspense } from "react";
+import { useState, useCallback, useEffect, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { RefreshCw, AlertCircle } from "lucide-react";
+import { RefreshCw, AlertCircle, Brain, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import Link from "next/link";
 import {
   EventGrid,
   FilterBar,
   NewEventsBanner,
-  SettingsDialog,
   AgentView,
 } from "@/components/events";
 import { Header } from "@/components/layout/header";
 import { EventsMap } from "@/components/map/events-map";
 import { Coordinates } from "@/components/events/filter-bar";
+import { AnalysisFiltersBar } from "@/components/events/analysis-filters";
 import { useEvents } from "@/hooks/use-events";
 import { AIEvent, AIEventType } from "@/types/events";
 import { TimeOfDay } from "@/lib/sun";
+import { getApiKey, getAnthropicKey, getMapboxToken } from "@/lib/api";
+import {
+  getAllCachedAnalyses,
+  matchesAnalysisFilters,
+  AnalysisFilters,
+} from "@/lib/analysis-store";
 
 // Default to last 7 days
 function getDefaultDates() {
@@ -70,6 +77,17 @@ function HomeContent() {
   );
   const agentOpen = searchParams.has("agent");
 
+  // Batch analysis state
+  const [analysisFilters, setAnalysisFilters] = useState<AnalysisFilters>({});
+  const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  const [cachedAnalyses, setCachedAnalyses] = useState<Record<string, unknown>>({});
+
+  // Load cached analyses on mount
+  useEffect(() => {
+    setCachedAnalyses(getAllCachedAnalyses());
+  }, []);
+
   // Update URL when filters change
   const updateUrl = useCallback(() => {
     const params = new URLSearchParams();
@@ -120,6 +138,74 @@ function HomeContent() {
     }
   }, [countries, countriesInitialized]);
 
+  // Apply analysis filters client-side
+  const sceneFilteredEvents = useMemo(() => {
+    const hasActiveFilters = Object.values(analysisFilters).some(
+      (v) => v !== undefined && v !== false && (!Array.isArray(v) || v.length > 0)
+    );
+    if (!hasActiveFilters) return filteredEvents;
+
+    return filteredEvents.filter((event) => {
+      const analysis = cachedAnalyses[event.id];
+      if (!analysis) return false;
+      return matchesAnalysisFilters(analysis as import("@/types/analysis").VideoAnalysis, analysisFilters);
+    });
+  }, [filteredEvents, analysisFilters, cachedAnalyses]);
+
+  const analyzedCount = useMemo(
+    () => filteredEvents.filter((e) => e.id in cachedAnalyses).length,
+    [filteredEvents, cachedAnalyses]
+  );
+
+  const handleBatchAnalyze = useCallback(async () => {
+    const eventIds = filteredEvents.map((e) => e.id);
+    if (eventIds.length === 0) return;
+
+    setIsBatchAnalyzing(true);
+    setBatchProgress({ done: 0, total: eventIds.length });
+
+    try {
+      const response = await fetch("/api/analyze/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventIds,
+          anthropicApiKey: getAnthropicKey(),
+          beemapsApiKey: getApiKey(),
+          mapboxToken: getMapboxToken(),
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setBatchProgress({ done: data.analyzed, total: data.total });
+
+        for (const [eventId, analysis] of Object.entries(data.results)) {
+          try {
+            localStorage.setItem(
+              `video-analysis-${eventId}`,
+              JSON.stringify({
+                analysis,
+                eventId,
+                analyzedAt: new Date().toISOString(),
+                frameTimestamps: [],
+              })
+            );
+          } catch {
+            // localStorage full
+          }
+        }
+
+        setCachedAnalyses(getAllCachedAnalyses());
+      }
+    } catch (err) {
+      console.error("Batch analysis error:", err);
+    } finally {
+      setIsBatchAnalyzing(false);
+      setBatchProgress(null);
+    }
+  }, [filteredEvents]);
+
   const handleEventClick = useCallback(
     (event: AIEvent) => {
       // Update URL before navigating so state is preserved
@@ -149,7 +235,6 @@ function HomeContent() {
             />
           </Button>
         )}
-        <SettingsDialog onApiKeyChange={refresh} filteredEvents={filteredEvents} />
       </Header>
 
       {agentOpen ? (
@@ -184,19 +269,50 @@ function HomeContent() {
             <AlertCircle className="w-5 h-5 shrink-0" />
             <span>{error}</span>
             {!hasApiKey && (
-              <span className="ml-auto">
-                <SettingsDialog onApiKeyChange={refresh} filteredEvents={filteredEvents} />
-              </span>
+              <Link href="/settings" className="ml-auto text-sm font-medium underline hover:no-underline">
+                Configure
+              </Link>
             )}
           </div>
         )}
 
-        {/* Results count */}
+        {/* Results count + batch analyze */}
         {!error && !isLoading && filteredEvents.length > 0 && (
-          <p className="text-sm text-muted-foreground">
-            Showing {filteredEvents.length} of {totalCount} events
-          </p>
+          <div className="flex items-center gap-3">
+            <p className="text-sm text-muted-foreground">
+              Showing {sceneFilteredEvents.length} of {totalCount} events
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBatchAnalyze}
+              disabled={isBatchAnalyzing || filteredEvents.length === 0}
+              className="gap-2"
+            >
+              {isBatchAnalyzing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  {batchProgress
+                    ? `${batchProgress.done}/${batchProgress.total}`
+                    : "Analyzing..."}
+                </>
+              ) : (
+                <>
+                  <Brain className="w-3.5 h-3.5" />
+                  Analyze All ({filteredEvents.length})
+                </>
+              )}
+            </Button>
+          </div>
         )}
+
+        {/* Scene analysis filters */}
+        <AnalysisFiltersBar
+          filters={analysisFilters}
+          onChange={setAnalysisFilters}
+          analyzedCount={analyzedCount}
+          totalCount={filteredEvents.length}
+        />
 
         {/* New events link */}
         <NewEventsBanner count={newEventsCount} onClick={showNewEvents} />
@@ -204,7 +320,7 @@ function HomeContent() {
         {/* Event grid or map */}
         {view === "list" ? (
           <EventGrid
-            events={filteredEvents}
+            events={sceneFilteredEvents}
             isLoading={isLoading}
             hasMore={hasMore}
             onLoadMore={loadMore}
@@ -212,7 +328,7 @@ function HomeContent() {
           />
         ) : (
           <EventsMap
-            events={filteredEvents}
+            events={sceneFilteredEvents}
             onEventClick={handleEventClick}
             className="h-[calc(100vh-200px)] rounded-xl"
           />

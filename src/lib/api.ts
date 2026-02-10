@@ -4,6 +4,27 @@ const API_KEY_STORAGE_KEY = "beemaps-api-key";
 const MAPBOX_TOKEN_STORAGE_KEY = "mapbox-token";
 const ANTHROPIC_KEY_STORAGE_KEY = "anthropic-api-key";
 const CAMERA_INTRINSICS_STORAGE_KEY = "camera-intrinsics";
+const SPEED_UNIT_STORAGE_KEY = "speed-unit";
+
+export type SpeedUnit = "mph" | "kmh";
+
+export function getSpeedUnit(): SpeedUnit {
+  if (typeof window === "undefined") return "mph";
+  return (localStorage.getItem(SPEED_UNIT_STORAGE_KEY) as SpeedUnit) || "mph";
+}
+
+export function setSpeedUnit(unit: SpeedUnit): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(SPEED_UNIT_STORAGE_KEY, unit);
+}
+
+export function convertSpeed(kmh: number, unit: SpeedUnit): number {
+  return unit === "mph" ? Math.round(kmh * 0.621371) : Math.round(kmh);
+}
+
+export function speedLabel(unit: SpeedUnit): string {
+  return unit === "mph" ? "mph" : "km/h";
+}
 
 export interface CameraIntrinsics {
   focal: number;

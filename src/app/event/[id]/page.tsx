@@ -41,10 +41,12 @@ import { AIEvent, GnssDataPoint, ImuDataPoint } from "@/types/events";
 import { EVENT_TYPE_CONFIG } from "@/lib/constants";
 import { getMapboxToken } from "@/lib/api";
 import { getApiKey } from "@/lib/api";
-import { getCameraIntrinsics, calculateFOV, DevicesResponse } from "@/lib/api";
+import { getCameraIntrinsics, calculateFOV, DevicesResponse, getSpeedUnit, SpeedUnit, speedLabel as getSpeedLabel } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { getTimeOfDay, getTimeOfDayStyle, TimeOfDay } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
+import { VideoAnalysisCard } from "@/components/events/video-analysis";
+import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
 
 function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -54,11 +56,6 @@ function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: numbe
     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function convertSpeedToUnit(speedMs: number, unit: string): number {
-  if (unit === "km/h" || unit === "kph") return speedMs * 3.6;
-  return speedMs * 2.237; // default mph
 }
 
 interface SpeedDataPoint {
@@ -267,14 +264,30 @@ function MetadataTable({ metadata }: MetadataTableProps) {
   );
 }
 
+function deriveSpeedFromGnss(gnssData: GnssDataPoint[]): SpeedDataPoint[] {
+  if (gnssData.length < 2) return [];
+  const result: SpeedDataPoint[] = [];
+  for (let i = 1; i < gnssData.length; i++) {
+    const prev = gnssData[i - 1];
+    const curr = gnssData[i];
+    const dt = (curr.timestamp - prev.timestamp) / 1000; // ms → s
+    if (dt <= 0) continue;
+    const dist = calculateDistance(prev.lat, prev.lon, curr.lat, curr.lon);
+    result.push({ AVG_SPEED_MS: dist / dt, TIMESTAMP: curr.timestamp });
+  }
+  return result;
+}
+
 function SpeedOverlay({
   speedData,
   currentTime,
   duration,
+  unit,
 }: {
   speedData: SpeedDataPoint[];
   currentTime: number;
   duration: number;
+  unit: SpeedUnit;
 }) {
   if (!speedData.length || duration <= 0) return null;
 
@@ -287,12 +300,13 @@ function SpeedOverlay({
   const speedMs =
     speedData[lowIndex].AVG_SPEED_MS * (1 - fraction) +
     speedData[highIndex].AVG_SPEED_MS * fraction;
-  const speedKmh = Math.round(speedMs * 3.6);
+  const speedKmh = speedMs * 3.6;
+  const displaySpeed = unit === "mph" ? Math.round(speedKmh * 0.621371) : Math.round(speedKmh);
 
   return (
-    <div className="absolute bottom-4 left-4 bg-black/60 backdrop-blur-sm text-white rounded-lg px-3 py-1.5 flex items-baseline gap-1 pointer-events-none">
-      <span className="font-mono text-lg font-bold">{speedKmh}</span>
-      <span className="text-xs text-white/70">km/h</span>
+    <div className="absolute top-4 left-4 bg-black/60 backdrop-blur-sm text-white rounded-lg px-3 py-1.5 flex items-baseline gap-1 pointer-events-none">
+      <span className="font-mono text-lg font-bold">{displaySpeed}</span>
+      <span className="text-xs text-white/70">{getSpeedLabel(unit)}</span>
     </div>
   );
 }
@@ -854,6 +868,11 @@ export default function EventDetailPage({
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
+
+  useEffect(() => {
+    setSpeedUnitState(getSpeedUnit());
+  }, []);
 
   // Track video playback time
   useEffect(() => {
@@ -892,7 +911,7 @@ export default function EventDetailPage({
       }
 
       try {
-        const response = await fetch(`/api/events/${id}?includeGnssData=true`, {
+        const response = await fetch(`/api/events/${id}?includeGnssData=true&includeImuData=true`, {
           headers: {
             Authorization: apiKey,
           },
@@ -1077,6 +1096,9 @@ export default function EventDetailPage({
   const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
   const IconComponent = config.icon;
   const speedData = event.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
+  const overlaySpeedData = speedData && speedData.length > 0
+    ? speedData
+    : event.gnssData ? deriveSpeedFromGnss(event.gnssData) : [];
   const maxSpeed = speedData
     ? Math.max(...speedData.map((s) => s.AVG_SPEED_MS))
     : null;
@@ -1118,11 +1140,12 @@ export default function EventDetailPage({
                       No video available
                     </div>
                   )}
-                  {speedData && speedData.length > 0 && (
+                  {overlaySpeedData.length > 0 && (
                     <SpeedOverlay
-                      speedData={speedData}
+                      speedData={overlaySpeedData}
                       currentTime={videoCurrentTime}
                       duration={videoDuration}
+                      unit={speedUnit}
                     />
                   )}
                 </div>
@@ -1290,43 +1313,18 @@ export default function EventDetailPage({
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {speedData && speedData.length > 0 ? (
-                  <>
-                    <div className="h-32 flex items-end gap-[2px]">
-                      {speedData.map((point, index) => {
-                        const heightPercent =
-                          maxSpeed && maxSpeed > 0
-                            ? (point.AVG_SPEED_MS / maxSpeed) * 100
-                            : 0;
-                        const speedInUnit = nearestSpeedLimit
-                          ? convertSpeedToUnit(point.AVG_SPEED_MS, nearestSpeedLimit.unit)
-                          : 0;
-                        const isViolation = nearestSpeedLimit && speedInUnit > nearestSpeedLimit.limit;
-                        return (
-                          <div
-                            key={index}
-                            className={cn(
-                              "flex-1 min-w-[3px] rounded-t transition-colors cursor-pointer",
-                              isViolation
-                                ? "bg-red-500/80 hover:bg-red-500"
-                                : "bg-primary/80 hover:bg-primary"
-                            )}
-                            style={{ height: `${Math.max(heightPercent, 2)}%` }}
-                            title={formatSpeed(point.AVG_SPEED_MS)}
-                          />
-                        );
-                      })}
-                    </div>
-                    <div className="flex justify-between text-xs text-muted-foreground mt-2">
-                      <span>Start</span>
-                      <span>End</span>
-                    </div>
-                  </>
-                ) : (
-                  <p className="text-sm text-muted-foreground py-4 text-center">
-                    No speed data available for this event
-                  </p>
-                )}
+                <SpeedProfileChart
+                  speedArray={speedData}
+                  gnssData={event.gnssData}
+                  imuData={event.imuData}
+                  currentTime={videoCurrentTime}
+                  duration={videoDuration}
+                  speedLimit={nearestSpeedLimit}
+                  unit={speedUnit}
+                  onSeek={(time) => {
+                    if (videoRef.current) videoRef.current.currentTime = time;
+                  }}
+                />
               </CardContent>
             </Card>
 
@@ -1385,6 +1383,9 @@ export default function EventDetailPage({
                 />
               </CardContent>
             </Card>
+
+            {/* Scene Analysis */}
+            {event.videoUrl && <VideoAnalysisCard eventId={id} />}
 
             {/* Positioning section */}
             <PositioningSection eventId={id} gnssData={event.gnssData} />

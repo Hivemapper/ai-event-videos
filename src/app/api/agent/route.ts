@@ -30,11 +30,17 @@ function createCirclePolygon(
 function getDefaultDates() {
   const end = new Date();
   const start = new Date();
-  start.setDate(start.getDate() - 7);
+  start.setDate(start.getDate() - 31);
   return {
-    startDate: start.toISOString().split("T")[0],
-    endDate: end.toISOString().split("T")[0],
+    startDate: start.toISOString(),
+    endDate: end.toISOString(),
   };
+}
+
+// Convert YYYY-MM-DD to full ISO datetime
+function toISO(date: string, end = false): string {
+  if (date.includes("T")) return date;
+  return end ? `${date}T23:59:59.999Z` : `${date}T00:00:00.000Z`;
 }
 
 export async function POST(
@@ -105,8 +111,8 @@ export async function POST(
       try {
         const defaults = getDefaultDates();
         const eventsRequest: AIEventsRequest = {
-          startDate: filters.startDate || defaults.startDate,
-          endDate: filters.endDate || defaults.endDate,
+          startDate: filters.startDate ? toISO(filters.startDate) : defaults.startDate,
+          endDate: filters.endDate ? toISO(filters.endDate, true) : defaults.endDate,
           types: filters.types,
           limit: 20,
         };
@@ -137,8 +143,12 @@ export async function POST(
             events: data.events || [],
             totalCount: data.pagination?.total || 0,
           });
+        } else {
+          const errText = await eventsResponse.text();
+          console.error("Agent Bee Maps API error:", eventsResponse.status, errText);
         }
-      } catch {
+      } catch (fetchError) {
+        console.error("Agent event fetch error:", fetchError);
         // If event fetching fails, still return filters without events
       }
     }

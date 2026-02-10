@@ -8,9 +8,17 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const response = await fetch(url);
+    const rangeHeader = request.headers.get("range");
 
-    if (!response.ok) {
+    // Forward range header to origin for seeking support
+    const fetchHeaders: HeadersInit = {};
+    if (rangeHeader) {
+      fetchHeaders["Range"] = rangeHeader;
+    }
+
+    const response = await fetch(url, { headers: fetchHeaders });
+
+    if (!response.ok && response.status !== 206) {
       return NextResponse.json(
         { error: `Failed to fetch video: ${response.status}` },
         { status: response.status }
@@ -19,9 +27,11 @@ export async function GET(request: NextRequest) {
 
     const contentType = response.headers.get("content-type") || "video/mp4";
     const contentLength = response.headers.get("content-length");
+    const contentRange = response.headers.get("content-range");
 
     const headers = new Headers({
       "Content-Type": contentType,
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, max-age=3600",
     });
 
@@ -29,8 +39,12 @@ export async function GET(request: NextRequest) {
       headers.set("Content-Length", contentLength);
     }
 
+    if (contentRange) {
+      headers.set("Content-Range", contentRange);
+    }
+
     return new NextResponse(response.body, {
-      status: 200,
+      status: response.status === 206 ? 206 : 200,
       headers,
     });
   } catch (error) {

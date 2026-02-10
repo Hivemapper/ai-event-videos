@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { Video } from "lucide-react";
+import { Settings, Video } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -67,9 +67,20 @@ export function Header({ children }: HeaderProps) {
             })}
           </nav>
         </div>
-        {children && (
-          <div className="flex items-center gap-2">{children}</div>
-        )}
+        <div className="flex items-center gap-2">
+          {children}
+          <Link
+            href="/settings"
+            className={cn(
+              "inline-flex items-center justify-center rounded-md h-9 w-9 transition-colors",
+              pathname.startsWith("/settings")
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted"
+            )}
+          >
+            <Settings className="w-4 h-4" />
+          </Link>
+        </div>
       </div>
     </header>
   );
