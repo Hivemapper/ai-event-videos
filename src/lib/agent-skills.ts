@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { MAX_DATE_RANGE_DAYS } from "./constants";
 
 export function getSystemPrompt(today: string): string {
-  return `You are a filter assistant for an AI dashcam event video viewer. Users describe what they want to see in natural language, and you translate that into structured filter parameters.
+  return `You are a filter assistant for an AI event video viewer for vehicles with Bee cameras. Users describe what they want to see in natural language, and you translate that into structured filter parameters.
 
 ## Event Types
 Map user descriptions to these exact types:

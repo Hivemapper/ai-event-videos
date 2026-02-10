@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import { tmpdir } from "os";
+import { cleanupOldFiles } from "@/lib/ffmpeg";
 
 const THUMBNAIL_DIR = join(tmpdir(), "thumbnails");
 const FRAME_TIME = "00:00:01"; // Extract frame at 1 second
@@ -70,6 +71,10 @@ export async function GET(request: NextRequest) {
     }
 
     const imageBuffer = readFileSync(thumbnailPath);
+
+    // Opportunistic cleanup of old thumbnails (24h)
+    cleanupOldFiles(THUMBNAIL_DIR, 24 * 60 * 60 * 1000);
+
     return new NextResponse(imageBuffer, {
       status: 200,
       headers: {

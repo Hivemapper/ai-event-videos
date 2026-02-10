@@ -21,7 +21,7 @@ export const highlightSections: HighlightSection[] = [
   {
     title: "Extreme Braking",
     description:
-      "Events with the largest speed drops — over 90 km/h of deceleration captured on dashcam.",
+      "Events with the largest speed drops — over 90 km/h of deceleration captured by Bee cameras.",
     events: [
       {
         id: "68693232d2b06edd1cd1ed9d",
@@ -148,7 +148,7 @@ export const highlightSections: HighlightSection[] = [
   {
     title: "High Speed",
     description:
-      "The fastest events recorded — vehicles clocked at over 150 km/h (93 mph) on dashcam.",
+      "The fastest events recorded — vehicles clocked at over 150 km/h (93 mph) by Bee cameras.",
     events: [
       {
         id: "68dc664cd8529a85cffaacc2",

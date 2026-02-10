@@ -1,4 +1,5 @@
 import { AIEventsRequest, AIEventsResponse } from "@/types/events";
+import { fetchWithRetry } from "@/lib/fetch-retry";
 
 const API_KEY_STORAGE_KEY = "beemaps-api-key";
 const MAPBOX_TOKEN_STORAGE_KEY = "mapbox-token";
@@ -50,10 +51,10 @@ export interface DevicesResponse {
   bee: CameraIntrinsics;
 }
 
-// Calculate horizontal FOV from normalized focal length
-export function calculateFOV(focal: number): number {
-  return 2 * Math.atan(0.5 / focal) * (180 / Math.PI);
-}
+// Bee camera horizontal FOV (degrees) — manufacturer spec.
+// The normalized focal length from /devices is for the distortion model,
+// not suitable for a simple pinhole FOV calculation.
+export const BEE_HFOV = 142;
 
 export function getApiKey(): string | null {
   if (typeof window === "undefined") return null;
@@ -139,7 +140,7 @@ export async function fetchEvents(
     throw new Error("API key is required. Please configure your API key in settings.");
   }
 
-  const response = await fetch("/api/events", {
+  const response = await fetchWithRetry("/api/events", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

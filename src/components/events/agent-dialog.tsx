@@ -3,13 +3,11 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import {
-  Sparkles,
   Send,
   Loader2,
   AlertCircle,
   Key,
   Check,
-  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,12 +41,11 @@ function formatRelativeTime(timestamp: string): string {
 
 function EventResult({ event }: { event: AIEvent }) {
   const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
-  const Icon = config.icon;
 
   return (
     <Link
       href={`/event/${event.id}`}
-      className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-muted/50 transition-colors group"
+      className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-muted/50 transition-colors"
     >
       <Badge
         className={cn(
@@ -60,7 +57,6 @@ function EventResult({ event }: { event: AIEvent }) {
         )}
         variant="outline"
       >
-        <Icon className="w-3 h-3 mr-1" />
         {config.label}
       </Badge>
       <span className="text-xs text-muted-foreground">
@@ -69,7 +65,6 @@ function EventResult({ event }: { event: AIEvent }) {
       <span className="text-xs text-muted-foreground hidden sm:inline">
         {event.location.lat.toFixed(2)}, {event.location.lon.toFixed(2)}
       </span>
-      <ExternalLink className="w-3 h-3 ml-auto text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
     </Link>
   );
 }
@@ -182,13 +177,10 @@ export function AgentView() {
           {/* Empty state */}
           {!hasMessages && !isLoading && !needsKey && (
             <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-6 text-center">
-              <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
-                <Sparkles className="w-8 h-8 text-muted-foreground" />
-              </div>
               <div className="space-y-2">
                 <p className="text-lg font-medium">Ask me about events</p>
                 <p className="text-sm text-muted-foreground">
-                  Describe what you&apos;re looking for and I&apos;ll find matching dashcam events.
+                  Describe what you&apos;re looking for and I&apos;ll find matching events.
                 </p>
               </div>
               <div className="flex flex-wrap gap-2 justify-center max-w-md">

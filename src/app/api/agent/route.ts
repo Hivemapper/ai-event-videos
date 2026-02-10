@@ -4,28 +4,8 @@ import { getSystemPrompt, FILTER_TOOL } from "@/lib/agent-skills";
 import { AgentFilterResponse, AgentApiResult } from "@/types/agent";
 import { AIEventsRequest } from "@/types/events";
 import { API_BASE_URL } from "@/lib/constants";
-
-function createCirclePolygon(
-  lat: number,
-  lon: number,
-  radiusMeters: number,
-  numPoints = 32
-): [number, number][] {
-  const coords: [number, number][] = [];
-  const earthRadius = 6371000;
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = (i / numPoints) * 2 * Math.PI;
-    const dLat = (radiusMeters / earthRadius) * Math.cos(angle);
-    const dLon =
-      (radiusMeters / (earthRadius * Math.cos((lat * Math.PI) / 180))) *
-      Math.sin(angle);
-    coords.push([
-      lon + (dLon * 180) / Math.PI,
-      lat + (dLat * 180) / Math.PI,
-    ]);
-  }
-  return coords;
-}
+import { createCirclePolygon } from "@/lib/geo-utils";
+import { agentQuerySchema } from "@/lib/schemas";
 
 function getDefaultDates() {
   const end = new Date();
@@ -50,20 +30,20 @@ export async function POST(
   let clientApiKey: string | undefined;
   let beemapsApiKey: string | undefined;
   try {
-    const body = await request.json();
-    query = body.query;
-    clientApiKey = body.apiKey;
-    beemapsApiKey = body.beemapsApiKey;
+    const raw = await request.json();
+    const parsed = agentQuerySchema.safeParse(raw);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: parsed.error.issues.map((i) => i.message).join(", ") },
+        { status: 400 }
+      );
+    }
+    query = parsed.data.query;
+    clientApiKey = parsed.data.apiKey;
+    beemapsApiKey = parsed.data.beemapsApiKey;
   } catch {
     return NextResponse.json(
       { success: false, error: "Invalid request body" },
-      { status: 400 }
-    );
-  }
-
-  if (!query || typeof query !== "string" || query.trim().length === 0) {
-    return NextResponse.json(
-      { success: false, error: "Query is required" },
       { status: 400 }
     );
   }

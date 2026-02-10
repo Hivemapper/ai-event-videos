@@ -1,850 +1,128 @@
 "use client";
 
-import { useEffect, useState, use, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, use, useRef, useCallback } from "react";
 import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import {
   ArrowLeft,
-  MapPin,
-  Clock,
-  Activity,
-  Gauge,
-  ExternalLink,
-  ArrowUpDown,
-  ArrowUp,
-  ArrowDown,
-  Copy,
   Check,
-  Camera,
   Download,
   Loader2,
-  Octagon,
-  CircleGauge,
-  Tag,
-  Sun,
-  Moon,
-  Sunrise,
-  Sunset,
-  Route,
-  Satellite,
-  ChevronDown,
-  ChevronUp,
-  Navigation,
-  RotateCw,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Skeleton } from "@/components/ui/skeleton";
-import { EventMap } from "@/components/map/event-map";
-import { AIEvent, GnssDataPoint, ImuDataPoint } from "@/types/events";
+import dynamic from "next/dynamic";
+
+const EventMap = dynamic(
+  () => import("@/components/map/event-map").then((m) => m.EventMap),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="aspect-video" />,
+  }
+);
 import { EVENT_TYPE_CONFIG } from "@/lib/constants";
-import { getMapboxToken } from "@/lib/api";
-import { getApiKey } from "@/lib/api";
-import { getCameraIntrinsics, calculateFOV, DevicesResponse, getSpeedUnit, SpeedUnit, speedLabel as getSpeedLabel } from "@/lib/api";
+import { getCameraIntrinsics, BEE_HFOV, DevicesResponse, getSpeedUnit, SpeedUnit } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { getTimeOfDay, getTimeOfDayStyle, TimeOfDay } from "@/lib/sun";
+import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
+import { useActorDetection } from "@/hooks/use-actor-detection";
+import { useActorTracking } from "@/hooks/use-actor-tracking";
+import { useEventDetail, useCountryName, useNearestSpeedLimit } from "@/hooks/use-event-detail";
 import { VideoAnalysisCard } from "@/components/events/video-analysis";
 import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
+import { MetadataTable } from "@/components/events/metadata-table";
+import { FrameLabeling } from "@/components/events/frame-labeling";
+import { PositioningSection } from "@/components/events/positioning-section";
+import { SpeedOverlay } from "@/components/events/speed-overlay";
+import { ActorControls } from "@/components/events/actor-controls";
+import { calculateBearing } from "@/lib/geo-projection";
+import {
+  SpeedDataPoint,
+  formatDateTime,
+  formatCoordinates,
+  formatSpeed,
+  getProxyVideoUrl,
+  deriveSpeedFromGnss,
+} from "@/lib/event-helpers";
 
-function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371000;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+const COUNTRY_FLAGS: Record<string, string> = {
+  "United States": "\u{1F1FA}\u{1F1F8}",
+  "United Kingdom": "\u{1F1EC}\u{1F1E7}",
+  Canada: "\u{1F1E8}\u{1F1E6}",
+  Mexico: "\u{1F1F2}\u{1F1FD}",
+  Germany: "\u{1F1E9}\u{1F1EA}",
+  France: "\u{1F1EB}\u{1F1F7}",
+  Italy: "\u{1F1EE}\u{1F1F9}",
+  Spain: "\u{1F1EA}\u{1F1F8}",
+  Portugal: "\u{1F1F5}\u{1F1F9}",
+  Brazil: "\u{1F1E7}\u{1F1F7}",
+  Japan: "\u{1F1EF}\u{1F1F5}",
+  Australia: "\u{1F1E6}\u{1F1FA}",
+  Austria: "\u{1F1E6}\u{1F1F9}",
+  Belgium: "\u{1F1E7}\u{1F1EA}",
+  Poland: "\u{1F1F5}\u{1F1F1}",
+  Slovenia: "\u{1F1F8}\u{1F1EE}",
+  Serbia: "\u{1F1F7}\u{1F1F8}",
+  Taiwan: "\u{1F1F9}\u{1F1FC}",
+  India: "\u{1F1EE}\u{1F1F3}",
+  China: "\u{1F1E8}\u{1F1F3}",
+  Netherlands: "\u{1F1F3}\u{1F1F1}",
+  Switzerland: "\u{1F1E8}\u{1F1ED}",
+  Sweden: "\u{1F1F8}\u{1F1EA}",
+  Norway: "\u{1F1F3}\u{1F1F4}",
+  Denmark: "\u{1F1E9}\u{1F1F0}",
+  Finland: "\u{1F1EB}\u{1F1EE}",
+  Ireland: "\u{1F1EE}\u{1F1EA}",
+  "South Korea": "\u{1F1F0}\u{1F1F7}",
+  "New Zealand": "\u{1F1F3}\u{1F1FF}",
+  Argentina: "\u{1F1E6}\u{1F1F7}",
+  Colombia: "\u{1F1E8}\u{1F1F4}",
+  Chile: "\u{1F1E8}\u{1F1F1}",
+  Peru: "\u{1F1F5}\u{1F1EA}",
+  "South Africa": "\u{1F1FF}\u{1F1E6}",
+  Thailand: "\u{1F1F9}\u{1F1ED}",
+  Indonesia: "\u{1F1EE}\u{1F1E9}",
+  Philippines: "\u{1F1F5}\u{1F1ED}",
+  Turkey: "\u{1F1F9}\u{1F1F7}",
+  Greece: "\u{1F1EC}\u{1F1F7}",
+  "Czech Republic": "\u{1F1E8}\u{1F1FF}",
+  Czechia: "\u{1F1E8}\u{1F1FF}",
+  Romania: "\u{1F1F7}\u{1F1F4}",
+  Hungary: "\u{1F1ED}\u{1F1FA}",
+  Israel: "\u{1F1EE}\u{1F1F1}",
+  "United Arab Emirates": "\u{1F1E6}\u{1F1EA}",
+  Singapore: "\u{1F1F8}\u{1F1EC}",
+  Malaysia: "\u{1F1F2}\u{1F1FE}",
+  Vietnam: "\u{1F1FB}\u{1F1F3}",
+  Croatia: "\u{1F1ED}\u{1F1F7}",
+};
+
+function countryFlag(name: string): string {
+  return COUNTRY_FLAGS[name] ?? "";
 }
 
-interface SpeedDataPoint {
-  AVG_SPEED_MS: number;
-  TIMESTAMP: number;
-}
-
-interface LabeledFeature {
-  class: string;
-  distance: number;
-  position: { lat: number; lon: number };
-  speedLimit?: number;
-  unit?: string;
-}
-
-interface LabeledFrameData {
-  frame: {
-    url: string;
-    timestamp: number;
-    width: number;
-  };
-  location: {
-    lat: number;
-    lon: number;
-  };
-  features: LabeledFeature[];
-  event: {
-    id: string;
-    type: string;
-    timestamp: string;
-    videoUrl: string;
-  };
-}
-
-function formatDateTime(timestamp: string): string {
-  const date = new Date(timestamp);
-  return date.toLocaleString();
-}
-
-function formatCoordinates(lat: number, lon: number): string {
-  return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
-}
-
-function formatSpeed(speedMs: number): string {
-  const mph = speedMs * 2.237;
-  return `${mph.toFixed(1)} mph`;
-}
-
-function formatTimestamp(timestamp: number): string {
-  const date = new Date(timestamp);
-  return date.toLocaleTimeString();
-}
-
-function getTimeOfDayIcon(timeOfDay: TimeOfDay) {
-  switch (timeOfDay) {
-    case "Day":
-      return Sun;
-    case "Dawn":
-      return Sunrise;
-    case "Dusk":
-      return Sunset;
-    case "Night":
-      return Moon;
-  }
-}
-
-type SortDirection = "asc" | "desc" | null;
-type SortColumn = "speed" | "timestamp" | null;
-
-interface MetadataTableProps {
-  metadata: Record<string, unknown>;
-}
-
-function MetadataTable({ metadata }: MetadataTableProps) {
-  const [sortColumn, setSortColumn] = useState<SortColumn>(null);
-  const [sortDirection, setSortDirection] = useState<SortDirection>(null);
-
-  const speedData = metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
-  const acceleration = metadata?.ACCELERATION_MS2 as number | undefined;
-
-  const sortedSpeedData = useMemo(() => {
-    if (!speedData) return [];
-    if (!sortColumn || !sortDirection) return speedData;
-
-    return [...speedData].sort((a, b) => {
-      let comparison = 0;
-      if (sortColumn === "speed") {
-        comparison = a.AVG_SPEED_MS - b.AVG_SPEED_MS;
-      } else if (sortColumn === "timestamp") {
-        comparison = a.TIMESTAMP - b.TIMESTAMP;
-      }
-      return sortDirection === "asc" ? comparison : -comparison;
-    });
-  }, [speedData, sortColumn, sortDirection]);
-
-  const handleSort = (column: SortColumn) => {
-    if (sortColumn === column) {
-      if (sortDirection === "asc") {
-        setSortDirection("desc");
-      } else if (sortDirection === "desc") {
-        setSortColumn(null);
-        setSortDirection(null);
-      }
-    } else {
-      setSortColumn(column);
-      setSortDirection("asc");
-    }
-  };
-
-  const SortIcon = ({ column }: { column: SortColumn }) => {
-    if (sortColumn !== column) {
-      return <ArrowUpDown className="w-3 h-3 ml-1 opacity-50" />;
-    }
-    if (sortDirection === "asc") {
-      return <ArrowUp className="w-3 h-3 ml-1" />;
-    }
-    return <ArrowDown className="w-3 h-3 ml-1" />;
-  };
-
-  // Get other metadata fields (not SPEED_ARRAY)
-  const otherFields = Object.entries(metadata).filter(
-    ([key]) => key !== "SPEED_ARRAY"
-  );
-
-  return (
-    <div className="space-y-4">
-      {/* Other metadata fields */}
-      {otherFields.length > 0 && (
-        <div className="overflow-hidden rounded-lg border">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50">
-              <tr>
-                <th className="px-4 py-2 text-left font-medium">Field</th>
-                <th className="px-4 py-2 text-left font-medium">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {otherFields.map(([key, value]) => (
-                <tr key={key} className="border-t">
-                  <td className="px-4 py-2 font-mono text-muted-foreground">
-                    {key}
-                  </td>
-                  <td className="px-4 py-2">
-                    {typeof value === "number"
-                      ? key.includes("SPEED")
-                        ? formatSpeed(value)
-                        : key.includes("ACCELERATION")
-                        ? `${value.toFixed(3)} m/s²`
-                        : value.toFixed(4)
-                      : String(value)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Speed array table */}
-      {sortedSpeedData.length > 0 && (
-        <div>
-          <h4 className="text-sm font-medium mb-2">Speed Data ({sortedSpeedData.length} points)</h4>
-          <div className="overflow-hidden rounded-lg border max-h-64 overflow-y-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/50 sticky top-0">
-                <tr>
-                  <th className="px-4 py-2 text-left font-medium">#</th>
-                  <th
-                    className="px-4 py-2 text-left font-medium cursor-pointer hover:bg-muted/70 select-none"
-                    onClick={() => handleSort("speed")}
-                  >
-                    <span className="flex items-center">
-                      Speed
-                      <SortIcon column="speed" />
-                    </span>
-                  </th>
-                  <th
-                    className="px-4 py-2 text-left font-medium cursor-pointer hover:bg-muted/70 select-none"
-                    onClick={() => handleSort("timestamp")}
-                  >
-                    <span className="flex items-center">
-                      Timestamp
-                      <SortIcon column="timestamp" />
-                    </span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedSpeedData.map((point, index) => (
-                  <tr key={index} className="border-t hover:bg-muted/30">
-                    <td className="px-4 py-2 text-muted-foreground">{index + 1}</td>
-                    <td className="px-4 py-2 font-mono">
-                      {formatSpeed(point.AVG_SPEED_MS)}
-                    </td>
-                    <td className="px-4 py-2 font-mono text-muted-foreground">
-                      {formatTimestamp(point.TIMESTAMP)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function deriveSpeedFromGnss(gnssData: GnssDataPoint[]): SpeedDataPoint[] {
-  if (gnssData.length < 2) return [];
-  const result: SpeedDataPoint[] = [];
-  for (let i = 1; i < gnssData.length; i++) {
-    const prev = gnssData[i - 1];
-    const curr = gnssData[i];
-    const dt = (curr.timestamp - prev.timestamp) / 1000; // ms → s
-    if (dt <= 0) continue;
-    const dist = calculateDistance(prev.lat, prev.lon, curr.lat, curr.lon);
-    result.push({ AVG_SPEED_MS: dist / dt, TIMESTAMP: curr.timestamp });
-  }
-  return result;
-}
-
-function SpeedOverlay({
-  speedData,
-  currentTime,
-  duration,
-  unit,
+function CollapsibleSection({
+  title,
+  children,
+  defaultOpen = false,
 }: {
-  speedData: SpeedDataPoint[];
-  currentTime: number;
-  duration: number;
-  unit: SpeedUnit;
+  title: string;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
 }) {
-  if (!speedData.length || duration <= 0) return null;
-
-  const progress = Math.min(Math.max(currentTime / duration, 0), 1);
-  const exactIndex = progress * (speedData.length - 1);
-  const lowIndex = Math.floor(exactIndex);
-  const highIndex = Math.min(lowIndex + 1, speedData.length - 1);
-  const fraction = exactIndex - lowIndex;
-
-  const speedMs =
-    speedData[lowIndex].AVG_SPEED_MS * (1 - fraction) +
-    speedData[highIndex].AVG_SPEED_MS * fraction;
-  const speedKmh = speedMs * 3.6;
-  const displaySpeed = unit === "mph" ? Math.round(speedKmh * 0.621371) : Math.round(speedKmh);
-
+  const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="absolute top-4 left-4 bg-black/60 backdrop-blur-sm text-white rounded-lg px-3 py-1.5 flex items-baseline gap-1 pointer-events-none">
-      <span className="font-mono text-lg font-bold">{displaySpeed}</span>
-      <span className="text-xs text-white/70">{getSpeedLabel(unit)}</span>
-    </div>
-  );
-}
-
-function getProxyVideoUrl(url: string): string {
-  return `/api/video?url=${encodeURIComponent(url)}`;
-}
-
-function formatVideoTimestamp(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 100);
-  return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
-}
-
-function getFeatureIcon(className: string) {
-  if (className.toLowerCase().includes("stop")) {
-    return Octagon;
-  }
-  if (className.toLowerCase().includes("speed")) {
-    return CircleGauge;
-  }
-  return Tag;
-}
-
-function getFeatureColor(className: string) {
-  if (className.toLowerCase().includes("stop")) {
-    return "text-red-600 bg-red-50 border-red-200";
-  }
-  if (className.toLowerCase().includes("speed")) {
-    return "text-blue-600 bg-blue-50 border-blue-200";
-  }
-  return "text-gray-600 bg-gray-50 border-gray-200";
-}
-
-interface FrameLabelingProps {
-  event: AIEvent;
-  videoRef: React.RefObject<HTMLVideoElement | null>;
-}
-
-function FrameLabeling({ event, videoRef }: FrameLabelingProps) {
-  const [timestamp, setTimestamp] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(10);
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [labeledData, setLabeledData] = useState<LabeledFrameData | null>(null);
-  const [frameUrl, setFrameUrl] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  // Sync timestamp with video
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const handleTimeUpdate = () => {
-      setTimestamp(video.currentTime);
-    };
-
-    const handleLoadedMetadata = () => {
-      setVideoDuration(video.duration || 10);
-    };
-
-    video.addEventListener("timeupdate", handleTimeUpdate);
-    video.addEventListener("loadedmetadata", handleLoadedMetadata);
-
-    // Set initial duration if already loaded
-    if (video.duration) {
-      setVideoDuration(video.duration);
-    }
-
-    return () => {
-      video.removeEventListener("timeupdate", handleTimeUpdate);
-      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-    };
-  }, [videoRef]);
-
-  const handleSliderChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const newTime = parseFloat(e.target.value);
-      setTimestamp(newTime);
-      if (videoRef.current) {
-        videoRef.current.currentTime = newTime;
-      }
-    },
-    [videoRef]
-  );
-
-  const extractFrame = async () => {
-    setIsExtracting(true);
-    setError(null);
-
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      setError("API key not configured");
-      setIsExtracting(false);
-      return;
-    }
-
-    try {
-      const response = await fetch(
-        `/api/labeled-frame?eventId=${event.id}&timestamp=${timestamp}&width=1280&radius=100`,
-        {
-          headers: {
-            Authorization: apiKey,
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Failed to extract labeled frame");
-      }
-
-      const data: LabeledFrameData = await response.json();
-      setLabeledData(data);
-      setFrameUrl(data.frame.url);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to extract frame");
-    } finally {
-      setIsExtracting(false);
-    }
-  };
-
-  const exportLabeledPair = async () => {
-    if (!labeledData || !frameUrl) return;
-
-    // Create labels.json
-    const labels = {
-      image: "frame.jpg",
-      features: labeledData.features.map((f) => ({
-        class: f.class,
-        distance_m: f.distance,
-        ...(f.speedLimit && { speed_limit: f.speedLimit }),
-      })),
-    };
-
-    // Create metadata.json
-    const metadata = {
-      event_id: labeledData.event.id,
-      event_type: labeledData.event.type,
-      event_timestamp: labeledData.event.timestamp,
-      frame_timestamp: labeledData.frame.timestamp,
-      location: labeledData.location,
-      exported_at: new Date().toISOString(),
-    };
-
-    // Download labels.json
-    const labelsBlob = new Blob([JSON.stringify(labels, null, 2)], {
-      type: "application/json",
-    });
-    const labelsUrl = URL.createObjectURL(labelsBlob);
-    const labelsLink = document.createElement("a");
-    labelsLink.href = labelsUrl;
-    labelsLink.download = `event_${event.id}_t${timestamp.toFixed(1)}_labels.json`;
-    labelsLink.click();
-    URL.revokeObjectURL(labelsUrl);
-
-    // Download metadata.json
-    const metadataBlob = new Blob([JSON.stringify(metadata, null, 2)], {
-      type: "application/json",
-    });
-    const metadataUrl = URL.createObjectURL(metadataBlob);
-    const metadataLink = document.createElement("a");
-    metadataLink.href = metadataUrl;
-    metadataLink.download = `event_${event.id}_t${timestamp.toFixed(1)}_metadata.json`;
-    metadataLink.click();
-    URL.revokeObjectURL(metadataUrl);
-
-    // Download frame image
-    const frameLink = document.createElement("a");
-    frameLink.href = frameUrl;
-    frameLink.download = `event_${event.id}_t${timestamp.toFixed(1)}_frame.jpg`;
-    frameLink.click();
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Camera className="w-5 h-5" />
-          Frame Labeling
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Timestamp slider */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-muted-foreground">Timestamp</span>
-            <span className="font-mono">{formatVideoTimestamp(timestamp)}</span>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max={videoDuration}
-            step="0.1"
-            value={timestamp}
-            onChange={handleSliderChange}
-            className="w-full h-2 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
-          />
-          <div className="flex justify-between text-xs text-muted-foreground">
-            <span>0:00</span>
-            <span>{formatVideoTimestamp(videoDuration)}</span>
-          </div>
-        </div>
-
-        {/* Extract button */}
-        <Button
-          onClick={extractFrame}
-          disabled={isExtracting}
-          className="w-full"
-        >
-          {isExtracting ? (
-            <>
-              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Extracting...
-            </>
-          ) : (
-            <>
-              <Camera className="w-4 h-4 mr-2" />
-              Extract Frame & Get Labels
-            </>
-          )}
-        </Button>
-
-        {error && (
-          <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">
-            {error}
-          </div>
-        )}
-
-        {/* Extracted frame display */}
-        {frameUrl && (
-          <div className="space-y-3">
-            <div className="relative rounded-lg overflow-hidden border bg-black">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={frameUrl}
-                alt={`Frame at ${formatVideoTimestamp(timestamp)}`}
-                className="w-full"
-              />
-            </div>
-
-            {/* Labels display */}
-            {labeledData && (
-              <div className="space-y-2">
-                <h4 className="text-sm font-medium">
-                  Nearby Map Features ({labeledData.features.length})
-                </h4>
-                {labeledData.features.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No map features found within 100m
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {labeledData.features.map((feature, index) => {
-                      const Icon = getFeatureIcon(feature.class);
-                      const colorClass = getFeatureColor(feature.class);
-                      return (
-                        <div
-                          key={index}
-                          className={cn(
-                            "flex items-center justify-between p-2 rounded-lg border",
-                            colorClass
-                          )}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Icon className="w-4 h-4" />
-                            <span className="font-medium">{feature.class}</span>
-                            {feature.speedLimit && (
-                              <Badge variant="secondary" className="text-xs">
-                                {feature.speedLimit} {feature.unit || "mph"}
-                              </Badge>
-                            )}
-                          </div>
-                          <span className="text-sm">{feature.distance}m</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Export button */}
-            <Button
-              variant="outline"
-              onClick={exportLabeledPair}
-              className="w-full"
-            >
-              <Download className="w-4 h-4 mr-2" />
-              Export Labeled Pair
-            </Button>
-          </div>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-interface PositioningSectionProps {
-  eventId: string;
-  gnssData?: GnssDataPoint[];
-}
-
-function PositioningSection({ eventId, gnssData }: PositioningSectionProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const [imuData, setImuData] = useState<ImuDataPoint[] | null>(null);
-  const [isLoadingImu, setIsLoadingImu] = useState(false);
-  const [imuError, setImuError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"gnss" | "imu">("gnss");
-
-  const fetchImuData = async () => {
-    if (imuData) return; // Already loaded
-
-    setIsLoadingImu(true);
-    setImuError(null);
-
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      setImuError("API key not configured");
-      setIsLoadingImu(false);
-      return;
-    }
-
-    try {
-      const response = await fetch(
-        `/api/events/${eventId}?includeImuData=true`,
-        {
-          headers: {
-            Authorization: apiKey,
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || "Failed to fetch IMU data");
-      }
-
-      const data = await response.json();
-      setImuData(data.imuData || []);
-    } catch (err) {
-      setImuError(err instanceof Error ? err.message : "Failed to load IMU data");
-    } finally {
-      setIsLoadingImu(false);
-    }
-  };
-
-  const handleExpand = () => {
-    setIsExpanded(!isExpanded);
-  };
-
-  const handleTabChange = (tab: "gnss" | "imu") => {
-    setActiveTab(tab);
-    if (tab === "imu" && !imuData && !isLoadingImu) {
-      fetchImuData();
-    }
-  };
-
-  const formatAltitude = (alt: number) => `${alt.toFixed(1)}m`;
-  const formatAccel = (val: number) => `${val.toFixed(3)} m/s²`;
-  const formatGyro = (val: number) => `${val.toFixed(4)} rad/s`;
-
-  return (
-    <Card>
-      <CardHeader
-        className="cursor-pointer select-none"
-        onClick={handleExpand}
-      >
-        <CardTitle className="text-lg flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Satellite className="w-5 h-5" />
-            Positioning
-            {gnssData && (
-              <Badge variant="secondary" className="text-xs">
-                {gnssData.length} GNSS points
-              </Badge>
-            )}
-          </div>
-          {isExpanded ? (
-            <ChevronUp className="w-5 h-5 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="w-5 h-5 text-muted-foreground" />
-          )}
-        </CardTitle>
-      </CardHeader>
-
-      {isExpanded && (
-        <CardContent className="space-y-4">
-          {/* Tab buttons */}
-          <div className="flex gap-2">
-            <Button
-              variant={activeTab === "gnss" ? "default" : "outline"}
-              size="sm"
-              onClick={() => handleTabChange("gnss")}
-              className="flex items-center gap-2"
-            >
-              <Navigation className="w-4 h-4" />
-              GNSS Data
-            </Button>
-            <Button
-              variant={activeTab === "imu" ? "default" : "outline"}
-              size="sm"
-              onClick={() => handleTabChange("imu")}
-              className="flex items-center gap-2"
-            >
-              <RotateCw className="w-4 h-4" />
-              IMU Data
-              {isLoadingImu && <Loader2 className="w-3 h-3 animate-spin" />}
-            </Button>
-          </div>
-
-          {/* GNSS Tab */}
-          {activeTab === "gnss" && (
-            <div>
-              {gnssData && gnssData.length > 0 ? (
-                <div className="overflow-hidden rounded-lg border max-h-80 overflow-y-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/50 sticky top-0">
-                      <tr>
-                        <th className="px-3 py-2 text-left font-medium">#</th>
-                        <th className="px-3 py-2 text-left font-medium">Latitude</th>
-                        <th className="px-3 py-2 text-left font-medium">Longitude</th>
-                        <th className="px-3 py-2 text-left font-medium">Altitude</th>
-                        <th className="px-3 py-2 text-left font-medium">Time</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {gnssData.map((point, index) => (
-                        <tr key={index} className="border-t hover:bg-muted/30">
-                          <td className="px-3 py-2 text-muted-foreground">{index + 1}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{point.lat.toFixed(6)}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{point.lon.toFixed(6)}</td>
-                          <td className="px-3 py-2 font-mono text-xs">{formatAltitude(point.alt)}</td>
-                          <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
-                            {formatTimestamp(point.timestamp)}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground py-4 text-center">
-                  No GNSS data available for this event
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* IMU Tab */}
-          {activeTab === "imu" && (
-            <div>
-              {imuError && (
-                <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg mb-4">
-                  {imuError}
-                </div>
-              )}
-
-              {isLoadingImu && (
-                <div className="flex items-center justify-center py-8">
-                  <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
-                  <span className="ml-2 text-muted-foreground">Loading IMU data...</span>
-                </div>
-              )}
-
-              {!isLoadingImu && imuData && imuData.length > 0 && (
-                <div className="overflow-hidden rounded-lg border max-h-80 overflow-y-auto">
-                  <table className="w-full text-sm">
-                    <thead className="bg-muted/50 sticky top-0">
-                      <tr>
-                        <th className="px-2 py-2 text-left font-medium">#</th>
-                        <th className="px-2 py-2 text-left font-medium" colSpan={3}>
-                          Accelerometer (m/s²)
-                        </th>
-                        <th className="px-2 py-2 text-left font-medium" colSpan={3}>
-                          Gyroscope (rad/s)
-                        </th>
-                        <th className="px-2 py-2 text-left font-medium">Time</th>
-                      </tr>
-                      <tr className="bg-muted/30">
-                        <th className="px-2 py-1"></th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">X</th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">Y</th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">Z</th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">X</th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">Y</th>
-                        <th className="px-2 py-1 text-xs font-normal text-muted-foreground">Z</th>
-                        <th className="px-2 py-1"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {imuData.map((point, index) => (
-                        <tr key={index} className="border-t hover:bg-muted/30">
-                          <td className="px-2 py-2 text-muted-foreground">{index + 1}</td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.accelerometer ? formatAccel(point.accelerometer.x) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.accelerometer ? formatAccel(point.accelerometer.y) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.accelerometer ? formatAccel(point.accelerometer.z) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.gyroscope ? formatGyro(point.gyroscope.x) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.gyroscope ? formatGyro(point.gyroscope.y) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs">
-                            {point.gyroscope ? formatGyro(point.gyroscope.z) : "-"}
-                          </td>
-                          <td className="px-2 py-2 font-mono text-xs text-muted-foreground">
-                            {point.timestamp ? formatTimestamp(point.timestamp) : "-"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {!isLoadingImu && imuData && imuData.length === 0 && (
-                <p className="text-sm text-muted-foreground py-4 text-center">
-                  No IMU data available for this event
-                </p>
-              )}
-
-              {!isLoadingImu && !imuData && !imuError && (
-                <p className="text-sm text-muted-foreground py-4 text-center">
-                  Click to load IMU data
-                </p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      )}
-    </Card>
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger className="flex items-center gap-2 w-full py-2 text-sm font-medium hover:text-foreground transition-colors text-muted-foreground">
+        <ChevronRight className={cn("w-4 h-4 transition-transform", open && "rotate-90")} />
+        {title}
+      </CollapsibleTrigger>
+      <CollapsibleContent>{children}</CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -854,17 +132,21 @@ export default function EventDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const [event, setEvent] = useState<AIEvent | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [countryName, setCountryName] = useState<string | null>(null);
+  const { data: event, error: eventError, isLoading } = useEventDetail(id);
+  const error = eventError?.message ?? null;
+  const { data: countryName = null } = useCountryName(
+    event?.location.lat ?? null,
+    event?.location.lon ?? null
+  );
+  const { data: nearestSpeedLimit = null } = useNearestSpeedLimit(
+    event?.location.lat ?? null,
+    event?.location.lon ?? null
+  );
   const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
+  const [videoContainerHeight, setVideoContainerHeight] = useState<number | null>(null);
   const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
-  const [nearestSpeedLimit, setNearestSpeedLimit] = useState<{
-    limit: number;
-    unit: string;
-  } | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -872,6 +154,17 @@ export default function EventDetailPage({
 
   useEffect(() => {
     setSpeedUnitState(getSpeedUnit());
+  }, []);
+
+  // Measure video container height to sync map height
+  useEffect(() => {
+    const el = videoContainerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => {
+      setVideoContainerHeight(entry.contentRect.height);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, []);
 
   // Track video playback time
@@ -901,142 +194,103 @@ export default function EventDetailPage({
     };
   }, [event]); // Re-run when event loads (video element gets src)
 
-  useEffect(() => {
-    async function fetchEvent() {
-      const apiKey = getApiKey();
-      if (!apiKey) {
-        setError("API key not configured");
-        setIsLoading(false);
-        return;
-      }
-
-      try {
-        const response = await fetch(`/api/events/${id}?includeGnssData=true&includeImuData=true`, {
-          headers: {
-            Authorization: apiKey,
-          },
-        });
-
-        if (!response.ok) {
-          const data = await response.json();
-          throw new Error(data.error || "Failed to fetch event");
-        }
-
-        const data = await response.json();
-        setEvent(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load event");
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
-    fetchEvent();
-  }, [id]);
-
   // Load camera intrinsics from localStorage
   useEffect(() => {
     const intrinsics = getCameraIntrinsics();
     setCameraIntrinsics(intrinsics);
   }, []);
 
-  // Fetch road type from Mapbox
+  // Fetch road type from Mapbox (samples multiple GNSS points for accuracy)
   const { roadType, isLoading: roadTypeLoading } = useRoadType(
     event?.location.lat ?? null,
-    event?.location.lon ?? null
+    event?.location.lon ?? null,
+    event?.gnssData
   );
 
-  // Fetch country name using Mapbox geocoding
-  useEffect(() => {
-    if (!event) return;
+  // Actor detection
+  const { actors: detectedActors, isDetecting, error: actorError, detect: detectActors, clear: clearActors } = useActorDetection();
 
-    const fetchCountry = async () => {
-      const token = getMapboxToken();
-      if (!token) return;
+  // Actor tracking
+  const { trackingResult, isTracking, progress: trackingProgress, error: trackingError, track: trackActors, clear: clearTracking } = useActorTracking();
 
-      try {
-        const response = await fetch(
-          `https://api.mapbox.com/geocoding/v5/mapbox.places/${event.location.lon},${event.location.lat}.json?types=country&access_token=${token}`
-        );
-        if (response.ok) {
-          const data = await response.json();
-          if (data.features?.[0]?.text) {
-            setCountryName(data.features[0].text);
-          }
-        }
-      } catch {
-        // Silently fail
+  // Reusable camera state interpolation from GNSS path
+  const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
+    if (!event?.gnssData || event.gnssData.length < 2 || !videoDuration || videoDuration <= 0) {
+      return { lat: event?.location.lat ?? 0, lon: event?.location.lon ?? 0, bearing: 0 };
+    }
+    const gnss = event.gnssData;
+
+    // Map video time (seconds) to GNSS time domain (milliseconds)
+    const gnssStart = gnss[0].timestamp;
+    const gnssEnd = gnss[gnss.length - 1].timestamp;
+    const progress = Math.max(0, Math.min(1, timestamp / videoDuration));
+    const gnssTime = gnssStart + progress * (gnssEnd - gnssStart);
+
+    // Find bracketing GNSS points by actual timestamp
+    let lowerIndex = 0;
+    for (let i = 0; i < gnss.length - 1; i++) {
+      if (gnss[i + 1].timestamp >= gnssTime) {
+        lowerIndex = i;
+        break;
       }
-    };
+      lowerIndex = i;
+    }
+    const upperIndex = Math.min(lowerIndex + 1, gnss.length - 1);
 
-    fetchCountry();
-  }, [event]);
+    // Interpolate based on actual timestamps, not array index
+    const segmentDuration = gnss[upperIndex].timestamp - gnss[lowerIndex].timestamp;
+    const t = segmentDuration > 0 ? (gnssTime - gnss[lowerIndex].timestamp) / segmentDuration : 0;
 
-  // Fetch nearest speed limit from BeeMaps
-  useEffect(() => {
-    if (!event) return;
+    const p1 = gnss[lowerIndex];
+    const p2 = gnss[upperIndex];
+    const lat = p1.lat + (p2.lat - p1.lat) * t;
+    const lon = p1.lon + (p2.lon - p1.lon) * t;
 
-    const fetchSpeedLimit = async () => {
-      const apiKey = getApiKey();
-      if (!apiKey) return;
+    const lookAhead = 3;
+    const endIndex = Math.min(lowerIndex + lookAhead, gnss.length - 1);
+    const bearing = endIndex > lowerIndex
+      ? calculateBearing(gnss[lowerIndex].lat, gnss[lowerIndex].lon, gnss[endIndex].lat, gnss[endIndex].lon)
+      : calculateBearing(gnss[Math.max(0, lowerIndex - 1)].lat, gnss[Math.max(0, lowerIndex - 1)].lon, gnss[lowerIndex].lat, gnss[lowerIndex].lon);
 
-      try {
-        const response = await fetch(
-          `/api/map-features?lat=${event.location.lat}&lon=${event.location.lon}&radius=200`,
-          {
-            headers: {
-              Authorization: apiKey,
-            },
-          }
-        );
+    return { lat, lon, bearing };
+  }, [event, videoDuration]);
 
-        if (!response.ok) return;
+  const handleDetectActors = useCallback(() => {
+    if (!event?.videoUrl) return;
 
-        const data = await response.json();
-        const features = data.features as LabeledFeature[] | undefined;
+    const camera = getCameraState(videoCurrentTime);
+    const fovDegrees = cameraIntrinsics?.bee ? BEE_HFOV : 120;
 
-        if (!features || features.length === 0) return;
+    detectActors({
+      eventId: id,
+      videoUrl: event.videoUrl,
+      timestamp: videoCurrentTime,
+      cameraLat: camera.lat,
+      cameraLon: camera.lon,
+      cameraBearing: camera.bearing,
+      fovDegrees,
+      cameraIntrinsics: cameraIntrinsics?.bee
+        ? { focal: cameraIntrinsics.bee.focal, k1: cameraIntrinsics.bee.k1, k2: cameraIntrinsics.bee.k2 }
+        : undefined,
+    });
+  }, [event, videoCurrentTime, getCameraState, cameraIntrinsics, id, detectActors]);
 
-        // Filter for speed signs with speed limits
-        const speedSigns = features.filter(
-          (f) => f.class === "speed-sign" && f.speedLimit !== undefined
-        );
+  const handleTrackActors = useCallback(() => {
+    if (!event?.videoUrl || !videoDuration) return;
 
-        if (speedSigns.length === 0) return;
+    const fovDegrees = cameraIntrinsics?.bee ? BEE_HFOV : 120;
 
-        // Find nearest speed sign
-        let nearest = speedSigns[0];
-        let minDistance = calculateDistance(
-          event.location.lat,
-          event.location.lon,
-          nearest.position.lat,
-          nearest.position.lon
-        );
-
-        for (const sign of speedSigns.slice(1)) {
-          const distance = calculateDistance(
-            event.location.lat,
-            event.location.lon,
-            sign.position.lat,
-            sign.position.lon
-          );
-          if (distance < minDistance) {
-            minDistance = distance;
-            nearest = sign;
-          }
-        }
-
-        setNearestSpeedLimit({
-          limit: nearest.speedLimit!,
-          unit: nearest.unit || "mph",
-        });
-      } catch {
-        // Silently fail
-      }
-    };
-
-    fetchSpeedLimit();
-  }, [event]);
+    trackActors({
+      eventId: id,
+      videoUrl: event.videoUrl,
+      videoDuration,
+      fovDegrees,
+      cameraIntrinsics: cameraIntrinsics?.bee
+        ? { focal: cameraIntrinsics.bee.focal, k1: cameraIntrinsics.bee.k1, k2: cameraIntrinsics.bee.k2 }
+        : undefined,
+      getCameraState,
+    });
+  }, [event, videoDuration, cameraIntrinsics, id, trackActors, getCameraState]);
 
   const copyCoordinates = async () => {
     if (!event) return;
@@ -1094,7 +348,7 @@ export default function EventDetailPage({
   }
 
   const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
-  const IconComponent = config.icon;
+
   const speedData = event.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
   const overlaySpeedData = speedData && speedData.length > 0
     ? speedData
@@ -1117,193 +371,153 @@ export default function EventDetailPage({
 
       {/* Main content */}
       <main className="container mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Left column - Video */}
-          <div className="space-y-6">
+          <div className="space-y-4">
             {/* Video player */}
-            <Card className="overflow-hidden py-0">
-              <CardContent className="p-0">
-                <div className="relative aspect-video bg-black">
-                  {event.videoUrl ? (
-                    <video
-                      ref={videoRef}
-                      src={getProxyVideoUrl(event.videoUrl)}
-                      controls
-                      autoPlay
-                      className="w-full h-full"
-                      controlsList="nodownload"
-                    >
-                      Your browser does not support the video tag.
-                    </video>
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-                      No video available
-                    </div>
-                  )}
-                  {overlaySpeedData.length > 0 && (
-                    <SpeedOverlay
-                      speedData={overlaySpeedData}
-                      currentTime={videoCurrentTime}
-                      duration={videoDuration}
-                      unit={speedUnit}
-                    />
-                  )}
-                </div>
-                {event.videoUrl && (
-                  <div className="flex justify-end px-3 py-2 border-t">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={downloadVideo}
-                      disabled={isDownloading}
-                    >
-                      {isDownloading ? (
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      ) : (
-                        <Download className="w-4 h-4 mr-2" />
-                      )}
-                      {isDownloading ? "Downloading..." : "Download"}
-                    </Button>
+            <div ref={videoContainerRef} className="overflow-hidden rounded-xl">
+              <div className="relative aspect-video bg-black">
+                {event.videoUrl ? (
+                  <video
+                    ref={videoRef}
+                    src={getProxyVideoUrl(event.videoUrl)}
+                    controls
+                    autoPlay
+                    className="w-full h-full"
+                    controlsList="nodownload"
+                  >
+                    Your browser does not support the video tag.
+                  </video>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                    No video available
                   </div>
                 )}
-              </CardContent>
-            </Card>
-
-            {/* Event info */}
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0">
-                <CardTitle className="text-lg">Event Details</CardTitle>
-                <div className="flex items-center gap-2">
-                  {roadType?.classLabel && (
-                    <Badge variant="outline">
-                      <Route className="w-3 h-3 mr-1" />
-                      {roadType.classLabel}
-                    </Badge>
-                  )}
-                  <Badge
-                    className={cn(
-                      config.bgColor,
-                      config.color,
-                      config.borderColor,
-                      "border"
-                    )}
-                    variant="outline"
+                {overlaySpeedData.length > 0 && (
+                  <SpeedOverlay
+                    speedData={overlaySpeedData}
+                    currentTime={videoCurrentTime}
+                    duration={videoDuration}
+                    unit={speedUnit}
+                    speedLimit={nearestSpeedLimit}
+                  />
+                )}
+              </div>
+              {event.videoUrl && (
+                <div className="flex justify-end px-3 py-1.5 bg-black/80">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={downloadVideo}
+                    disabled={isDownloading}
                   >
-                    <IconComponent className="w-3 h-3 mr-1" />
-                    {config.label}
-                  </Badge>
+                    {isDownloading ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Download className="w-4 h-4 mr-2" />
+                    )}
+                    {isDownloading ? "Downloading..." : "Download"}
+                  </Button>
                 </div>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="flex items-center gap-2 text-sm">
-                    <Clock className="w-4 h-4 text-muted-foreground" />
-                    <div>
-                      <p className="text-muted-foreground">Timestamp</p>
-                      <p className="font-medium flex items-center gap-2">
-                        {formatDateTime(event.timestamp)}
-                        {(() => {
-                          const sunInfo = getTimeOfDay(
-                            event.timestamp,
-                            event.location.lat,
-                            event.location.lon
-                          );
-                          const TimeIcon = getTimeOfDayIcon(sunInfo.timeOfDay);
-                          const style = getTimeOfDayStyle(sunInfo.timeOfDay);
-                          return (
-                            <span
-                              className={cn(
-                                "inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium",
-                                style.bgColor,
-                                style.color
-                              )}
-                            >
-                              <TimeIcon className="w-3 h-3" />
-                              {sunInfo.timeOfDay}
-                            </span>
-                          );
-                        })()}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <MapPin className="w-4 h-4 text-muted-foreground" />
-                    <div>
-                      <p className="text-muted-foreground">Coordinates</p>
-                      <p className="font-medium flex items-center gap-1">
-                        {formatCoordinates(event.location.lat, event.location.lon)}
-                        <button
-                          onClick={copyCoordinates}
-                          className="p-1 hover:bg-muted rounded transition-colors"
-                          title="Copy coordinates"
-                        >
-                          {copied ? (
-                            <Check className="w-3 h-3 text-green-500" />
-                          ) : (
-                            <Copy className="w-3 h-3 text-muted-foreground" />
-                          )}
-                        </button>
-                      </p>
-                    </div>
-                  </div>
-                  {maxSpeed !== null && (
-                    <div className="flex items-center gap-2 text-sm">
-                      <Gauge className="w-4 h-4 text-muted-foreground" />
-                      <div>
-                        <p className="text-muted-foreground">Max Speed</p>
-                        <p className="font-medium">{formatSpeed(maxSpeed)}</p>
-                      </div>
-                    </div>
-                  )}
-                  {acceleration !== undefined && (
-                    <div className="flex items-center gap-2 text-sm">
-                      <Activity className="w-4 h-4 text-muted-foreground" />
-                      <div>
-                        <p className="text-muted-foreground">Acceleration</p>
-                        <p className="font-medium">
-                          {acceleration.toFixed(2)} m/s²
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
+              )}
+            </div>
 
+            {/* Metadata bar */}
+            <div className="space-y-2 px-1">
+              {/* Badges row */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  className={cn(
+                    config.bgColor,
+                    config.color,
+                    config.borderColor,
+                    "border"
+                  )}
+                  variant="outline"
+                >
+                  {config.label}
+                </Badge>
+                {roadType?.classLabel && (
+                  <Badge variant="outline">
+                    {roadType.classLabel}
+                  </Badge>
+                )}
+                {(() => {
+                  const sunInfo = getTimeOfDay(
+                    event.timestamp,
+                    event.location.lat,
+                    event.location.lon
+                  );
+                  const style = getTimeOfDayStyle(sunInfo.timeOfDay);
+                  return (
+                    <Badge variant="outline" className={cn(style.bgColor, style.color)}>
+                      {sunInfo.timeOfDay}
+                    </Badge>
+                  );
+                })()}
+              </div>
+              {/* Details row */}
+              <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+                <span>{formatDateTime(event.timestamp)}</span>
+                <span>·</span>
+                <button
+                  onClick={copyCoordinates}
+                  className="font-mono hover:text-foreground transition-colors"
+                  title="Copy coordinates"
+                >
+                  {formatCoordinates(event.location.lat, event.location.lon)}
+                  {copied && <Check className="w-3 h-3 text-green-500 inline ml-1" />}
+                </button>
+                {maxSpeed !== null && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Max <span className="text-foreground font-mono">{formatSpeed(maxSpeed)}</span>
+                    </span>
+                  </>
+                )}
+                {acceleration !== undefined && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Accel <span className="text-foreground font-mono">{acceleration.toFixed(2)} m/s²</span>
+                    </span>
+                  </>
+                )}
                 {countryName && (
-                  <div className="pt-2 flex items-center gap-2 text-sm">
-                    <span className="font-medium">{countryName}</span>
-                    <span className="text-muted-foreground">·</span>
+                  <>
+                    <span>·</span>
                     <a
                       href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-primary hover:underline flex items-center gap-1"
+                      className="text-foreground hover:text-primary transition-colors"
                     >
-                      <ExternalLink className="w-3 h-3" />
-                      Open in Google Maps
+                      {countryFlag(countryName)} {countryName}
                     </a>
-                  </div>
+                  </>
                 )}
                 {!countryName && (
-                  <div className="pt-2">
+                  <>
+                    <span>·</span>
                     <a
                       href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-sm text-primary hover:underline flex items-center gap-1"
+                      className="hover:text-primary transition-colors"
                     >
-                      <ExternalLink className="w-3 h-3" />
-                      Open in Google Maps
+                      Google Maps
                     </a>
-                  </div>
+                  </>
                 )}
-              </CardContent>
-            </Card>
+              </div>
+            </div>
 
             {/* Speed Profile */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-lg flex items-center gap-2">
-                  <Gauge className="w-5 h-5" />
                   Speed Profile
                   {nearestSpeedLimit && (
                     <Badge variant="outline" className="text-xs">
@@ -1332,8 +546,7 @@ export default function EventDetailPage({
             {cameraIntrinsics?.bee && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    <Camera className="w-5 h-5" />
+                  <CardTitle className="text-lg">
                     Bee Camera
                   </CardTitle>
                 </CardHeader>
@@ -1342,7 +555,7 @@ export default function EventDetailPage({
                     <div>
                       <p className="text-muted-foreground">Horizontal FOV</p>
                       <p className="font-medium font-mono">
-                        {calculateFOV(cameraIntrinsics.bee.focal).toFixed(1)}°
+                        {BEE_HFOV}°
                       </p>
                     </div>
                     <div>
@@ -1370,41 +583,67 @@ export default function EventDetailPage({
           </div>
 
           {/* Right column - Map and metadata */}
-          <div className="space-y-6">
+          <div className="space-y-4">
             {/* Map */}
-            <Card className="overflow-hidden py-0">
-              <CardContent className="p-0">
-                <EventMap
-                  location={event.location}
-                  path={event.gnssData}
-                  currentTime={videoCurrentTime}
-                  videoDuration={videoDuration}
-                  className="aspect-video"
-                />
+            <Card
+              className="overflow-hidden py-0 flex flex-col"
+              style={videoContainerHeight ? { height: videoContainerHeight } : undefined}
+            >
+              <CardContent className="p-0 flex-1 min-h-0">
+                <div className="rounded-lg shadow-inner overflow-hidden h-full">
+                  <EventMap
+                    location={event.location}
+                    path={event.gnssData}
+                    currentTime={videoCurrentTime}
+                    videoDuration={videoDuration}
+                    className={videoContainerHeight ? "h-full" : "aspect-video"}
+                    detectedActors={trackingResult ? undefined : (detectedActors ?? undefined)}
+                    actorTracks={trackingResult?.tracks}
+                    onSeek={(time) => {
+                      if (videoRef.current) videoRef.current.currentTime = time;
+                    }}
+                  />
+                </div>
               </CardContent>
+              {event.videoUrl && (
+                <ActorControls
+                  detectedActors={detectedActors}
+                  isDetecting={isDetecting}
+                  actorError={actorError}
+                  onDetect={handleDetectActors}
+                  onClearActors={clearActors}
+                  trackingResult={trackingResult}
+                  isTracking={isTracking}
+                  trackingProgress={trackingProgress}
+                  trackingError={trackingError}
+                  onTrack={handleTrackActors}
+                  onClearTracking={clearTracking}
+                />
+              )}
             </Card>
 
             {/* Scene Analysis */}
-            {event.videoUrl && <VideoAnalysisCard eventId={id} />}
+            {event.videoUrl && (
+              <CollapsibleSection title="Scene Analysis">
+                <VideoAnalysisCard eventId={id} />
+              </CollapsibleSection>
+            )}
 
             {/* Positioning section */}
             <PositioningSection eventId={id} gnssData={event.gnssData} />
 
             {/* Metadata table */}
             {event.metadata && Object.keys(event.metadata).length > 0 && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">Metadata</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <MetadataTable metadata={event.metadata} />
-                </CardContent>
-              </Card>
+              <CollapsibleSection title="Metadata">
+                <MetadataTable metadata={event.metadata} />
+              </CollapsibleSection>
             )}
 
             {/* Frame Labeling */}
             {event.videoUrl && (
-              <FrameLabeling event={event} videoRef={videoRef} />
+              <CollapsibleSection title="Frame Labeling">
+                <FrameLabeling event={event} videoRef={videoRef} />
+              </CollapsibleSection>
             )}
           </div>
         </div>
@@ -1424,12 +663,12 @@ function EventDetailSkeleton() {
         <Skeleton className="h-8 w-32" />
       </Header>
       <main className="container mx-auto px-4 py-6">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="space-y-6">
-            <Skeleton className="aspect-video rounded-lg" />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="space-y-4">
+            <Skeleton className="aspect-video rounded-xl" />
             <Skeleton className="h-48 rounded-lg" />
           </div>
-          <div className="space-y-6">
+          <div className="space-y-4">
             <Skeleton className="h-[400px] rounded-lg" />
             <Skeleton className="h-32 rounded-lg" />
           </div>

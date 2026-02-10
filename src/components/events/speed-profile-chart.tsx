@@ -21,8 +21,8 @@ interface SpeedProfileChartProps {
   onSeek: (time: number) => void;
 }
 
-const PADDING = { top: 12, right: 12, bottom: 24, left: 40 };
-const HEIGHT = 160;
+const PADDING = { top: 12, right: 12, bottom: 24, left: 44 };
+const HEIGHT = 200;
 
 function speedMsToDisplay(speedMs: number, unit: SpeedUnit): number {
   return unit === "mph" ? speedMs * 2.237 : speedMs * 3.6;
@@ -213,6 +213,14 @@ export function SpeedProfileChart({
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
       >
+        {/* Gradient definition */}
+        <defs>
+          <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(59, 130, 246)" stopOpacity={0.25} />
+            <stop offset="100%" stopColor="rgb(59, 130, 246)" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+
         {/* Grid lines */}
         {yTicks.map((tick) => {
           const y =
@@ -226,8 +234,9 @@ export function SpeedProfileChart({
               x2={400 - PADDING.right}
               y2={y}
               stroke="currentColor"
-              className="text-muted-foreground/15"
+              className="text-muted-foreground/10"
               strokeWidth={0.5}
+              strokeDasharray="2 4"
             />
           );
         })}
@@ -244,7 +253,7 @@ export function SpeedProfileChart({
               y={y + 3}
               textAnchor="end"
               className="fill-muted-foreground"
-              fontSize={8}
+              fontSize={9}
               fontFamily="monospace"
             >
               {Math.round(tick)}
@@ -255,12 +264,12 @@ export function SpeedProfileChart({
         {/* X-axis labels */}
         {xLabels.map(({ t, label }) => (
           <text
-            key={label}
+            key={t}
             x={getChartX(t, 400)}
             y={HEIGHT - 4}
             textAnchor="middle"
             className="fill-muted-foreground"
-            fontSize={8}
+            fontSize={9}
             fontFamily="monospace"
           >
             {label}
@@ -308,6 +317,21 @@ export function SpeedProfileChart({
             />
           );
         })()}
+
+        {/* Speed area fill */}
+        {speedPoints.length > 1 && (
+          <path
+            d={pointsToAreaPath(
+              speedPoints.map((p) => ({
+                x: getChartX(p.t, 400),
+                y: getSpeedY(p.speed),
+              })),
+              HEIGHT - PADDING.bottom
+            )}
+            fill="url(#speedGradient)"
+            stroke="none"
+          />
+        )}
 
         {/* Speed line */}
         {speedPoints.length > 1 && (

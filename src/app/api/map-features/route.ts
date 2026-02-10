@@ -1,24 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createCirclePolygon, haversineDistance } from "@/lib/geo-utils";
+import { fetchWithRetry } from "@/lib/fetch-retry";
 
 const API_BASE_URL = "https://beemaps.com/api/developer";
 
-// Create a polygon approximating a circle around a point
-function createCirclePolygon(lat: number, lon: number, radiusMeters: number, numPoints: number = 32): number[][] {
-  const coords: number[][] = [];
-  const earthRadius = 6371000; // meters
-
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = (i / numPoints) * 2 * Math.PI;
-    const dLat = (radiusMeters / earthRadius) * Math.cos(angle);
-    const dLon = (radiusMeters / (earthRadius * Math.cos(lat * Math.PI / 180))) * Math.sin(angle);
-
-    coords.push([
-      lon + (dLon * 180 / Math.PI),
-      lat + (dLat * 180 / Math.PI)
-    ]);
-  }
-
-  return coords;
+interface RawMapFeature {
+  class: string;
+  position: { lon: number; lat: number };
+  properties?: Record<string, unknown>;
 }
 
 export async function GET(request: NextRequest) {
@@ -51,7 +40,7 @@ export async function GET(request: NextRequest) {
 
     const authHeader = apiKey.startsWith("Basic ") ? apiKey : `Basic ${apiKey}`;
 
-    const response = await fetch(`${API_BASE_URL}/map-data`, {
+    const response = await fetchWithRetry(`${API_BASE_URL}/map-data`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -76,11 +65,28 @@ export async function GET(request: NextRequest) {
     }
 
     const data = await response.json();
-    console.log("Map data API response:", JSON.stringify(data, null, 2));
 
     // Transform response to expected format
     // The /map-data endpoint returns { mapFeatureResults: { data: [...] } }
-    const features = data.mapFeatureResults?.data || [];
+    const rawFeatures = (data.mapFeatureResults?.data || []) as RawMapFeature[];
+
+    // Transform raw features into labeled features with speed limit info extracted
+    const features = rawFeatures
+      .filter((f) => f.class && f.position)
+      .map((f) => {
+        const distance = haversineDistance(latitude, longitude, f.position.lat, f.position.lon);
+        const labeled: Record<string, unknown> = {
+          class: f.class,
+          distance: Math.round(distance),
+          position: { lat: f.position.lat, lon: f.position.lon },
+        };
+        if (f.properties?.speedLimit) {
+          labeled.speedLimit = f.properties.speedLimit;
+          labeled.unit = (f.properties.unit as string) || "mph";
+        }
+        return labeled;
+      })
+      .sort((a, b) => (a.distance as number) - (b.distance as number));
 
     return NextResponse.json({ features, raw: data });
   } catch (error) {

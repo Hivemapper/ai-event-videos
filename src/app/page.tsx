@@ -12,8 +12,18 @@ import {
   NewEventsBanner,
   AgentView,
 } from "@/components/events";
+import dynamic from "next/dynamic";
 import { Header } from "@/components/layout/header";
-import { EventsMap } from "@/components/map/events-map";
+
+const EventsMap = dynamic(
+  () => import("@/components/map/events-map").then((m) => m.EventsMap),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[calc(100vh-200px)] bg-muted animate-pulse rounded-xl" />
+    ),
+  }
+);
 import { Coordinates } from "@/components/events/filter-bar";
 import { AnalysisFiltersBar } from "@/components/events/analysis-filters";
 import { useEvents } from "@/hooks/use-events";
@@ -217,8 +227,7 @@ function HomeContent() {
 
   const handleApply = useCallback(() => {
     updateUrl();
-    refresh();
-  }, [updateUrl, refresh]);
+  }, [updateUrl]);
 
   return (
     <div className="min-h-screen bg-background">

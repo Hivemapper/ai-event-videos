@@ -9,14 +9,14 @@ interface SpeedDataPoint {
 export const ANALYZE_VIDEO_TOOL: Anthropic.Tool = {
   name: "analyze_video",
   description:
-    "Provide a structured analysis of the dashcam video based on the frames and sensor data provided.",
+    "Provide a structured analysis of the video from the vehicle with the Bee camera based on the frames and sensor data provided.",
   input_schema: {
     type: "object" as const,
     properties: {
       summary: {
         type: "string",
         description:
-          "2-3 sentence narrative describing what is happening in the video.",
+          "2-3 sentence narrative describing what is happening in the video. Always refer to the camera vehicle as 'the vehicle with the Bee camera', never 'dashcam vehicle' or 'ego vehicle'.",
       },
       road: {
         type: "object",
@@ -345,7 +345,7 @@ const EVENT_TYPE_DESCRIPTIONS: Record<AIEventType, string> = {
 export function getAnalysisSystemPrompt(eventType: AIEventType): string {
   const eventDesc = EVENT_TYPE_DESCRIPTIONS[eventType] || "driving event";
 
-  return `You are an expert dashcam video analyst specializing in driving safety and road scene understanding. You are analyzing frames from a dashcam video that was flagged as: ${eventDesc}.
+  return `You are an expert video analyst specializing in driving safety and road scene understanding. You are analyzing frames from a vehicle with a Bee camera that was flagged as: ${eventDesc}.
 
 ## Priority Fields — Be Thorough
 
@@ -377,10 +377,11 @@ export function getAnalysisSystemPrompt(eventType: AIEventType): string {
 - Analyze all provided frames together to understand the temporal progression of the scene.
 - Cross-reference what you see in the frames with the provided sensor data (speed, IMU, road type, map features).
 - Be specific and precise in your observations. Use null for any field you cannot determine with reasonable confidence.
-- Dashcam lenses have wide-angle distortion, especially at edges. Signs near edges of frame will appear smaller and distorted — still identify them.
+- Bee camera lenses have wide-angle distortion, especially at edges. Signs near edges of frame will appear smaller and distorted — still identify them.
 - Frame notes should describe what is specifically notable in each frame, one sentence each.
 - The summary should read as a coherent narrative of what happened, including WHY the vehicle braked or took action.
-- **IMPORTANT — Use video timestamps, not frame numbers**: Each frame is labeled with its video timestamp (e.g. "Frame 3 (at 8.5s)"). In ALL description fields for objects, signage, and visibility issues, reference the **video second** not the frame number. Write "visible at 8s" or "appears between 3-9s", NEVER "in frame 3" or "in frames 1-2".`;
+- **IMPORTANT — Use video timestamps, not frame numbers**: Each frame is labeled with its video timestamp (e.g. "Frame 3 (at 8.5s)"). In ALL description fields for objects, signage, and visibility issues, reference the **video second** not the frame number. Write "visible at 8s" or "appears between 3-9s", NEVER "in frame 3" or "in frames 1-2".
+- **IMPORTANT — Vehicle naming**: Always refer to the camera vehicle as "the vehicle with the Bee camera". Never use "dashcam vehicle", "ego vehicle", or "our vehicle".`;
 }
 
 export function selectFrameTimestamps(

@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
 import { tmpdir } from "os";
 import Anthropic from "@anthropic-ai/sdk";
 import { API_BASE_URL } from "@/lib/constants";
@@ -15,56 +14,14 @@ import {
   buildContextText,
 } from "@/lib/analysis";
 import { getTimeOfDay } from "@/lib/sun";
+import { createCirclePolygon } from "@/lib/geo-utils";
+import { extractFrame, ensureDir, cleanupOldFiles } from "@/lib/ffmpeg";
+import { analyzeSchema } from "@/lib/schemas";
 
 const ANALYSIS_CACHE_DIR = join(tmpdir(), "video-analysis");
-const FRAMES_DIR = join(tmpdir(), "video-frames");
-
-function ensureDir(dir: string) {
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
-  }
-}
 
 function getCacheKey(eventId: string): string {
   return createHash("md5").update(eventId).digest("hex");
-}
-
-function formatTimestamp(seconds: number): string {
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
-  return `${hours.toString().padStart(2, "0")}:${minutes
-    .toString()
-    .padStart(2, "0")}:${secs.toFixed(3).padStart(6, "0")}`;
-}
-
-function extractFrame(
-  videoUrl: string,
-  timestamp: number,
-  width: number
-): Buffer | null {
-  ensureDir(FRAMES_DIR);
-
-  const hash = createHash("md5")
-    .update(`${videoUrl}-${timestamp}-${width}`)
-    .digest("hex");
-  const framePath = join(FRAMES_DIR, `${hash}.jpg`);
-
-  if (existsSync(framePath)) {
-    return readFileSync(framePath);
-  }
-
-  const timeFormatted = formatTimestamp(timestamp);
-  const cmd = `ffmpeg -ss ${timeFormatted} -i "${videoUrl}" -vframes 1 -q:v 2 -vf "scale=${width}:-1" -f image2 "${framePath}" -y 2>/dev/null`;
-
-  try {
-    execSync(cmd, { timeout: 30000 });
-  } catch {
-    return null;
-  }
-
-  if (!existsSync(framePath)) return null;
-  return readFileSync(framePath);
 }
 
 interface AnalyzeRequest {
@@ -78,7 +35,15 @@ interface AnalyzeRequest {
 export async function POST(request: NextRequest) {
   let body: AnalyzeRequest;
   try {
-    body = await request.json();
+    const raw = await request.json();
+    const parsed = analyzeSchema.safeParse(raw);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues.map((i) => i.message).join(", ") },
+        { status: 400 }
+      );
+    }
+    body = parsed.data as AnalyzeRequest;
   } catch {
     return NextResponse.json(
       { error: "Invalid request body" },
@@ -87,12 +52,6 @@ export async function POST(request: NextRequest) {
   }
 
   const { eventId, forceRefresh } = body;
-  if (!eventId) {
-    return NextResponse.json(
-      { error: "eventId is required" },
-      { status: 400 }
-    );
-  }
 
   // Check cache
   ensureDir(ANALYSIS_CACHE_DIR);
@@ -277,7 +236,7 @@ export async function POST(request: NextRequest) {
     const messageContent: Anthropic.Messages.ContentBlockParam[] = [
       {
         type: "text",
-        text: `Analyze this dashcam video. Here is the sensor and contextual data:\n\n${contextText}${speedProfile}\n\nI'm providing ${frameBuffers.length} frames from the video in chronological order:`,
+        text: `Analyze this video from a vehicle with a Bee camera. Here is the sensor and contextual data:\n\n${contextText}${speedProfile}\n\nI'm providing ${frameBuffers.length} frames from the video in chronological order:`,
       },
     ];
 
@@ -336,6 +295,9 @@ export async function POST(request: NextRequest) {
       // Non-fatal: cache write failure
     }
 
+    // Opportunistic cleanup of old analysis caches (24h)
+    cleanupOldFiles(ANALYSIS_CACHE_DIR, 24 * 60 * 60 * 1000);
+
     return NextResponse.json(cacheData);
   } catch (error) {
     console.error("Analysis error:", error);
@@ -347,26 +309,4 @@ export async function POST(request: NextRequest) {
           : "An unexpected error occurred";
     return NextResponse.json({ error: message }, { status: 500 });
   }
-}
-
-function createCirclePolygon(
-  lat: number,
-  lon: number,
-  radiusMeters: number,
-  numPoints = 32
-): number[][] {
-  const coords: number[][] = [];
-  const earthRadius = 6371000;
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = (i / numPoints) * 2 * Math.PI;
-    const dLat = (radiusMeters / earthRadius) * Math.cos(angle);
-    const dLon =
-      (radiusMeters / (earthRadius * Math.cos((lat * Math.PI) / 180))) *
-      Math.sin(angle);
-    coords.push([
-      lon + (dLon * 180) / Math.PI,
-      lat + (dLat * 180) / Math.PI,
-    ]);
-  }
-  return coords;
 }

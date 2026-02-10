@@ -4,9 +4,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AIEvent, AIEventType, Region } from "@/types/events";
 import { fetchEvents, getApiKey } from "@/lib/api";
 import { getRegionsFromEvents, getCountriesFromRegions } from "@/lib/geo";
-import { getTimeOfDay, TimeOfDay } from "@/lib/sun";
-
-const POLL_INTERVAL = 30000; // Poll every 30 seconds
+import { TimeOfDay } from "@/lib/sun";
+import { createCirclePolygon } from "@/lib/geo-utils";
+import { useEventPolling } from "@/hooks/use-event-polling";
+import { useEventFiltering } from "@/hooks/use-event-filtering";
 
 interface Coordinates {
   lat: number;
@@ -40,26 +41,6 @@ interface UseEventsResult {
   showNewEvents: () => void;
 }
 
-// Create a circular polygon from center point and radius
-// Returns array of [lon, lat] coordinates (note: lon first per GeoJSON spec)
-function createCirclePolygon(lat: number, lon: number, radiusMeters: number, numPoints = 32): [number, number][] {
-  const coords: [number, number][] = [];
-  const earthRadius = 6371000; // meters
-
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = (i / numPoints) * 2 * Math.PI;
-    const dLat = (radiusMeters / earthRadius) * Math.cos(angle);
-    const dLon = (radiusMeters / (earthRadius * Math.cos(lat * Math.PI / 180))) * Math.sin(angle);
-
-    const pointLat = lat + (dLat * 180 / Math.PI);
-    const pointLon = lon + (dLon * 180 / Math.PI);
-
-    coords.push([pointLon, pointLat]); // [lon, lat] format
-  }
-
-  return coords;
-}
-
 export function useEvents(options: UseEventsOptions): UseEventsResult {
   const { startDate, endDate, types, selectedTimeOfDay = [], selectedCountries = [], searchCoordinates, searchRadius = 500, limit = 50 } = options;
 
@@ -70,10 +51,16 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
   const [error, setError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [totalCount, setTotalCount] = useState(0);
-  const [offset, setOffset] = useState(0);
-  const [newEventsCount, setNewEventsCount] = useState(0);
-  const lastKnownTotalRef = useRef<number>(0);
-  const isPollingRef = useRef(false);
+  const initialTotalRef = useRef(0);
+
+  // Stabilize offset and events with refs to avoid recreating loadEvents
+  const offsetRef = useRef(0);
+  const eventsRef = useRef<AIEvent[]>([]);
+
+  // Keep eventsRef in sync
+  useEffect(() => {
+    eventsRef.current = events;
+  }, [events]);
 
   // Check for API key on mount
   useEffect(() => {
@@ -92,14 +79,12 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
       setIsLoading(true);
       setError(null);
 
-      const currentOffset = reset ? 0 : offset;
+      const currentOffset = reset ? 0 : offsetRef.current;
 
       try {
-        // Convert date strings to ISO datetime format
         const startDateTime = new Date(startDate + "T00:00:00.000Z").toISOString();
         const endDateTime = new Date(endDate + "T23:59:59.999Z").toISOString();
 
-        // Create polygon from coordinates for server-side filtering
         const polygon = searchCoordinates
           ? createCirclePolygon(searchCoordinates.lat, searchCoordinates.lon, searchRadius)
           : undefined;
@@ -115,41 +100,54 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
 
         const newEvents = reset
           ? response.events
-          : [...events, ...response.events];
+          : [...eventsRef.current, ...response.events];
 
+        // Show events immediately — no geocoding blocking here
         setEvents(newEvents);
         setTotalCount(response.pagination.total);
-        setOffset(currentOffset + response.events.length);
+        offsetRef.current = currentOffset + response.events.length;
 
-        // Track last known total for new events detection
         if (reset) {
-          lastKnownTotalRef.current = response.pagination.total;
-          setNewEventsCount(0);
+          initialTotalRef.current = response.pagination.total;
         }
-
-        // Update regions when events change
-        const newRegions = await getRegionsFromEvents(newEvents);
-        setRegions(newRegions);
-
-        // Update countries list
-        const newCountries = getCountriesFromRegions(newRegions);
-        setCountries(newCountries);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load events");
       } finally {
         setIsLoading(false);
       }
     },
-    [startDate, endDate, types, searchCoordinates, searchRadius, limit, offset, events]
+    [startDate, endDate, types, searchCoordinates, searchRadius, limit]
   );
 
-  // Load events when filters change
+  // Load events when server-side filters change
   useEffect(() => {
-    setOffset(0);
+    offsetRef.current = 0;
     setEvents([]);
+    eventsRef.current = [];
     loadEvents(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startDate, endDate, JSON.stringify(types), searchCoordinates?.lat, searchCoordinates?.lon, searchRadius]);
+
+  // Geocode regions asynchronously after events load
+  useEffect(() => {
+    if (events.length === 0) {
+      setRegions([]);
+      setCountries([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    getRegionsFromEvents(events).then((newRegions) => {
+      if (cancelled) return;
+      setRegions(newRegions);
+      setCountries(getCountriesFromRegions(newRegions));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [events]);
 
   const loadMore = useCallback(() => {
     if (!isLoading && events.length < totalCount) {
@@ -157,104 +155,54 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
     }
   }, [isLoading, events.length, totalCount, loadEvents]);
 
+  // Polling for new events
+  const fetchCount = useCallback(async () => {
+    const startDateTime = new Date(startDate + "T00:00:00.000Z").toISOString();
+    const endDateTime = new Date(endDate + "T23:59:59.999Z").toISOString();
+    const polygon = searchCoordinates
+      ? createCirclePolygon(searchCoordinates.lat, searchCoordinates.lon, searchRadius)
+      : undefined;
+    const response = await fetchEvents({
+      startDate: startDateTime,
+      endDate: endDateTime,
+      types: types && types.length > 0 ? types : undefined,
+      polygon,
+      limit: 1,
+      offset: 0,
+    });
+    return response.pagination.total;
+  }, [startDate, endDate, types, searchCoordinates, searchRadius]);
+
+  const { newEventsCount, showNewEvents: pollingShowNew } = useEventPolling({
+    enabled: hasApiKey && !isLoading,
+    fetchCount,
+    initialTotal: initialTotalRef.current,
+  });
+
   const refresh = useCallback(() => {
-    setOffset(0);
+    offsetRef.current = 0;
     setEvents([]);
-    setNewEventsCount(0);
+    eventsRef.current = [];
     loadEvents(true);
   }, [loadEvents]);
 
-  // Show new events (refresh the list)
   const showNewEvents = useCallback(() => {
-    setNewEventsCount(0);
-    setOffset(0);
+    pollingShowNew();
+    offsetRef.current = 0;
     setEvents([]);
+    eventsRef.current = [];
     loadEvents(true);
-  }, [loadEvents]);
+  }, [loadEvents, pollingShowNew]);
 
-  // Poll for new events in the background
-  useEffect(() => {
-    if (!hasApiKey || isLoading) return;
-
-    const checkForNewEvents = async () => {
-      if (isPollingRef.current) return;
-      isPollingRef.current = true;
-
-      try {
-        const startDateTime = new Date(startDate + "T00:00:00.000Z").toISOString();
-        const endDateTime = new Date(endDate + "T23:59:59.999Z").toISOString();
-
-        const polygon = searchCoordinates
-          ? createCirclePolygon(searchCoordinates.lat, searchCoordinates.lon, searchRadius)
-          : undefined;
-
-        const response = await fetchEvents({
-          startDate: startDateTime,
-          endDate: endDateTime,
-          types: types && types.length > 0 ? types : undefined,
-          polygon,
-          limit: 1, // Only need the total count
-          offset: 0,
-        });
-
-        const currentTotal = response.pagination.total;
-        if (lastKnownTotalRef.current > 0 && currentTotal > lastKnownTotalRef.current) {
-          setNewEventsCount(currentTotal - lastKnownTotalRef.current);
-        }
-      } catch {
-        // Silently fail polling errors
-      } finally {
-        isPollingRef.current = false;
-      }
-    };
-
-    const intervalId = setInterval(checkForNewEvents, POLL_INTERVAL);
-    return () => clearInterval(intervalId);
-  }, [hasApiKey, isLoading, startDate, endDate, types, searchCoordinates, searchRadius]);
-
-  // Filter events by selected countries and time of day (coordinate filtering is done server-side via polygon)
-  const filteredEvents = (() => {
-    let filtered = events;
-
-    // Filter by time of day if any selected
-    if (selectedTimeOfDay.length > 0) {
-      filtered = filtered.filter((event) => {
-        const sunInfo = getTimeOfDay(
-          event.timestamp,
-          event.location.lat,
-          event.location.lon
-        );
-        return selectedTimeOfDay.includes(sunInfo.timeOfDay);
-      });
-    }
-
-    // Skip country filtering when using coordinate search (server handles it)
-    if (searchCoordinates) {
-      return filtered;
-    }
-
-    if (selectedCountries.length > 0 && selectedCountries.length < countries.length) {
-      // Filter by selected countries if not all countries are selected
-      const selectedCountrySet = new Set(selectedCountries);
-      const regionIdsInSelectedCountries = new Set(
-        regions
-          .filter((r) => r.country && selectedCountrySet.has(r.country))
-          .map((r) => r.id)
-      );
-
-      // Filter events that belong to regions in selected countries
-      filtered = filtered.filter((event) => {
-        const eventRegion = regions.find((r) => {
-          const eventCell = `${Math.floor(event.location.lat / 0.1) * 0.1},${Math.floor(event.location.lon / 0.1) * 0.1}`;
-          const regionCell = `${Math.floor(r.latitude / 0.1) * 0.1},${Math.floor(r.longitude / 0.1) * 0.1}`;
-          return eventCell === regionCell;
-        });
-        return eventRegion && regionIdsInSelectedCountries.has(eventRegion.id);
-      });
-    }
-
-    return filtered;
-  })();
+  // Client-side filtering
+  const filteredEvents = useEventFiltering({
+    events,
+    regions,
+    countries,
+    selectedTimeOfDay,
+    selectedCountries,
+    searchCoordinates,
+  });
 
   return {
     events,

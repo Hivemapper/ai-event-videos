@@ -140,7 +140,6 @@ export function FilterBar({
 
   const handleRemoveType = (type: AIEventType) => {
     onTypesChange(selectedTypes.filter((t) => t !== type));
-    onApply?.();
   };
 
   const handleClearAllTypes = () => {
@@ -157,7 +156,6 @@ export function FilterBar({
 
   const handleRemoveTimeOfDay = (time: TimeOfDay) => {
     onTimeOfDayChange(selectedTimeOfDay.filter((t) => t !== time));
-    onApply?.();
   };
 
   const handleClearAllTimeOfDay = () => {
@@ -222,7 +220,6 @@ export function FilterBar({
     onTimeOfDayChange([]);
     onCountriesChange([...countries]);
     onCoordinatesChange(null);
-    onApply?.();
   };
 
   const allCountriesSelected =
@@ -267,12 +264,12 @@ export function FilterBar({
               )}
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-3xl">
+          <DialogContent className="sm:max-w-4xl">
             <DialogHeader>
               <DialogTitle>Filters</DialogTitle>
             </DialogHeader>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-8 py-4">
+            <div className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr] gap-8 py-4">
               {/* Column 1: Date Range + Coordinate Search */}
               <div className="space-y-6">
                 {/* Date range */}
@@ -515,7 +512,7 @@ export function FilterBar({
         {/* Clear all button */}
         {(selectedTypes.length > 0 ||
           selectedTimeOfDay.length > 0 ||
-          !allCountriesSelected ||
+          (countries.length > 0 && !allCountriesSelected) ||
           searchCoordinates) && (
           <Button
             variant="ghost"

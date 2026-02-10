@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, memo } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Play } from "lucide-react";
@@ -38,7 +38,7 @@ function formatRelativeTime(timestamp: string): string {
   }
 }
 
-export function EventCard({ event, onClick }: EventCardProps) {
+export const EventCard = memo(function EventCard({ event, onClick }: EventCardProps) {
   const [isHovered, setIsHovered] = useState(false);
   const { thumbnailUrl, isLoading, error, ref } = useThumbnail(event.videoUrl);
 
@@ -121,7 +121,6 @@ export function EventCard({ event, onClick }: EventCardProps) {
           )}
           variant="outline"
         >
-          <IconComponent className="w-3 h-3 mr-1" />
           {config.label}
         </Badge>
       </div>
@@ -134,7 +133,7 @@ export function EventCard({ event, onClick }: EventCardProps) {
       </div>
     </Link>
   );
-}
+}, (prev, next) => prev.event.id === next.event.id);
 
 export function EventCardSkeleton() {
   return (

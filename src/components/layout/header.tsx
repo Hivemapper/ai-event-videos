@@ -1,8 +1,9 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
-import { Settings, Video } from "lucide-react";
+import { Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -40,12 +41,24 @@ export function Header({ children }: HeaderProps) {
   const searchParams = useSearchParams();
 
   return (
-    <header className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="container mx-auto px-4 h-14 flex items-center justify-between">
+    <header className="sticky top-0 z-50 w-full shadow-sm bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="container mx-auto px-4 h-12 flex items-center justify-between">
         <div className="flex items-center gap-6">
-          <Link href="/" className="flex items-center gap-2">
-            <Video className="w-6 h-6 text-primary" />
-            <span className="font-semibold text-lg">AI Event Videos</span>
+          <Link href="/" className="flex items-center">
+            <Image
+              src="/logo-dark.svg"
+              alt="Bee AI Events"
+              width={28}
+              height={28}
+              className="dark:hidden"
+            />
+            <Image
+              src="/logo-light.svg"
+              alt="Bee AI Events"
+              width={28}
+              height={28}
+              className="hidden dark:block"
+            />
           </Link>
           <nav className="flex items-center gap-1">
             {navItems.map((item) => {

@@ -2,7 +2,7 @@
 
 import { Suspense, useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Trophy, Zap, RotateCcw, Globe, Gauge, Rocket, Flame, Search, Loader2 } from "lucide-react";
+import { Search, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,7 +13,6 @@ import { EVENT_TYPE_CONFIG } from "@/lib/constants";
 import { getApiKey, getMapboxToken, getSpeedUnit, convertSpeed, speedLabel, SpeedUnit } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-const sectionIcons = [Trophy, Gauge, Zap, Rocket, RotateCcw, Globe];
 
 const countryFlags: Record<string, string> = {
   "United Kingdom": "🇬🇧",
@@ -86,20 +85,20 @@ function ExtremeBrakingTable({ events, discoveredEvents = [], unit }: TableProps
             const drop = convertSpeed(event.maxSpeed - event.minSpeed, unit);
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {isNew ? <NewBadge /> : index + 1}
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {drop} {sl}
                   <span className="text-muted-foreground font-normal ml-1 text-xs">
                     ({convertSpeed(event.maxSpeed, unit)} → {convertSpeed(event.minSpeed, unit)})
                   </span>
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5 text-muted-foreground hidden sm:table-cell">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left text-muted-foreground hidden sm:table-cell">
                   {event.date}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -136,17 +135,17 @@ function HighSpeedTable({ events, discoveredEvents = [], unit }: TableProps) {
             const isNew = index >= existingCount;
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {isNew ? <NewBadge /> : index + 1}
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {convertSpeed(event.maxSpeed, unit)} {sl}
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5 text-muted-foreground hidden sm:table-cell">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left text-muted-foreground hidden sm:table-cell">
                   {event.date}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -183,17 +182,17 @@ function AggressiveAccelerationTable({ events, discoveredEvents = [], unit }: Ta
             const isNew = index >= existingCount;
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {isNew ? <NewBadge /> : index + 1}
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {event.acceleration.toFixed(2)} m/s²
                 </td>
-                <td className="px-4 py-2.5 font-mono">
+                <td className="px-4 py-2.5 text-left font-mono">
                   {convertSpeed(event.minSpeed, unit)} → {convertSpeed(event.maxSpeed, unit)} {sl}
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -231,17 +230,17 @@ function HighestGForceTable({ events, discoveredEvents = [], unit }: TableProps)
             const drop = convertSpeed(event.maxSpeed - event.minSpeed, unit);
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {isNew ? <NewBadge /> : index + 1}
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {event.acceleration.toFixed(2)} m/s²
                 </td>
-                <td className="px-4 py-2.5 font-mono">
+                <td className="px-4 py-2.5 text-left font-mono">
                   {drop} {sl}
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -277,17 +276,17 @@ function SwervingTable({ events, discoveredEvents = [], unit }: TableProps) {
             const isNew = index >= existingCount;
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {isNew ? <NewBadge /> : index + 1}
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {event.acceleration.toFixed(2)} m/s²
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5 text-muted-foreground hidden sm:table-cell">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left text-muted-foreground hidden sm:table-cell">
                   {event.date}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -324,13 +323,13 @@ function InternationalTable({ events, discoveredEvents = [], unit }: TableProps)
             const isNew = index >= existingCount;
             const drop = convertSpeed(event.maxSpeed - event.minSpeed, unit);
             const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
-            const IconComponent = config.icon;
+
             return (
               <tr key={event.id} className={cn("border-t hover:bg-muted/30", isNew && "bg-green-50/50")}>
-                <td className="px-4 py-2.5 text-lg">
+                <td className="px-4 py-2.5 text-left text-lg">
                   {isNew ? <NewBadge /> : getFlagForLocation(event.location)}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Badge
                     className={cn(
                       config.bgColor,
@@ -340,17 +339,16 @@ function InternationalTable({ events, discoveredEvents = [], unit }: TableProps)
                     )}
                     variant="outline"
                   >
-                    <IconComponent className="w-3 h-3 mr-1" />
                     {config.label}
                   </Badge>
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {drop} {sl}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   {getCityFromLocation(event.location)}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -389,13 +387,13 @@ function TrendingTable({ events, unit }: { events: HighlightEvent[]; unit: Speed
             const drop = convertSpeed(event.maxSpeed - event.minSpeed, unit);
             const config =
               EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
-            const IconComponent = config.icon;
+
             return (
               <tr key={event.id} className="border-t hover:bg-muted/30">
-                <td className="px-4 py-2.5 text-muted-foreground font-medium">
+                <td className="px-4 py-2.5 text-left text-muted-foreground font-medium">
                   {index + 1}
                 </td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">
                   <Badge
                     className={cn(
                       config.bgColor,
@@ -405,11 +403,10 @@ function TrendingTable({ events, unit }: { events: HighlightEvent[]; unit: Speed
                     )}
                     variant="outline"
                   >
-                    <IconComponent className="w-3 h-3 mr-1" />
                     {config.label}
                   </Badge>
                 </td>
-                <td className="px-4 py-2.5 font-mono font-medium">
+                <td className="px-4 py-2.5 text-left font-mono font-medium">
                   {drop > 0 ? (
                     <>
                       {drop} {sl}
@@ -422,13 +419,13 @@ function TrendingTable({ events, unit }: { events: HighlightEvent[]; unit: Speed
                     <span className="text-muted-foreground">—</span>
                   )}
                 </td>
-                <td className="px-4 py-2.5 font-mono hidden sm:table-cell">
+                <td className="px-4 py-2.5 text-left font-mono hidden sm:table-cell">
                   {event.acceleration > 0
                     ? `${event.acceleration.toFixed(2)} m/s²`
                     : "—"}
                 </td>
-                <td className="px-4 py-2.5">{event.location}</td>
-                <td className="px-4 py-2.5">
+                <td className="px-4 py-2.5 text-left">{event.location}</td>
+                <td className="px-4 py-2.5 text-left">
                   <Link
                     href={`/event/${event.id}`}
                     className="text-primary hover:underline font-mono text-xs"
@@ -483,8 +480,7 @@ function TrendingSection({ unit }: { unit: SpeedUnit }) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Flame className="w-5 h-5" />
+          <CardTitle className="text-lg">
             Trending
           </CardTitle>
           <p className="text-sm text-muted-foreground">
@@ -505,8 +501,7 @@ function TrendingSection({ unit }: { unit: SpeedUnit }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Flame className="w-5 h-5" />
+        <CardTitle className="text-lg">
           Trending
         </CardTitle>
         <p className="text-sm text-muted-foreground">
@@ -531,13 +526,10 @@ function SectionTable({
   discoveredEvents?: HighlightEvent[];
   unit: SpeedUnit;
 }) {
-  const Icon = sectionIcons[index] || Trophy;
-
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Icon className="w-5 h-5" />
+        <CardTitle className="text-lg">
           {section.title}
         </CardTitle>
         <p className="text-sm text-muted-foreground">{section.description}</p>

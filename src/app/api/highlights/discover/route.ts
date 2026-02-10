@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { API_BASE_URL } from "@/lib/constants";
 import { AIEvent, AIEventType } from "@/types/events";
 import { HighlightEvent } from "@/lib/highlights";
+import { parseSpeedArray, getAcceleration } from "@/lib/highlights-utils";
 
 const DISCOVER_TYPES: AIEventType[] = [
   "HARSH_BRAKING",
@@ -10,33 +11,6 @@ const DISCOVER_TYPES: AIEventType[] = [
   "AGGRESSIVE_ACCELERATION",
   "SWERVING",
 ];
-
-function parseSpeedArray(metadata: Record<string, unknown> | undefined): {
-  maxSpeed: number;
-  minSpeed: number;
-} {
-  if (!metadata?.SPEED_ARRAY) return { maxSpeed: 0, minSpeed: 0 };
-  try {
-    const speeds = metadata.SPEED_ARRAY as number[];
-    if (!Array.isArray(speeds) || speeds.length === 0)
-      return { maxSpeed: 0, minSpeed: 0 };
-    const kmhSpeeds = speeds.map((s) => s * 3.6);
-    return {
-      maxSpeed: Math.max(...kmhSpeeds),
-      minSpeed: Math.min(...kmhSpeeds),
-    };
-  } catch {
-    return { maxSpeed: 0, minSpeed: 0 };
-  }
-}
-
-function getAcceleration(
-  metadata: Record<string, unknown> | undefined
-): number {
-  if (!metadata?.ACCELERATION_MS2) return 0;
-  const val = Number(metadata.ACCELERATION_MS2);
-  return isNaN(val) ? 0 : val;
-}
 
 // US bounding box (continental + Alaska + Hawaii approximate)
 function isUSCoords(lat: number, lon: number): boolean {

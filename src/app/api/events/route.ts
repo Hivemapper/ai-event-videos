@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { API_BASE_URL } from "@/lib/constants";
+import { fetchWithRetry } from "@/lib/fetch-retry";
+import { eventsSearchSchema } from "@/lib/schemas";
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,13 +14,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const body = await request.json();
+    const raw = await request.json();
+    const parsed = eventsSearchSchema.safeParse(raw);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: parsed.error.issues.map((i) => i.message).join(", ") },
+        { status: 400 }
+      );
+    }
+    const body = parsed.data;
     console.log("Request body:", JSON.stringify(body));
 
     // Use Basic auth for base64-encoded API keys
     const authHeader = apiKey.startsWith("Basic ") ? apiKey : `Basic ${apiKey}`;
 
-    const response = await fetch(`${API_BASE_URL}/search`, {
+    const response = await fetchWithRetry(`${API_BASE_URL}/search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

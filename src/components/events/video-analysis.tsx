@@ -81,54 +81,40 @@ const VISIBILITY_SEVERITY_COLORS: Record<string, string> = {
 // --- Section: Road ---
 function RoadSection({ analysis }: { analysis: VideoAnalysis }) {
   const { road } = analysis;
+
+  // Build a natural sentence from road properties
+  const parts: string[] = [];
+  if (road.lanes !== null && road.roadType) {
+    parts.push(`${road.lanes}-lane ${road.roadType}`);
+  } else if (road.roadType) {
+    parts.push(road.roadType);
+  }
+
+  const extras: string[] = [];
+  if (road.median) extras.push("median");
+  if (road.shoulder) extras.push("shoulder");
+  if (road.crosswalk) extras.push("crosswalk");
+  if (extras.length > 0) parts.push(`with ${extras.join(" and ")}`);
+
+  if (road.surface && road.surface !== "paved") parts.push(`${road.surface.replace("_", " ")} surface`);
+  if (road.markings) parts.push(`${road.markings} markings`);
+  if (road.curvature && road.curvature !== "straight") parts.push(road.curvature.replace("_", " "));
+  if (road.grade && road.grade !== "flat") parts.push(road.grade);
+  if (road.intersection) {
+    parts.push(road.intersectionType ? `${road.intersectionType.replace("_", " ")} intersection` : "intersection");
+  }
+
+  const sentence = parts.length > 0
+    ? parts[0].charAt(0).toUpperCase() + parts.join(", ").slice(1)
+    : "—";
+
   return (
-    <div className="space-y-2">
+    <div className="space-y-1">
       <h4 className="text-sm font-medium flex items-center gap-2">
         <Route className="w-4 h-4" />
         Road
       </h4>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-        <div className="text-muted-foreground">Type</div>
-        <div className="font-medium">{road.roadType || "—"}</div>
-        <div className="text-muted-foreground">Lanes</div>
-        <div className="font-medium">{road.lanes !== null ? road.lanes : "—"}</div>
-        <div className="text-muted-foreground">Surface</div>
-        <div className="font-medium capitalize">{road.surface?.replace("_", " ") || "—"}</div>
-        <div className="text-muted-foreground">Markings</div>
-        <div className="font-medium capitalize">{road.markings || "—"}</div>
-      </div>
-      <div className="flex flex-wrap gap-1.5 mt-1">
-        {road.intersection && (
-          <Badge variant="outline" className="text-xs">
-            intersection{road.intersectionType ? ` (${road.intersectionType.replace("_", " ")})` : ""}
-          </Badge>
-        )}
-        {road.crosswalk && (
-          <Badge variant="outline" className="text-xs">
-            crosswalk
-          </Badge>
-        )}
-        {road.curvature && road.curvature !== "straight" && (
-          <Badge variant="secondary" className="text-xs capitalize">
-            {road.curvature.replace("_", " ")}
-          </Badge>
-        )}
-        {road.grade && road.grade !== "flat" && (
-          <Badge variant="secondary" className="text-xs capitalize">
-            {road.grade}
-          </Badge>
-        )}
-        {road.shoulder !== null && (
-          <Badge variant="secondary" className="text-xs">
-            {road.shoulder ? "shoulder" : "no shoulder"}
-          </Badge>
-        )}
-        {road.median !== null && (
-          <Badge variant="secondary" className="text-xs">
-            {road.median ? "median" : "no median"}
-          </Badge>
-        )}
-      </div>
+      <p className="text-sm text-muted-foreground">{sentence}</p>
     </div>
   );
 }
@@ -183,64 +169,69 @@ function SignageSection({ signs }: { signs: RoadSign[] }) {
 
 // --- Section: Objects ---
 function ObjectsSection({ objects }: { objects: DetectedObject[] }) {
+  const [showLow, setShowLow] = useState(false);
+
   if (objects.length === 0) return null;
 
-  const people = objects.filter((o) => o.type === "pedestrian" || o.type === "cyclist");
-  const vehicles = objects.filter((o) => o.type === "vehicle");
-  const other = objects.filter((o) => o.type !== "pedestrian" && o.type !== "cyclist" && o.type !== "vehicle");
+  const primary = objects.filter((o) => o.relevance !== "low");
+  const low = objects.filter((o) => o.relevance === "low");
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-1">
       <h4 className="text-sm font-medium flex items-center gap-2">
         <Users className="w-4 h-4" />
         Objects & People ({objects.length})
       </h4>
-      <div className="space-y-1.5">
-        {people.map((obj, i) => (
-          <ObjectRow key={`p${i}`} obj={obj} highlight />
-        ))}
-        {vehicles.map((obj, i) => (
-          <ObjectRow key={`v${i}`} obj={obj} />
-        ))}
-        {other.map((obj, i) => (
-          <ObjectRow key={`o${i}`} obj={obj} />
-        ))}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs text-muted-foreground border-b">
+              <th className="text-left font-medium py-1 pr-2">Type</th>
+              <th className="text-left font-medium py-1 pr-2">Position</th>
+              <th className="text-left font-medium py-1 pr-2">Dist.</th>
+              <th className="text-left font-medium py-1">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {primary.map((obj, i) => (
+              <ObjectTableRow key={i} obj={obj} />
+            ))}
+            {showLow && low.map((obj, i) => (
+              <ObjectTableRow key={`low-${i}`} obj={obj} dimmed />
+            ))}
+          </tbody>
+        </table>
       </div>
+      {low.length > 0 && (
+        <button
+          onClick={() => setShowLow(!showLow)}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {showLow ? "Hide" : `Show ${low.length} more`} low-relevance object{low.length !== 1 ? "s" : ""}
+        </button>
+      )}
     </div>
   );
 }
 
-function ObjectRow({ obj, highlight }: { obj: DetectedObject; highlight?: boolean }) {
+function ObjectTableRow({ obj, dimmed }: { obj: DetectedObject; dimmed?: boolean }) {
+  const isPerson = obj.type === "pedestrian" || obj.type === "cyclist";
   return (
-    <div
-      className={cn(
-        "flex items-start gap-2 p-2 rounded-lg border text-sm",
-        highlight
-          ? "bg-purple-50 border-purple-200 text-purple-900"
-          : "bg-muted/30"
-      )}
-    >
-      <div className="flex-1 min-w-0">
-        <span className="font-medium capitalize">{obj.type}</span>
-        {obj.subtype && (
-          <span className="text-xs ml-1 text-muted-foreground">({obj.subtype})</span>
-        )}
-        {obj.moving !== null && (
-          <Badge variant="secondary" className="text-xs ml-1.5">
-            {obj.moving ? "moving" : "stationary"}
-          </Badge>
-        )}
-        <p className="text-xs mt-0.5">{obj.description}</p>
-      </div>
-      <div className="flex flex-col items-end gap-0.5 shrink-0">
-        <Badge variant="secondary" className="text-xs">
-          {obj.position}
-        </Badge>
-        <span className="text-xs text-muted-foreground">
-          {obj.estimatedDistance.replace("_", " ")}
+    <tr className={cn("border-b border-border/50 last:border-0", dimmed && "text-muted-foreground")}>
+      <td className="py-1.5 pr-2 whitespace-nowrap align-top">
+        <span className={cn("font-medium capitalize", isPerson && "text-purple-700")}>
+          {obj.type}
         </span>
-      </div>
-    </div>
+        {obj.subtype && (
+          <span className="text-xs text-muted-foreground ml-1">({obj.subtype})</span>
+        )}
+      </td>
+      <td className="py-1.5 pr-2 whitespace-nowrap align-top capitalize">{obj.position}</td>
+      <td className="py-1.5 pr-2 whitespace-nowrap align-top text-muted-foreground">
+        {obj.estimatedDistance.replace("_", " ")}
+      </td>
+      <td className="py-1.5 align-top">{obj.description}</td>
+    </tr>
   );
 }
 
@@ -277,7 +268,7 @@ function VisibilitySection({ issues }: { issues: VisibilityIssue[] }) {
 }
 
 // --- Main Results ---
-function AnalysisResults({ analysis }: { analysis: VideoAnalysis }) {
+function AnalysisResults({ analysis, frameTimestamps }: { analysis: VideoAnalysis; frameTimestamps: number[] }) {
   const [showMore, setShowMore] = useState(false);
 
   return (
@@ -329,9 +320,11 @@ function AnalysisResults({ analysis }: { analysis: VideoAnalysis }) {
             <p className="text-sm ml-6">Near miss: {analysis.hazard.nearMissType}</p>
           )}
           {analysis.hazard.contributingFactors.length > 0 && (
-            <p className="text-sm ml-6">
-              Factors: {analysis.hazard.contributingFactors.join(", ")}
-            </p>
+            <ul className="text-sm ml-6 mt-1 list-disc list-inside space-y-0.5">
+              {analysis.hazard.contributingFactors.map((factor, i) => (
+                <li key={i}>{factor}</li>
+              ))}
+            </ul>
           )}
         </div>
       )}
@@ -398,18 +391,27 @@ function AnalysisResults({ analysis }: { analysis: VideoAnalysis }) {
             </div>
           </div>
 
-          {/* Frame Notes */}
+          {/* Frame Notes Timeline */}
           {analysis.frameNotes.length > 0 && (
             <div className="space-y-2">
               <h4 className="text-sm font-medium flex items-center gap-2">
                 <Eye className="w-4 h-4" />
-                Frame Notes
+                Frame Timeline
               </h4>
-              <ol className="list-decimal list-inside space-y-1 text-sm text-muted-foreground">
-                {analysis.frameNotes.map((note, i) => (
-                  <li key={i}>{note}</li>
-                ))}
-              </ol>
+              <div className="relative ml-3 border-l border-border pl-4 space-y-2">
+                {analysis.frameNotes.map((note, i) => {
+                  const ts = frameTimestamps[i];
+                  return (
+                    <div key={i} className="relative text-sm">
+                      <div className="absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full bg-muted-foreground/40 border-2 border-background" />
+                      <span className="font-mono text-xs text-muted-foreground mr-2">
+                        {ts !== undefined ? `${ts.toFixed(1)}s` : `#${i + 1}`}
+                      </span>
+                      <span className="text-muted-foreground">{note}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
@@ -496,6 +498,7 @@ export function VideoAnalysisCard({ eventId }: VideoAnalysisCardProps) {
   const {
     analysis,
     analyzedAt,
+    frameTimestamps,
     isLoading,
     error,
     analyze,
@@ -512,17 +515,13 @@ export function VideoAnalysisCard({ eventId }: VideoAnalysisCardProps) {
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Brain className="w-5 h-5" />
-          Scene Analysis
-          {analyzedAt && (
-            <span className="text-xs font-normal text-muted-foreground ml-auto">
-              {new Date(analyzedAt).toLocaleString()}
-            </span>
-          )}
-        </CardTitle>
-      </CardHeader>
+      {analyzedAt && (
+        <CardHeader>
+          <CardTitle className="text-sm text-muted-foreground text-right">
+            {new Date(analyzedAt).toLocaleString()}
+          </CardTitle>
+        </CardHeader>
+      )}
       <CardContent className="space-y-4">
         {!analysis && !isLoading && !error && (
           <div className="text-center py-4">
@@ -561,7 +560,7 @@ export function VideoAnalysisCard({ eventId }: VideoAnalysisCardProps) {
           </div>
         )}
 
-        {analysis && <AnalysisResults analysis={analysis} />}
+        {analysis && <AnalysisResults analysis={analysis} frameTimestamps={frameTimestamps} />}
 
         {analysis && (
           <ChatSection

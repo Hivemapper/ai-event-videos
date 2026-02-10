@@ -34,7 +34,7 @@ import {
   getCameraIntrinsics,
   setCameraIntrinsics,
   fetchCameraIntrinsics,
-  calculateFOV,
+  BEE_HFOV,
   DevicesResponse,
   getSpeedUnit,
   setSpeedUnit,
@@ -535,7 +535,7 @@ function SettingsContent() {
                       <div>
                         <span className="text-muted-foreground text-xs">Horizontal FOV</span>
                         <p className="font-mono font-medium">
-                          {calculateFOV(cameraIntrinsics.bee.focal).toFixed(1)}°
+                          {BEE_HFOV}°
                         </p>
                       </div>
                       <div>

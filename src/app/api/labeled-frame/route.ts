@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { API_BASE_URL } from "@/lib/constants";
+import { haversineDistance, createCirclePolygon } from "@/lib/geo-utils";
+import { fetchWithRetry } from "@/lib/fetch-retry";
 
 const MAP_API_BASE_URL = "https://beemaps.com/api/developer";
 
@@ -15,49 +17,6 @@ interface LabeledFeature {
   position: { lat: number; lon: number };
   speedLimit?: number;
   unit?: string;
-}
-
-// Calculate distance between two points using Haversine formula
-function calculateDistance(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
-  const R = 6371000; // Earth's radius in meters
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-// Create a polygon approximating a circle around a point
-function createCirclePolygon(
-  lat: number,
-  lon: number,
-  radiusMeters: number,
-  numPoints: number = 32
-): number[][] {
-  const coords: number[][] = [];
-  const earthRadius = 6371000; // meters
-
-  for (let i = 0; i <= numPoints; i++) {
-    const angle = (i / numPoints) * 2 * Math.PI;
-    const dLat = (radiusMeters / earthRadius) * Math.cos(angle);
-    const dLon =
-      (radiusMeters / (earthRadius * Math.cos((lat * Math.PI) / 180))) *
-      Math.sin(angle);
-
-    coords.push([lon + (dLon * 180) / Math.PI, lat + (dLat * 180) / Math.PI]);
-  }
-
-  return coords;
 }
 
 export async function GET(request: NextRequest) {
@@ -89,7 +48,7 @@ export async function GET(request: NextRequest) {
     const authHeader = apiKey.startsWith("Basic ") ? apiKey : `Basic ${apiKey}`;
 
     // Fetch event details
-    const eventResponse = await fetch(`${API_BASE_URL}/${eventId}`, {
+    const eventResponse = await fetchWithRetry(`${API_BASE_URL}/${eventId}`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
@@ -114,7 +73,7 @@ export async function GET(request: NextRequest) {
       radius
     );
 
-    const mapFeaturesResponse = await fetch(`${MAP_API_BASE_URL}/map-data`, {
+    const mapFeaturesResponse = await fetchWithRetry(`${MAP_API_BASE_URL}/map-data`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -140,7 +99,7 @@ export async function GET(request: NextRequest) {
       features = rawFeatures
         .filter((f) => f.class && f.position)
         .map((f) => {
-          const distance = calculateDistance(
+          const distance = haversineDistance(
             event.location.lat,
             event.location.lon,
             f.position.lat,
