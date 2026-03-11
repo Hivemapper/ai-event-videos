@@ -124,8 +124,8 @@ export default function PipelinePage() {
     });
   };
 
-  const latestRun = data?.latestRun ?? null;
   const activeRun = data?.activeRun ?? null;
+  const latestRun = activeRun?.day === day ? activeRun : data?.latestRun ?? null;
   const canStart = !activeRun;
   const summaryCards = useMemo(
     () => [
