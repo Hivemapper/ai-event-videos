@@ -126,7 +126,6 @@ export default function PipelinePage() {
 
   const latestRun = data?.latestRun ?? null;
   const activeRun = data?.activeRun ?? null;
-  const dayRun = activeRun?.day === day ? activeRun : null;
   const canStart = !activeRun;
   const summaryCards = useMemo(
     () => [
@@ -186,43 +185,43 @@ export default function PipelinePage() {
             >
               Start Run
             </Button>
-            {dayRun?.status === "running" && (
+            {activeRun?.status === "running" && (
               <Button
                 variant="outline"
                 disabled={isPending}
                 onClick={() =>
-                  runAction(`/api/pipeline/runs/${dayRun.id}/pause`, {
+                  runAction(`/api/pipeline/runs/${activeRun.id}/pause`, {
                     method: "POST",
                   })
                 }
               >
-                Pause
+                Pause {activeRun.day !== day ? activeRun.day : ""}
               </Button>
             )}
-            {dayRun?.status === "paused" && (
+            {activeRun?.status === "paused" && (
               <Button
                 variant="outline"
                 disabled={isPending}
                 onClick={() =>
-                  runAction(`/api/pipeline/runs/${dayRun.id}/resume`, {
+                  runAction(`/api/pipeline/runs/${activeRun.id}/resume`, {
                     method: "POST",
                   })
                 }
               >
-                Resume
+                Resume {activeRun.day !== day ? activeRun.day : ""}
               </Button>
             )}
-            {dayRun && (
+            {activeRun && (
               <Button
                 variant="outline"
                 disabled={isPending}
                 onClick={() =>
-                  runAction(`/api/pipeline/runs/${dayRun.id}/cancel`, {
+                  runAction(`/api/pipeline/runs/${activeRun.id}/cancel`, {
                     method: "POST",
                   })
                 }
               >
-                Cancel
+                Cancel {activeRun.day !== day ? activeRun.day : ""}
               </Button>
             )}
             {latestRun && !activeRun && (
