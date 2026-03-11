@@ -1,0 +1,4 @@
+opencv-python>=4.10,<5
+requests>=2.32,<3
+torch>=2.2,<3
+ultralytics>=8.3,<9

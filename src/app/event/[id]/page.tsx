@@ -37,6 +37,7 @@ import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
 import { MetadataTable } from "@/components/events/metadata-table";
 import { FrameLabeling } from "@/components/events/frame-labeling";
 import { PositioningSection } from "@/components/events/positioning-section";
+import { VideoVruPanel } from "@/components/events/video-vru-panel";
 import { SpeedOverlay } from "@/components/events/speed-overlay";
 import { ActorControls } from "@/components/events/actor-controls";
 import { calculateBearing } from "@/lib/geo-projection";
@@ -513,6 +514,17 @@ export default function EventDetailPage({
                 )}
               </div>
             </div>
+
+            <VideoVruPanel
+              videoId={id}
+              currentTime={videoCurrentTime}
+              duration={videoDuration}
+              onSeek={(time) => {
+                if (videoRef.current) {
+                  videoRef.current.currentTime = time;
+                }
+              }}
+            />
 
             {/* Speed Profile */}
             <Card>
