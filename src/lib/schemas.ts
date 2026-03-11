@@ -6,7 +6,7 @@ export const eventsSearchSchema = z.object({
   types: z.array(z.string()).optional(),
   bbox: z.array(z.number()).length(4).optional(),
   polygon: z.array(z.array(z.number()).length(2)).optional(),
-  limit: z.number().int().positive().optional(),
+  limit: z.number().int().positive().max(500).optional(),
   offset: z.number().int().nonnegative().optional(),
 });
 
@@ -22,6 +22,30 @@ export const analyzeSchema = z.object({
   beemapsApiKey: z.string().optional(),
   mapboxToken: z.string().optional(),
   forceRefresh: z.boolean().optional(),
+});
+
+export const pipelineRunCreateSchema = z.object({
+  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "day must be YYYY-MM-DD"),
+  batchSize: z.number().int().positive().max(500),
+  beeMapsApiKey: z.string().min(1, "Bee Maps API key is required"),
+});
+
+export const visionScanSchema = z.object({
+  query: z.string().min(1),
+  events: z
+    .array(
+      z.object({
+        eventId: z.string().min(1),
+        lat: z.number(),
+        lon: z.number(),
+        eventType: z.string().optional(),
+      })
+    )
+    .min(1)
+    .max(50),
+  model: z.union([z.literal("sonnet"), z.literal("haiku")]),
+  anthropicApiKey: z.string().optional(),
+  mapboxToken: z.string().optional(),
 });
 
 export const detectActorsSchema = z.object({

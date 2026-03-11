@@ -16,8 +16,12 @@ import {
   FileText,
   Save,
   Gauge,
+  Tag,
+  Plus,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Header } from "@/components/layout/header";
@@ -41,6 +45,7 @@ import {
   SpeedUnit,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { LabelDefinition } from "@/types/pipeline";
 
 function SettingsContent() {
   const { theme, setTheme } = useTheme();
@@ -74,6 +79,12 @@ function SettingsContent() {
   const [claudeMdSaving, setClaudeMdSaving] = useState(false);
   const [claudeMdSaved, setClaudeMdSaved] = useState(false);
   const [claudeMdError, setClaudeMdError] = useState<string | null>(null);
+
+  // Labels state
+  const [labels, setLabels] = useState<LabelDefinition[]>([]);
+  const [labelsLoaded, setLabelsLoaded] = useState(false);
+  const [newLabelInput, setNewLabelInput] = useState("");
+  const [labelError, setLabelError] = useState<string | null>(null);
 
   useEffect(() => {
     // Load Beemaps API key
@@ -199,6 +210,55 @@ function SettingsContent() {
     }
   };
 
+  // Labels handlers
+  const fetchLabels = async () => {
+    try {
+      const res = await fetch("/api/labels");
+      const data = await res.json();
+      setLabels(data);
+      setLabelsLoaded(true);
+      setLabelError(null);
+    } catch {
+      setLabelError("Failed to load labels");
+    }
+  };
+
+  const handleAddLabel = async () => {
+    const name = newLabelInput.trim().toLowerCase();
+    if (!name) return;
+    setLabelError(null);
+    try {
+      const res = await fetch("/api/labels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setLabelError(data.error || "Failed to create label");
+        return;
+      }
+      setNewLabelInput("");
+      fetchLabels();
+    } catch {
+      setLabelError("Failed to create label");
+    }
+  };
+
+  const handleRemoveLabel = async (id: number) => {
+    try {
+      const res = await fetch(`/api/labels/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: "Failed to remove label" }));
+        setLabelError(data.error || "Failed to remove label");
+        return;
+      }
+      fetchLabels();
+    } catch {
+      setLabelError("Failed to remove label");
+    }
+  };
+
   const handleSaveClaudeMd = async () => {
     setClaudeMdSaving(true);
     setClaudeMdError(null);
@@ -241,6 +301,12 @@ function SettingsContent() {
               <TabsTrigger value="camera" className="flex-1">
                 <Camera className="w-4 h-4 mr-2" />
                 Camera Specs
+              </TabsTrigger>
+              <TabsTrigger value="labels" className="flex-1" onClick={() => {
+                if (!labelsLoaded) fetchLabels();
+              }}>
+                <Tag className="w-4 h-4 mr-2" />
+                Labels
               </TabsTrigger>
               <TabsTrigger value="claude-md" className="flex-1" onClick={() => {
                 if (!claudeMdLoaded) handleLoadClaudeMd();
@@ -595,6 +661,89 @@ function SettingsContent() {
                       <li>All AI Event Videos are from the Bee camera</li>
                     </ul>
                   </div>
+                </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="labels" className="space-y-4 py-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <Tag className="w-4 h-4" />
+                  VRU Taxonomy
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  System labels drive the local VRU pipeline. Custom labels remain available for future manual or experimental workflows.
+                </p>
+              </div>
+
+              {labelError && (
+                <div className="flex items-center gap-2 p-3 bg-destructive/10 text-destructive rounded-lg text-sm">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  {labelError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Input
+                  placeholder="New label name"
+                  value={newLabelInput}
+                  onChange={(e) => setNewLabelInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddLabel(); }}
+                  className="flex-1"
+                />
+                <Button onClick={handleAddLabel} disabled={!newLabelInput.trim()}>
+                  <Plus className="w-4 h-4 mr-1" />
+                  Add
+                </Button>
+              </div>
+
+              {labelsLoaded && labels.length === 0 && (
+                <div className="p-4 rounded-lg bg-muted text-sm text-muted-foreground text-center">
+                  No labels defined yet. Add one above.
+                </div>
+              )}
+
+              {labels.length > 0 && (
+                <div className="space-y-1">
+                  {labels.map((label) => (
+                    <div
+                      key={label.id}
+                      className="flex items-center justify-between px-3 py-2 rounded-lg bg-muted"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{label.name}</span>
+                        {label.is_system ? (
+                          <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                            system
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                            custom
+                          </Badge>
+                        )}
+                        <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                          {label.support_level}
+                        </Badge>
+                      </div>
+                      {!label.is_system && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveLabel(label.id)}
+                          className="text-destructive hover:text-destructive h-7 w-7 p-0"
+                        >
+                          <X className="w-4 h-4" />
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className={cn("p-3 rounded-lg text-sm", "bg-muted text-muted-foreground")}>
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <p>System labels are owned by the VRU pipeline. Custom labels are stored in the local SQLite database and can be removed here.</p>
                 </div>
               </div>
             </TabsContent>
