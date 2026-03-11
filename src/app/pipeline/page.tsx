@@ -388,10 +388,13 @@ export default function PipelinePage() {
             ) : (
               <div className="space-y-3">
                 {(data?.videos ?? []).map((video) => (
-                  <article
+                  <Link
                     key={video.videoId}
+                    href={`/event/${video.videoId}`}
+                    target="_blank"
+                    rel="noreferrer"
                     className={cn(
-                      "rounded-2xl border p-3 shadow-sm transition-colors hover:border-border hover:bg-card lg:p-4",
+                      "block rounded-2xl border p-3 shadow-sm transition-colors hover:border-border hover:bg-card lg:p-4",
                       rowClassName(video)
                     )}
                     style={{
@@ -400,10 +403,7 @@ export default function PipelinePage() {
                     }}
                   >
                     <div className="grid gap-4 lg:grid-cols-[136px_minmax(0,1.6fr)_minmax(0,0.9fr)_minmax(0,1.1fr)] lg:items-center">
-                      <Link
-                        href={`/event/${video.videoId}`}
-                        className="group/preview relative block overflow-hidden rounded-xl border border-border/70 bg-muted"
-                      >
+                      <div className="group/preview relative block overflow-hidden rounded-xl border border-border/70 bg-muted">
                         <Image
                           src={`/api/thumbnail?url=${encodeURIComponent(video.videoUrl)}`}
                           alt=""
@@ -415,7 +415,7 @@ export default function PipelinePage() {
                         <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 via-black/15 to-transparent px-3 py-2 text-xs font-medium text-white">
                           Open video
                         </div>
-                      </Link>
+                      </div>
 
                       <div className="min-w-0 space-y-3">
                         <div className="flex flex-wrap items-center gap-2">
@@ -428,12 +428,9 @@ export default function PipelinePage() {
                         </div>
                         <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                           <div className="min-w-0">
-                            <Link
-                              href={`/event/${video.videoId}`}
-                              className="block truncate text-lg font-semibold tracking-tight text-foreground transition-colors hover:text-primary"
-                            >
+                            <div className="block truncate text-lg font-semibold tracking-tight text-foreground transition-colors hover:text-primary">
                               {formatEventType(video.type)}
-                            </Link>
+                            </div>
                             <div className="mt-1 text-xs font-mono text-muted-foreground/80">
                               {video.videoId}
                             </div>
@@ -504,7 +501,7 @@ export default function PipelinePage() {
                         </div>
                       </div>
                     </div>
-                  </article>
+                  </Link>
                 ))}
               </div>
             )}
