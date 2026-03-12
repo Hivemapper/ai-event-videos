@@ -189,6 +189,10 @@ export default function PipelinePage() {
     router.push(`/pipeline/${day}`);
   };
 
+  const openDayInNewTab = (day: string) => {
+    window.open(`/pipeline/${day}`, "_blank", "noopener,noreferrer");
+  };
+
   const handleRowKeyDown = (event: KeyboardEvent<HTMLElement>, day: string) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -425,7 +429,7 @@ export default function PipelinePage() {
                           <Button
                             variant="ghost"
                             disabled={isPending}
-                            onClick={() => navigateToDay(summary.day)}
+                            onClick={() => openDayInNewTab(summary.day)}
                           >
                             Open Day
                           </Button>
