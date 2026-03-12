@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 
 const LRU_MAX = 30;
 const lruCache = new Map<string, string>(); // videoUrl → blob URL
+const failedThumbnailCache = new Set<string>();
 
 function lruGet(key: string): string | undefined {
   const value = lruCache.get(key);
@@ -40,10 +41,10 @@ interface UseThumbnailResult {
 export function useThumbnail(videoUrl: string): UseThumbnailResult {
   const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(() => lruGet(videoUrl) ?? null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState(() => failedThumbnailCache.has(videoUrl));
   const [isVisible, setIsVisible] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
-  const hasAttempted = useRef(!!lruGet(videoUrl));
+  const hasAttempted = useRef(!!lruGet(videoUrl) || failedThumbnailCache.has(videoUrl));
 
   // IntersectionObserver for lazy loading
   useEffect(() => {
@@ -82,6 +83,11 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
       return;
     }
 
+    if (failedThumbnailCache.has(videoUrl)) {
+      setError(true);
+      return;
+    }
+
     setIsLoading(true);
     setError(false);
 
@@ -89,7 +95,8 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
       const encodedUrl = encodeURIComponent(videoUrl);
       const response = await fetch(`/api/thumbnail?url=${encodedUrl}`);
 
-      if (!response.ok) {
+      if (!response.ok || response.headers.get("X-Thumbnail-Fallback") === "1") {
+        failedThumbnailCache.add(videoUrl);
         throw new Error("Failed to load thumbnail");
       }
 
