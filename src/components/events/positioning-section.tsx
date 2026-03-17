@@ -5,6 +5,7 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
+  Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -81,6 +82,16 @@ export function PositioningSection({ eventId, gnssData }: PositioningSectionProp
   const formatAccel = (val: number) => `${val.toFixed(3)} m/s²`;
   const formatGyro = (val: number) => `${val.toFixed(4)} rad/s`;
 
+  const downloadJson = (data: unknown, filename: string) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <Card>
       <CardHeader
@@ -107,7 +118,7 @@ export function PositioningSection({ eventId, gnssData }: PositioningSectionProp
       {isExpanded && (
         <CardContent className="space-y-4">
           {/* Tab buttons */}
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
             <Button
               variant={activeTab === "gnss" ? "default" : "outline"}
               size="sm"
@@ -123,6 +134,28 @@ export function PositioningSection({ eventId, gnssData }: PositioningSectionProp
               IMU Data
               {isLoadingImu && <Loader2 className="w-3 h-3 animate-spin" />}
             </Button>
+            <div className="ml-auto">
+              {activeTab === "gnss" && gnssData && gnssData.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => downloadJson(gnssData, `gnss-${eventId}.json`)}
+                >
+                  <Download className="w-3.5 h-3.5 mr-1.5" />
+                  Download JSON
+                </Button>
+              )}
+              {activeTab === "imu" && imuData && imuData.length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => downloadJson(imuData, `imu-${eventId}.json`)}
+                >
+                  <Download className="w-3.5 h-3.5 mr-1.5" />
+                  Download JSON
+                </Button>
+              )}
+            </div>
           </div>
 
           {/* GNSS Tab */}

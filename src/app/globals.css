@@ -145,6 +145,24 @@
   }
 }
 
+@keyframes progress-indeterminate {
+  0% {
+    width: 20%;
+    transform: translateX(-100%);
+  }
+  50% {
+    width: 40%;
+  }
+  100% {
+    width: 20%;
+    transform: translateX(500%);
+  }
+}
+
+.animate-progress {
+  animation: progress-indeterminate 1.5s ease-in-out infinite;
+}
+
 .event-marker {
   cursor: grab;
   transition: transform 0.15s ease;

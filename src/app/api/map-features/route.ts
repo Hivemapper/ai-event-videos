@@ -12,7 +12,7 @@ interface RawMapFeature {
 
 export async function GET(request: NextRequest) {
   try {
-    const apiKey = request.headers.get("Authorization");
+    const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
     const lat = request.nextUrl.searchParams.get("lat");
     const lon = request.nextUrl.searchParams.get("lon");
     const radius = request.nextUrl.searchParams.get("radius") || "200";
