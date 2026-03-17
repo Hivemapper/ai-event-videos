@@ -21,7 +21,7 @@ interface LabeledFeature {
 
 export async function GET(request: NextRequest) {
   try {
-    const apiKey = request.headers.get("Authorization");
+    const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
     const eventId = request.nextUrl.searchParams.get("eventId");
     const timestampParam = request.nextUrl.searchParams.get("timestamp") || "0";
     const widthParam = request.nextUrl.searchParams.get("width") || "1280";

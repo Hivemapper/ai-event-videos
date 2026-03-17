@@ -105,7 +105,7 @@ const SECTION_TYPES: Record<number, AIEventType[]> = {
 
 export async function POST(request: NextRequest) {
   try {
-    const apiKey = request.headers.get("Authorization");
+    const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
         { error: "API key is required" },
@@ -113,7 +113,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const mapboxToken = request.headers.get("X-Mapbox-Token");
+    const mapboxToken = request.headers.get("X-Mapbox-Token") || process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
     const { excludeIds = [] }: { excludeIds?: string[] } =
       await request.json();
     const excludeSet = new Set(excludeIds);

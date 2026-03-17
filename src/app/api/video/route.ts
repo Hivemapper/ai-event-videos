@@ -19,8 +19,9 @@ export async function GET(request: NextRequest) {
     const response = await fetch(url, { headers: fetchHeaders });
 
     if (!response.ok && response.status !== 206) {
+      const errorText = (await response.text()).trim();
       return NextResponse.json(
-        { error: `Failed to fetch video: ${response.status}` },
+        { error: errorText || `Failed to fetch video: ${response.status}` },
         { status: response.status }
       );
     }

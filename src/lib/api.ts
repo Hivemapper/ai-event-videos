@@ -58,7 +58,7 @@ export const BEE_HFOV = 142;
 
 export function getApiKey(): string | null {
   if (typeof window === "undefined") return null;
-  return localStorage.getItem(API_KEY_STORAGE_KEY);
+  return localStorage.getItem(API_KEY_STORAGE_KEY) || process.env.NEXT_PUBLIC_BEEMAPS_API_KEY || null;
 }
 
 export function setApiKey(key: string): void {
@@ -88,7 +88,7 @@ export function clearMapboxToken(): void {
 
 export function getAnthropicKey(): string | null {
   if (typeof window === "undefined") return null;
-  return localStorage.getItem(ANTHROPIC_KEY_STORAGE_KEY);
+  return localStorage.getItem(ANTHROPIC_KEY_STORAGE_KEY) || process.env.NEXT_PUBLIC_ANTHROPIC_API_KEY || null;
 }
 
 export function setAnthropicKey(key: string): void {

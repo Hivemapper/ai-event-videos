@@ -278,6 +278,35 @@ export function FilterBar({
                     <Calendar className="w-4 h-4" />
                     Date Range
                   </label>
+                  <div className="flex gap-1.5">
+                    {[
+                      { label: "24h", days: 1 },
+                      { label: "7d", days: 7 },
+                      { label: "30d", days: 30 },
+                      { label: "60d", days: 60 },
+                    ].map(({ label, days }) => {
+                      const presetStart = new Date();
+                      presetStart.setDate(presetStart.getDate() - days);
+                      const presetStartStr = presetStart.toISOString().split("T")[0];
+                      const todayStr = new Date().toISOString().split("T")[0];
+                      const isActive = draftStartDate === presetStartStr && draftEndDate === todayStr;
+                      return (
+                        <Button
+                          key={days}
+                          type="button"
+                          variant={isActive ? "secondary" : "ghost"}
+                          size="sm"
+                          className="h-7 px-2.5 text-xs"
+                          onClick={() => {
+                            setDraftStartDate(presetStartStr);
+                            setDraftEndDate(todayStr);
+                          }}
+                        >
+                          {label}
+                        </Button>
+                      );
+                    })}
+                  </div>
                   <div className="space-y-2">
                     <Input
                       type="date"

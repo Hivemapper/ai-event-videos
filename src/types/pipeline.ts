@@ -110,3 +110,20 @@ export interface PipelineVideoRow {
   completedAt: string | null;
   lastError: string | null;
 }
+
+export interface PipelineDaySummary {
+  day: string;
+  totalVideos: number | null;
+  processedCount: number;
+  failedCount: number;
+  queuedCount: number;
+  runningCount: number;
+  staleCount: number;
+  unprocessedCount: number;
+  remainingCount: number | null;
+  processedPercent: number | null;
+  latestRun: PipelineRunRecord | null;
+  currentVideoId: string | null;
+  lastCompletedAt: string | null;
+  countError: string | null;
+}

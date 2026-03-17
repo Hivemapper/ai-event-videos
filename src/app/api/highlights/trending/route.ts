@@ -54,7 +54,7 @@ function delay(ms: number): Promise<void> {
 
 export async function GET(request: NextRequest) {
   try {
-    const apiKey = request.headers.get("Authorization");
+    const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
 
     if (!apiKey) {
       return NextResponse.json(

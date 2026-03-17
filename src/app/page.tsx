@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { RefreshCw, AlertCircle, Brain, Loader2 } from "lucide-react";
+import { RefreshCw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import Link from "next/link";
@@ -29,7 +29,7 @@ import { AnalysisFiltersBar } from "@/components/events/analysis-filters";
 import { useEvents } from "@/hooks/use-events";
 import { AIEvent, AIEventType } from "@/types/events";
 import { TimeOfDay } from "@/lib/sun";
-import { getApiKey, getAnthropicKey, getMapboxToken } from "@/lib/api";
+import { getApiKey } from "@/lib/api";
 import {
   getAllCachedAnalyses,
   matchesAnalysisFilters,
@@ -89,8 +89,6 @@ function HomeContent() {
 
   // Batch analysis state
   const [analysisFilters, setAnalysisFilters] = useState<AnalysisFilters>({});
-  const [isBatchAnalyzing, setIsBatchAnalyzing] = useState(false);
-  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [cachedAnalyses, setCachedAnalyses] = useState<Record<string, unknown>>({});
 
   // Load cached analyses on mount
@@ -167,54 +165,6 @@ function HomeContent() {
     [filteredEvents, cachedAnalyses]
   );
 
-  const handleBatchAnalyze = useCallback(async () => {
-    const eventIds = filteredEvents.map((e) => e.id);
-    if (eventIds.length === 0) return;
-
-    setIsBatchAnalyzing(true);
-    setBatchProgress({ done: 0, total: eventIds.length });
-
-    try {
-      const response = await fetch("/api/analyze/batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          eventIds,
-          anthropicApiKey: getAnthropicKey(),
-          beemapsApiKey: getApiKey(),
-          mapboxToken: getMapboxToken(),
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setBatchProgress({ done: data.analyzed, total: data.total });
-
-        for (const [eventId, analysis] of Object.entries(data.results)) {
-          try {
-            localStorage.setItem(
-              `video-analysis-${eventId}`,
-              JSON.stringify({
-                analysis,
-                eventId,
-                analyzedAt: new Date().toISOString(),
-                frameTimestamps: [],
-              })
-            );
-          } catch {
-            // localStorage full
-          }
-        }
-
-        setCachedAnalyses(getAllCachedAnalyses());
-      }
-    } catch (err) {
-      console.error("Batch analysis error:", err);
-    } finally {
-      setIsBatchAnalyzing(false);
-      setBatchProgress(null);
-    }
-  }, [filteredEvents]);
 
   const handleEventClick = useCallback(
     (event: AIEvent) => {
@@ -285,34 +235,11 @@ function HomeContent() {
           </div>
         )}
 
-        {/* Results count + batch analyze */}
+        {/* Results count */}
         {!error && !isLoading && filteredEvents.length > 0 && (
-          <div className="flex items-center gap-3">
-            <p className="text-sm text-muted-foreground">
-              Showing {sceneFilteredEvents.length} of {totalCount} events
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleBatchAnalyze}
-              disabled={isBatchAnalyzing || filteredEvents.length === 0}
-              className="gap-2"
-            >
-              {isBatchAnalyzing ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  {batchProgress
-                    ? `${batchProgress.done}/${batchProgress.total}`
-                    : "Analyzing..."}
-                </>
-              ) : (
-                <>
-                  <Brain className="w-3.5 h-3.5" />
-                  Analyze All ({filteredEvents.length})
-                </>
-              )}
-            </Button>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            Showing {sceneFilteredEvents.length.toLocaleString()} of {totalCount.toLocaleString()} events
+          </p>
         )}
 
         {/* Scene analysis filters */}

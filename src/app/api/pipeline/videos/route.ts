@@ -36,6 +36,9 @@ export async function GET(request: NextRequest) {
       Promise.resolve(listVideoPipelineStatesForDay(day)),
       Promise.resolve(listPipelineRuns(day)),
     ]);
+    const activeRun =
+      runs.find((run) => ["queued", "running", "paused"].includes(run.status)) ??
+      getActivePipelineRun();
 
     const stateMap = mapStateByVideo(states);
     const videos: PipelineVideoRow[] = events.map((event) => {
@@ -87,10 +90,8 @@ export async function GET(request: NextRequest) {
           stateSummary.failed +
           stateSummary.stale,
       },
-      latestRun: runs[0] ?? null,
-      activeRun:
-        runs.find((run) => ["queued", "running", "paused"].includes(run.status)) ??
-        getActivePipelineRun(),
+      latestRun: activeRun && activeRun.day === day ? activeRun : runs[0] ?? null,
+      activeRun,
     });
   } catch (error) {
     return NextResponse.json(

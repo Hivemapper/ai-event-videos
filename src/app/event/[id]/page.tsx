@@ -133,7 +133,7 @@ export default function EventDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { data: event, error: eventError, isLoading } = useEventDetail(id);
+  const { data: event, error: eventError, isLoading, mutate: mutateEvent } = useEventDetail(id);
   const error = eventError?.message ?? null;
   const { data: countryName = null } = useCountryName(
     event?.location.lat ?? null,
@@ -151,11 +151,21 @@ export default function EventDetailPage({
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isRefreshingVideo, setIsRefreshingVideo] = useState(false);
+  const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
+  const [videoReloadKey, setVideoReloadKey] = useState(0);
   const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
+  const hasRetriedVideoRef = useRef(false);
 
   useEffect(() => {
     setSpeedUnitState(getSpeedUnit());
   }, []);
+
+  useEffect(() => {
+    hasRetriedVideoRef.current = false;
+    setVideoLoadError(null);
+    setVideoReloadKey(0);
+  }, [event?.id, event?.videoUrl]);
 
   // Measure video container height to sync map height
   useEffect(() => {
@@ -306,6 +316,9 @@ export default function EventDetailPage({
     setIsDownloading(true);
     try {
       const response = await fetch(getProxyVideoUrl(event.videoUrl));
+      if (!response.ok) {
+        throw new Error("Failed to download video");
+      }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -320,6 +333,68 @@ export default function EventDetailPage({
       setIsDownloading(false);
     }
   };
+
+  const probeVideoFailure = useCallback(async (videoUrl: string) => {
+    const response = await fetch(`${getProxyVideoUrl(videoUrl)}&probe=1&retry=${Date.now()}`, {
+      cache: "no-store",
+      headers: {
+        Range: "bytes=0-1",
+      },
+    });
+
+    if (response.ok || response.status === 206) {
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+
+    if (contentType.includes("application/json")) {
+      const payload = (await response.json()) as { error?: string };
+      return payload.error ?? `Failed to load video (${response.status})`;
+    }
+
+    const text = (await response.text()).trim();
+    return text || `Failed to load video (${response.status})`;
+  }, []);
+
+  const refreshVideoSource = useCallback(async () => {
+    if (!event?.videoUrl) return;
+
+    setIsRefreshingVideo(true);
+    setVideoLoadError(null);
+
+    try {
+      const refreshedEvent = await mutateEvent();
+      const latestVideoUrl = refreshedEvent?.videoUrl ?? event.videoUrl;
+      const probeError = await probeVideoFailure(latestVideoUrl);
+
+      if (probeError) {
+        setVideoLoadError(probeError);
+        return;
+      }
+
+      setVideoReloadKey((current) => current + 1);
+    } catch (refreshError) {
+      setVideoLoadError(
+        refreshError instanceof Error ? refreshError.message : "Failed to refresh video URL"
+      );
+    } finally {
+      setIsRefreshingVideo(false);
+    }
+  }, [event?.videoUrl, mutateEvent, probeVideoFailure]);
+
+  const handleVideoError = useCallback(async () => {
+    if (!event?.videoUrl) return;
+
+    if (!hasRetriedVideoRef.current) {
+      hasRetriedVideoRef.current = true;
+      await refreshVideoSource();
+      return;
+    }
+
+    const probeError = await probeVideoFailure(event.videoUrl);
+    setVideoLoadError(probeError ?? "Failed to load video");
+  }, [event?.videoUrl, probeVideoFailure, refreshVideoSource]);
 
   if (isLoading) {
     return <EventDetailSkeleton />;
@@ -379,16 +454,42 @@ export default function EventDetailPage({
             <div ref={videoContainerRef} className="overflow-hidden rounded-xl">
               <div className="relative aspect-video bg-black">
                 {event.videoUrl ? (
-                  <video
-                    ref={videoRef}
-                    src={getProxyVideoUrl(event.videoUrl)}
-                    controls
-                    autoPlay
-                    className="w-full h-full"
-                    controlsList="nodownload"
-                  >
-                    Your browser does not support the video tag.
-                  </video>
+                  videoLoadError ? (
+                    <div className="flex h-full w-full items-center justify-center p-6 text-center text-white">
+                      <div className="max-w-md space-y-4">
+                        <div className="space-y-2">
+                          <div className="text-lg font-semibold">Video unavailable</div>
+                          <p className="text-sm text-white/75">{videoLoadError}</p>
+                        </div>
+                        <div className="flex justify-center gap-2">
+                          <Button
+                            variant="secondary"
+                            onClick={() => void refreshVideoSource()}
+                            disabled={isRefreshingVideo}
+                          >
+                            {isRefreshingVideo ? (
+                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : null}
+                            Retry video
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <video
+                      key={`${event.id}-${videoReloadKey}`}
+                      ref={videoRef}
+                      src={`${getProxyVideoUrl(event.videoUrl)}&reload=${videoReloadKey}`}
+                      controls
+                      autoPlay
+                      className="w-full h-full"
+                      controlsList="nodownload"
+                      onLoadedData={() => setVideoLoadError(null)}
+                      onError={() => void handleVideoError()}
+                    >
+                      Your browser does not support the video tag.
+                    </video>
+                  )
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-muted-foreground">
                     No video available

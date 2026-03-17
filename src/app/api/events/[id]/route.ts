@@ -8,7 +8,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const apiKey = request.headers.get("Authorization");
+    const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
 
     if (!apiKey) {
       return NextResponse.json(

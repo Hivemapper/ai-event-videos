@@ -36,6 +36,13 @@ yarn-error.log*
 # videos
 /public/videos/
 
+# SQLite
+data/*.db
+data/*.db-journal
+data/*.db-wal
+scripts/data/
+scripts/__pycache__/
+
 # vercel
 .vercel
 

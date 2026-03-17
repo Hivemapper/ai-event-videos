@@ -6,6 +6,23 @@ import {
   DEFAULT_PIPELINE_MODEL_NAME,
 } from "@/lib/pipeline-config";
 
+function resolvePythonExecutable(cwd: string) {
+  const localVenvPython = path.join(cwd, ".venv", "bin", "python3");
+  if (fs.existsSync(localVenvPython)) {
+    return localVenvPython;
+  }
+
+  const activeVenv = process.env.VIRTUAL_ENV;
+  if (activeVenv) {
+    const activeVenvPython = path.join(activeVenv, "bin", "python3");
+    if (fs.existsSync(activeVenvPython)) {
+      return activeVenvPython;
+    }
+  }
+
+  return "python3";
+}
+
 function getWorkerPaths() {
   const cwd = process.cwd();
   const scriptPath = path.join(cwd, "scripts", "vru_pipeline_worker.py");
@@ -22,11 +39,12 @@ export function spawnPipelineWorker(params: {
   modelName?: string | null;
 }) {
   const { cwd, scriptPath, logDir } = getWorkerPaths();
+  const pythonExecutable = resolvePythonExecutable(cwd);
   const logPath = path.join(logDir, `${params.runId}.log`);
   const logFd = fs.openSync(logPath, "a");
 
   const child = spawn(
-    "python3",
+    pythonExecutable,
     [
       scriptPath,
       "--run-id",
@@ -49,6 +67,7 @@ export function spawnPipelineWorker(params: {
       env: {
         ...process.env,
         BEEMAPS_API_KEY: params.beeMapsKey,
+        PYTHONUNBUFFERED: "1",
       },
     }
   );
