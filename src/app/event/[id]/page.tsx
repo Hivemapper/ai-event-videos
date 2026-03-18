@@ -31,6 +31,7 @@ import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
 import { useActorDetection } from "@/hooks/use-actor-detection";
 import { useActorTracking } from "@/hooks/use-actor-tracking";
+import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
 import { useEventDetail, useCountryName, useNearestSpeedLimit } from "@/hooks/use-event-detail";
 import { VideoAnalysisCard } from "@/components/events/video-analysis";
 import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
@@ -39,6 +40,7 @@ import { FrameLabeling } from "@/components/events/frame-labeling";
 import { PositioningSection } from "@/components/events/positioning-section";
 import { VideoVruPanel } from "@/components/events/video-vru-panel";
 import { SpeedOverlay } from "@/components/events/speed-overlay";
+import { DetectionOverlay } from "@/components/events/detection-overlay";
 import { ActorControls } from "@/components/events/actor-controls";
 import { calculateBearing } from "@/lib/geo-projection";
 import {
@@ -150,6 +152,7 @@ export default function EventDetailPage({
   const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [isRefreshingVideo, setIsRefreshingVideo] = useState(false);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
@@ -191,8 +194,13 @@ export default function EventDetailPage({
       setVideoDuration(video.duration || 0);
     };
 
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
+
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("play", handlePlay);
+    video.addEventListener("pause", handlePause);
 
     // Set initial duration if already loaded
     if (video.duration) {
@@ -202,6 +210,8 @@ export default function EventDetailPage({
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("play", handlePlay);
+      video.removeEventListener("pause", handlePause);
     };
   }, [event]); // Re-run when event loads (video element gets src)
 
@@ -223,6 +233,9 @@ export default function EventDetailPage({
 
   // Actor tracking
   const { trackingResult, isTracking, progress: trackingProgress, error: trackingError, track: trackActors, clear: clearTracking } = useActorTracking();
+
+  // Detection timestamps for frame stepping and overlay
+  const { timestamps: detectionTimestamps, detectionsByFrame } = useDetectionTimestamps(event?.videoUrl ? id : null);
 
   // Reusable camera state interpolation from GNSS path
   const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
@@ -504,6 +517,15 @@ export default function EventDetailPage({
                     speedLimit={nearestSpeedLimit}
                   />
                 )}
+                {event.videoUrl && (
+                  <DetectionOverlay
+                    videoRef={videoRef}
+                    isPlaying={isPlaying}
+                    currentTime={videoCurrentTime}
+                    timestamps={detectionTimestamps}
+                    detectionsByFrame={detectionsByFrame}
+                  />
+                )}
               </div>
               {event.videoUrl && (
                 <div className="flex justify-end px-3 py-1.5 bg-black/80">
@@ -620,6 +642,8 @@ export default function EventDetailPage({
               videoId={id}
               currentTime={videoCurrentTime}
               duration={videoDuration}
+              isPlaying={isPlaying}
+              detectionTimestamps={detectionTimestamps}
               onSeek={(time) => {
                 if (videoRef.current) {
                   videoRef.current.currentTime = time;

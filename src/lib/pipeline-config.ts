@@ -4,6 +4,12 @@ import {
   VruSupportLevel,
 } from "@/types/pipeline";
 
+/** Tolerance in ms when snapping video time to the nearest detection frame. */
+export const DETECTION_FRAME_TOLERANCE_MS = 200;
+
+/** Minimum confidence to show a detection box in the UI overlay. */
+export const DISPLAY_CONFIDENCE_THRESHOLD = 0.5;
+
 export const CURRENT_PIPELINE_VERSION = "vru-yolo-v2";
 export const DEFAULT_PIPELINE_MODEL_NAME = "yolo11x";
 export const DEFAULT_PIPELINE_BATCH_SIZE = 50;

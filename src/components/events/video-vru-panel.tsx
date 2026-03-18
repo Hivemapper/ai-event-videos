@@ -1,18 +1,22 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useVideoVru } from "@/hooks/use-video-vru";
-import { VRU_LABEL_COLOR_MAP } from "@/lib/pipeline-config";
+import { DETECTION_FRAME_TOLERANCE_MS, VRU_LABEL_COLOR_MAP } from "@/lib/pipeline-config";
 import { cn } from "@/lib/utils";
-import { VideoDetectionSegment } from "@/types/pipeline";
+import type { VideoDetectionSegment } from "@/types/pipeline";
 
 interface VideoVruPanelProps {
   videoId: string;
   currentTime: number;
   duration: number;
+  isPlaying?: boolean;
+  detectionTimestamps?: number[];
   onSeek: (time: number) => void;
 }
 
@@ -40,10 +44,49 @@ export function VideoVruPanel({
   videoId,
   currentTime,
   duration,
+  isPlaying,
+  detectionTimestamps,
   onSeek,
 }: VideoVruPanelProps) {
   const { data, isLoading } = useVideoVru(videoId);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+  // Frame stepping helpers
+  const currentMs = currentTime * 1000;
+  const sortedTimestamps = useMemo(
+    () => (detectionTimestamps ? [...detectionTimestamps].sort((a, b) => a - b) : []),
+    [detectionTimestamps]
+  );
+
+  const currentFrameIndex = useMemo(() => {
+    if (sortedTimestamps.length === 0) return -1;
+    let bestIdx = 0;
+    let bestDist = Math.abs(sortedTimestamps[0] - currentMs);
+    for (let i = 1; i < sortedTimestamps.length; i++) {
+      const dist = Math.abs(sortedTimestamps[i] - currentMs);
+      if (dist < bestDist) {
+        bestIdx = i;
+        bestDist = dist;
+      }
+    }
+    return bestDist < DETECTION_FRAME_TOLERANCE_MS ? bestIdx : -1;
+  }, [sortedTimestamps, currentMs]);
+
+  const canStepPrev = currentFrameIndex > 0;
+  const canStepNext =
+    currentFrameIndex >= 0 && currentFrameIndex < sortedTimestamps.length - 1;
+
+  const stepPrev = () => {
+    if (canStepPrev) {
+      onSeek(sortedTimestamps[currentFrameIndex - 1] / 1000);
+    }
+  };
+
+  const stepNext = () => {
+    if (canStepNext) {
+      onSeek(sortedTimestamps[currentFrameIndex + 1] / 1000);
+    }
+  };
 
   const groupedSegments = useMemo(() => {
     const groups = new Map<string, VideoDetectionSegment[]>();
@@ -139,6 +182,40 @@ export function VideoVruPanel({
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Frame stepping controls - show when paused on a detection frame */}
+        {!isPlaying && sortedTimestamps.length > 0 && currentFrameIndex >= 0 && (
+          <div className="flex items-center justify-between rounded-lg border bg-muted/50 px-3 py-2">
+            <span className="text-sm text-muted-foreground">
+              Frame at {(sortedTimestamps[currentFrameIndex] / 1000).toFixed(2)}s
+            </span>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={!canStepPrev}
+                onClick={stepPrev}
+                title="Previous detection frame"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <span className="text-xs tabular-nums text-muted-foreground min-w-[4rem] text-center">
+                {currentFrameIndex + 1} / {sortedTimestamps.length}
+              </span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                disabled={!canStepNext}
+                onClick={stepNext}
+                title="Next detection frame"
+              >
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         )}
       </CardContent>
