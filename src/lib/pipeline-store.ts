@@ -6,6 +6,7 @@ import {
   DEFAULT_PIPELINE_MODEL_NAME,
 } from "@/lib/pipeline-config";
 import {
+  FrameDetection,
   LabelDefinition,
   PipelineRunRecord,
   PipelineRunStatus,
@@ -56,6 +57,22 @@ interface DbSegmentRow {
   support_level: VideoDetectionSegment["supportLevel"];
   pipeline_version: string;
   source: string;
+  created_at: string;
+}
+
+interface DbFrameDetectionRow {
+  id: number;
+  video_id: string;
+  frame_ms: number;
+  label: string;
+  x_min: number;
+  y_min: number;
+  x_max: number;
+  y_max: number;
+  confidence: number;
+  frame_width: number;
+  frame_height: number;
+  pipeline_version: string;
   created_at: string;
 }
 
@@ -117,6 +134,24 @@ function mapSegment(row: DbSegmentRow): VideoDetectionSegment {
     supportLevel: row.support_level,
     pipelineVersion: row.pipeline_version,
     source: row.source,
+    createdAt: row.created_at,
+  };
+}
+
+function mapFrameDetection(row: DbFrameDetectionRow): FrameDetection {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    frameMs: row.frame_ms,
+    label: row.label,
+    xMin: row.x_min,
+    yMin: row.y_min,
+    xMax: row.x_max,
+    yMax: row.y_max,
+    confidence: row.confidence,
+    frameWidth: row.frame_width,
+    frameHeight: row.frame_height,
+    pipelineVersion: row.pipeline_version,
     createdAt: row.created_at,
   };
 }
@@ -366,4 +401,42 @@ export function summarizeVideoStates(states: VideoPipelineState[]) {
       stale: 0,
     } as Record<VideoPipelineStatus, number>
   );
+}
+
+export function getFrameDetections(
+  videoId: string,
+  frameMs?: number
+): FrameDetection[] {
+  const db = getDb();
+  if (frameMs !== undefined) {
+    const rows = db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ? AND frame_ms = ?
+         ORDER BY confidence DESC`
+      )
+      .all(videoId, frameMs) as DbFrameDetectionRow[];
+    return rows.map(mapFrameDetection);
+  }
+  const rows = db
+    .prepare(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ?
+       ORDER BY frame_ms ASC, confidence DESC`
+    )
+    .all(videoId) as DbFrameDetectionRow[];
+  return rows.map(mapFrameDetection);
+}
+
+export function getFrameDetectionTimestamps(videoId: string): number[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT frame_ms
+       FROM frame_detections
+       WHERE video_id = ?
+       ORDER BY frame_ms ASC`
+    )
+    .all(videoId) as { frame_ms: number }[];
+  return rows.map((r) => r.frame_ms);
 }

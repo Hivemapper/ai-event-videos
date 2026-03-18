@@ -6,7 +6,11 @@ export type VruLabelKey =
   | "wheelchair"
   | "kids"
   | "bicycle"
-  | "work-zone-person";
+  | "work-zone-person"
+  | "vehicle"
+  | "traffic_light"
+  | "stop_sign"
+  | "skateboard";
 
 export type VruSupportLevel =
   | "supported"
@@ -109,6 +113,22 @@ export interface PipelineVideoRow {
   modelName: string | null;
   completedAt: string | null;
   lastError: string | null;
+}
+
+export interface FrameDetection {
+  id?: number;
+  videoId: string;
+  frameMs: number;
+  label: string;
+  xMin: number;
+  yMin: number;
+  xMax: number;
+  yMax: number;
+  confidence: number;
+  frameWidth: number;
+  frameHeight: number;
+  pipelineVersion: string;
+  createdAt?: string;
 }
 
 export interface PipelineDaySummary {

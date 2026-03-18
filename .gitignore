@@ -40,8 +40,14 @@ yarn-error.log*
 data/*.db
 data/*.db-journal
 data/*.db-wal
+data/*.db-shm
+data/pipeline-cache/
+data/pipeline-logs/
 scripts/data/
 scripts/__pycache__/
+
+# Model weights
+*.pt
 
 # vercel
 .vercel

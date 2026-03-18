@@ -4,11 +4,11 @@ import {
   VruSupportLevel,
 } from "@/types/pipeline";
 
-export const CURRENT_PIPELINE_VERSION = "vru-yolo-v1";
-export const DEFAULT_PIPELINE_MODEL_NAME = "yolov8n";
+export const CURRENT_PIPELINE_VERSION = "vru-yolo-v2";
+export const DEFAULT_PIPELINE_MODEL_NAME = "yolo11x";
 export const DEFAULT_PIPELINE_BATCH_SIZE = 50;
 export const DEFAULT_PIPELINE_VIDEO_CACHE_HOURS = 24;
-export const DEFAULT_DETECTION_CONFIDENCE = 0.7;
+export const DEFAULT_DETECTION_CONFIDENCE = 0.45;
 
 export interface SystemVruLabelConfig {
   key: VruLabelKey;
@@ -27,7 +27,7 @@ export const SYSTEM_VRU_LABELS: SystemVruLabelConfig[] = [
   {
     key: "animal",
     supportLevel: "supported",
-    detectorAliases: ["cat", "dog", "bird", "horse", "sheep", "cow", "bear"],
+    detectorAliases: ["cat", "dog", "bird", "horse", "sheep", "cow", "bear", "elephant", "zebra", "giraffe"],
     color: "#92400e",
   },
   {
@@ -65,6 +65,30 @@ export const SYSTEM_VRU_LABELS: SystemVruLabelConfig[] = [
     supportLevel: "manual_only",
     detectorAliases: [],
     color: "#475569",
+  },
+  {
+    key: "vehicle",
+    supportLevel: "supported",
+    detectorAliases: ["car", "truck", "bus", "train"],
+    color: "#0369a1",
+  },
+  {
+    key: "traffic_light",
+    supportLevel: "supported",
+    detectorAliases: ["traffic light"],
+    color: "#15803d",
+  },
+  {
+    key: "stop_sign",
+    supportLevel: "supported",
+    detectorAliases: ["stop sign"],
+    color: "#dc2626",
+  },
+  {
+    key: "skateboard",
+    supportLevel: "experimental",
+    detectorAliases: ["skateboard"],
+    color: "#ca8a04",
   },
 ];
 

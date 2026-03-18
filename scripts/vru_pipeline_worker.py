@@ -27,7 +27,7 @@ except Exception as exc:  # pragma: no cover - runtime dependency guard
 
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
-CONFIDENCE_THRESHOLD = 0.70
+CONFIDENCE_THRESHOLD = 0.45
 FRAME_CONFIDENCE_THRESHOLD = 0.25
 TARGET_ANALYSIS_FPS = 5.0
 MERGE_GAP_MS = 1000
@@ -49,6 +49,13 @@ LABEL_MAP: dict[str, tuple[str, str]] = {
     "bear": ("animal", "supported"),
     "zebra": ("animal", "supported"),
     "giraffe": ("animal", "supported"),
+    "car": ("vehicle", "supported"),
+    "truck": ("vehicle", "supported"),
+    "bus": ("vehicle", "supported"),
+    "train": ("vehicle", "supported"),
+    "traffic light": ("traffic_light", "supported"),
+    "stop sign": ("stop_sign", "supported"),
+    "skateboard": ("skateboard", "experimental"),
 }
 
 
@@ -264,6 +271,62 @@ class PipelineDb:
         self.conn.commit()
         return labels_applied
 
+    def delete_frame_detections(self, video_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM frame_detections WHERE video_id = ?",
+            (video_id,),
+        )
+        self.conn.commit()
+
+    def insert_frame_detections(
+        self,
+        video_id: str,
+        detections: list[tuple[str, int, str, float, float, float, float, float, int, int]],
+    ) -> None:
+        """Batch-insert per-frame detection rows.
+
+        Each detection tuple contains:
+        (video_id, frame_ms, label, x_min, y_min, x_max, y_max,
+         confidence, frame_width, frame_height)
+        The pipeline_version is appended automatically.
+        """
+        self.conn.executemany(
+            """
+            INSERT INTO frame_detections (
+              video_id, frame_ms, label, x_min, y_min, x_max, y_max,
+              confidence, frame_width, frame_height, pipeline_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    video_id,
+                    frame_ms,
+                    label,
+                    x_min,
+                    y_min,
+                    x_max,
+                    y_max,
+                    confidence,
+                    frame_width,
+                    frame_height,
+                    self.pipeline_version,
+                )
+                for (
+                    video_id,
+                    frame_ms,
+                    label,
+                    x_min,
+                    y_min,
+                    x_max,
+                    y_max,
+                    confidence,
+                    frame_width,
+                    frame_height,
+                ) in detections
+            ],
+        )
+        self.conn.commit()
+
 
 class PipelineWorker:
     def __init__(
@@ -401,71 +464,107 @@ class PipelineWorker:
             entry.unlink(missing_ok=True)
 
     def process_video(self, event: dict[str, Any]) -> list[Segment]:
+        video_id = event["id"]
         video_path = self.download_video(event["videoUrl"])
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
             raise RuntimeError("Failed to open downloaded video")
 
-        fps = capture.get(cv2.CAP_PROP_FPS) or 0
-        if fps <= 0:
-            fps = 30.0
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        sample_stride = max(1, int(round(fps / TARGET_ANALYSIS_FPS)))
-        hits: dict[str, list[tuple[int, float, str]]] = {}
+        try:
+            fps = capture.get(cv2.CAP_PROP_FPS) or 0
+            if fps <= 0:
+                fps = 30.0
+            frame_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            frame_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            sample_stride = max(1, int(round(fps / TARGET_ANALYSIS_FPS)))
+            hits: dict[str, list[tuple[int, float, str]]] = {}
+            detection_buffer: list[tuple[str, int, str, float, float, float, float, float, int, int]] = []
 
-        frame_index = 0
-        sampled_frames = 0
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            if frame_index % sample_stride != 0:
-                frame_index += 1
-                continue
+            frame_index = 0
+            sampled_frames = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
 
-            timestamp_ms = int((frame_index / fps) * 1000)
-            results = self.model.predict(
-                frame,
-                verbose=False,
-                conf=FRAME_CONFIDENCE_THRESHOLD,
-                device=self.device,
-                imgsz=960,
-            )
-            best_labels: dict[str, tuple[float, str]] = {}
-            if results and results[0].boxes is not None:
-                result = results[0]
-                names = result.names
-                for box in result.boxes:
-                    class_index = int(box.cls[0].item())
-                    class_name = names.get(class_index, str(class_index))
-                    mapped = LABEL_MAP.get(class_name)
-                    if mapped is None:
-                        continue
-                    label, support_level = mapped
-                    confidence = float(box.conf[0].item())
-                    current = best_labels.get(label)
-                    if current is None or confidence > current[0]:
-                        best_labels[label] = (confidence, support_level)
+                # Fall back to actual frame dimensions if metadata was unreliable
+                if frame_index == 0 and (frame_width == 0 or frame_height == 0):
+                    h, w = frame.shape[:2]
+                    frame_height, frame_width = h, w
 
-            for label, (confidence, support_level) in best_labels.items():
-                hits.setdefault(label, []).append((timestamp_ms, confidence, support_level))
+                if frame_index % sample_stride != 0:
+                    frame_index += 1
+                    continue
 
-            sampled_frames += 1
-            if sampled_frames % 25 == 0:
-                self.db.update_run(self.run_id, totals=self.totals)
-                self.db.upsert_video_state(
-                    event["id"],
-                    self.day,
-                    "running",
-                    started=True,
+                timestamp_ms = int((frame_index / fps) * 1000)
+                results = self.model.predict(
+                    frame,
+                    verbose=False,
+                    conf=FRAME_CONFIDENCE_THRESHOLD,
+                    device=self.device,
+                    imgsz=960,
                 )
-            frame_index += 1
+                best_labels: dict[str, tuple[float, str]] = {}
+                if results and results[0].boxes is not None:
+                    result = results[0]
+                    names = result.names
+                    for box in result.boxes:
+                        class_index = int(box.cls[0].item())
+                        class_name = names.get(class_index, str(class_index))
+                        mapped = LABEL_MAP.get(class_name)
+                        if mapped is None:
+                            continue
+                        label, support_level = mapped
+                        confidence = float(box.conf[0].item())
+                        x_min, y_min, x_max, y_max = box.xyxy[0].tolist()
 
-        capture.release()
-        if frame_count == 0:
-            raise RuntimeError("Video contained no frames")
+                        # Collect every detection for frame_detections table
+                        detection_buffer.append((
+                            video_id,
+                            timestamp_ms,
+                            label,
+                            x_min,
+                            y_min,
+                            x_max,
+                            y_max,
+                            confidence,
+                            frame_width,
+                            frame_height,
+                        ))
 
-        return self.merge_hits(hits)
+                        # Track best-per-label for segment merging
+                        current = best_labels.get(label)
+                        if current is None or confidence > current[0]:
+                            best_labels[label] = (confidence, support_level)
+
+                for label, (confidence, support_level) in best_labels.items():
+                    hits.setdefault(label, []).append((timestamp_ms, confidence, support_level))
+
+                sampled_frames += 1
+                if sampled_frames % 25 == 0:
+                    # Flush buffered detections to DB
+                    if detection_buffer:
+                        self.db.insert_frame_detections(video_id, detection_buffer)
+                        detection_buffer = []
+                    self.db.update_run(self.run_id, totals=self.totals)
+                    self.db.upsert_video_state(
+                        video_id,
+                        self.day,
+                        "running",
+                        started=True,
+                    )
+                frame_index += 1
+
+            # Final flush of remaining detections
+            if detection_buffer:
+                self.db.insert_frame_detections(video_id, detection_buffer)
+
+            if sampled_frames == 0:
+                raise RuntimeError("Video contained no frames")
+
+            return self.merge_hits(hits)
+        finally:
+            capture.release()
 
     def merge_hits(self, hits: dict[str, list[tuple[int, float, str]]]) -> list[Segment]:
         segments: list[Segment] = []
@@ -532,6 +631,7 @@ class PipelineWorker:
 
         self.db.upsert_video_state(video_id, self.day, "queued")
         self.db.upsert_video_state(video_id, self.day, "running", started=True)
+        self.db.delete_frame_detections(video_id)
         self.totals["currentVideoId"] = video_id
         self.totals["currentVideoIndex"] += 1
         self.db.update_run(self.run_id, totals=self.totals)
@@ -548,6 +648,7 @@ class PipelineWorker:
             )
             self.totals["totalProcessed"] += 1
         except Exception as exc:
+            self.db.delete_frame_detections(video_id)
             self.db.upsert_video_state(
                 video_id,
                 self.day,
