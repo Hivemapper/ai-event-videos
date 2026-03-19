@@ -128,6 +128,7 @@ export interface FrameDetection {
   frameWidth: number;
   frameHeight: number;
   pipelineVersion: string;
+  modelName: string;
   createdAt?: string;
 }
 

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getFrameDetections,
+  getFrameDetectionModels,
   getFrameDetectionTimestamps,
 } from "@/lib/pipeline-store";
 
@@ -19,9 +20,13 @@ export async function GET(
   }
   const frameMs =
     frameMsParam !== null ? parseInt(frameMsParam, 10) : undefined;
+  const modelName = searchParams.get("model") ?? undefined;
 
-  return NextResponse.json({
-    detections: getFrameDetections(videoId, frameMs),
-    timestamps: getFrameDetectionTimestamps(videoId),
-  });
+  const [detections, timestamps, models] = await Promise.all([
+    getFrameDetections(videoId, frameMs, modelName),
+    getFrameDetectionTimestamps(videoId, modelName),
+    getFrameDetectionModels(videoId),
+  ]);
+
+  return NextResponse.json({ detections, timestamps, models });
 }

@@ -36,13 +36,20 @@ yarn-error.log*
 # videos
 /public/videos/
 
-# SQLite
+# SQLite / libsql embedded replicas
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+ai-event-videos
+ai-event-videos-info
+ai-event-videos-shm
+ai-event-videos-wal
 data/pipeline-cache/
 data/pipeline-logs/
+data/pipeline-video-cache/
+data/gdino-visual-check/
+data/gdino_*.jpg
 scripts/data/
 scripts/__pycache__/
 

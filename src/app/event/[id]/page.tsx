@@ -9,6 +9,9 @@ import {
   Download,
   Loader2,
   ChevronRight,
+  Maximize2,
+  Minimize2,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -154,6 +157,7 @@ export default function EventDetailPage({
   const [videoDuration, setVideoDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isRefreshingVideo, setIsRefreshingVideo] = useState(false);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
   const [videoReloadKey, setVideoReloadKey] = useState(0);
@@ -221,6 +225,26 @@ export default function EventDetailPage({
     setCameraIntrinsics(intrinsics);
   }, []);
 
+  // Escape key exits fullscreen
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("keydown", handleEsc);
+    return () => window.removeEventListener("keydown", handleEsc);
+  }, [isFullscreen]);
+
+  // Prevent body scroll when fullscreen
+  useEffect(() => {
+    if (isFullscreen) {
+      document.body.classList.add("overflow-hidden");
+    } else {
+      document.body.classList.remove("overflow-hidden");
+    }
+    return () => document.body.classList.remove("overflow-hidden");
+  }, [isFullscreen]);
+
   // Fetch road type from Mapbox (samples multiple GNSS points for accuracy)
   const { roadType, isLoading: roadTypeLoading } = useRoadType(
     event?.location.lat ?? null,
@@ -235,7 +259,16 @@ export default function EventDetailPage({
   const { trackingResult, isTracking, progress: trackingProgress, error: trackingError, track: trackActors, clear: clearTracking } = useActorTracking();
 
   // Detection timestamps for frame stepping and overlay
-  const { timestamps: detectionTimestamps, detectionsByFrame } = useDetectionTimestamps(event?.videoUrl ? id : null);
+  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
+  const [minConfidence, setMinConfidence] = useState(0.1);
+  const { timestamps: detectionTimestamps, models: detectionModels, detectionsByFrame } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedModel);
+
+  // Auto-select first model when models become available
+  useEffect(() => {
+    if (detectionModels.length > 0 && selectedModel === undefined) {
+      setSelectedModel(detectionModels[0]);
+    }
+  }, [detectionModels, selectedModel]);
 
   // Reusable camera state interpolation from GNSS path
   const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
@@ -464,8 +497,18 @@ export default function EventDetailPage({
           {/* Left column - Video */}
           <div className="space-y-4">
             {/* Video player */}
-            <div ref={videoContainerRef} className="overflow-hidden rounded-xl">
-              <div className="relative aspect-video bg-black">
+            <div ref={videoContainerRef} className={cn("overflow-hidden rounded-xl", isFullscreen && "fixed inset-0 z-50 bg-black flex items-center justify-center rounded-none")}>
+              <div className={cn("relative aspect-video bg-black", isFullscreen && "w-full h-full aspect-auto")}>
+                {isFullscreen && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-4 right-4 z-10 text-white/70 hover:text-white hover:bg-white/20"
+                    onClick={() => setIsFullscreen(false)}
+                  >
+                    <X className="w-5 h-5" />
+                  </Button>
+                )}
                 {event.videoUrl ? (
                   videoLoadError ? (
                     <div className="flex h-full w-full items-center justify-center p-6 text-center text-white">
@@ -524,11 +567,28 @@ export default function EventDetailPage({
                     currentTime={videoCurrentTime}
                     timestamps={detectionTimestamps}
                     detectionsByFrame={detectionsByFrame}
+                    minConfidence={minConfidence}
                   />
                 )}
               </div>
               {event.videoUrl && (
-                <div className="flex justify-end px-3 py-1.5 bg-black/80">
+                <div className={cn(
+                  "flex justify-end px-3 py-1.5 bg-black/80",
+                  isFullscreen && "absolute bottom-12 right-4 z-10 rounded-lg bg-black/60 backdrop-blur-sm"
+                )}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={() => setIsFullscreen((f) => !f)}
+                  >
+                    {isFullscreen ? (
+                      <Minimize2 className="w-4 h-4 mr-2" />
+                    ) : (
+                      <Maximize2 className="w-4 h-4 mr-2" />
+                    )}
+                    {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -644,6 +704,12 @@ export default function EventDetailPage({
               duration={videoDuration}
               isPlaying={isPlaying}
               detectionTimestamps={detectionTimestamps}
+              detectionsByFrame={detectionsByFrame}
+              availableModels={detectionModels.length > 0 ? detectionModels : undefined}
+              selectedModel={selectedModel}
+              onModelChange={setSelectedModel}
+              minConfidence={minConfidence}
+              onMinConfidenceChange={setMinConfidence}
               onSeek={(time) => {
                 if (videoRef.current) {
                   videoRef.current.currentTime = time;

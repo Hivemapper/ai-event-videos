@@ -7,11 +7,16 @@ const fetcher = (url: string) => fetch(url).then((res) => res.json());
 export interface DetectionTimestampsResponse {
   detections: FrameDetection[];
   timestamps: number[];
+  models: string[];
 }
 
-export function useDetectionTimestamps(videoId: string | null) {
+export function useDetectionTimestamps(videoId: string | null, modelName?: string) {
+  const url = videoId
+    ? `/api/videos/${videoId}/detections${modelName ? `?model=${encodeURIComponent(modelName)}` : ""}`
+    : null;
+
   const { data, error, isLoading } = useSWR<DetectionTimestampsResponse>(
-    videoId ? `/api/videos/${videoId}/detections` : null,
+    url,
     fetcher
   );
 
@@ -31,6 +36,7 @@ export function useDetectionTimestamps(videoId: string | null) {
 
   return {
     timestamps: data?.timestamps ?? [],
+    models: data?.models ?? [],
     detectionsByFrame,
     isLoading,
     error,

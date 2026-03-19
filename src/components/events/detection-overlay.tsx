@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef } from "react";
 import type { FrameDetection } from "@/types/pipeline";
 import {
   DETECTION_FRAME_TOLERANCE_MS,
-  DISPLAY_CONFIDENCE_THRESHOLD,
   VRU_LABEL_COLOR_MAP,
 } from "@/lib/pipeline-config";
 
@@ -14,6 +13,7 @@ interface DetectionOverlayProps {
   currentTime: number;
   timestamps: number[];
   detectionsByFrame: Map<number, FrameDetection[]>;
+  minConfidence?: number;
 }
 
 export function DetectionOverlay({
@@ -22,15 +22,17 @@ export function DetectionOverlay({
   currentTime,
   timestamps,
   detectionsByFrame,
+  minConfidence = 0,
 }: DetectionOverlayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Keep canvas dimensions synced with video element via ResizeObserver
+  // Sync canvas to the parent container (not the video element, which may
+  // include browser-native controls that skew clientHeight).
   const syncCanvasSize = useCallback(() => {
     const canvas = canvasRef.current;
-    const video = videoRef.current;
-    if (!canvas || !video) return;
-    const { clientWidth, clientHeight } = video;
+    const container = canvas?.parentElement;
+    if (!canvas || !container) return;
+    const { clientWidth, clientHeight } = container;
     const dpr = window.devicePixelRatio || 1;
     const targetW = Math.round(clientWidth * dpr);
     const targetH = Math.round(clientHeight * dpr);
@@ -40,18 +42,19 @@ export function DetectionOverlay({
       canvas.style.width = clientWidth + "px";
       canvas.style.height = clientHeight + "px";
     }
-  }, [videoRef]);
+  }, []);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
+    const canvas = canvasRef.current;
+    const container = canvas?.parentElement;
+    if (!container) return;
     const observer = new ResizeObserver(() => {
       syncCanvasSize();
     });
-    observer.observe(video);
+    observer.observe(container);
     syncCanvasSize();
     return () => observer.disconnect();
-  }, [videoRef, syncCanvasSize]);
+  }, [syncCanvasSize]);
 
   // Draw detections on the canvas (synchronous — all data comes from props)
   useEffect(() => {
@@ -87,19 +90,48 @@ export function DetectionOverlay({
     syncCanvasSize();
 
     const video = videoRef.current;
-    if (!video) return;
-    const { clientWidth, clientHeight } = video;
+    const container = canvas.parentElement;
+    if (!video || !container) return;
+
+    // Use the parent container dimensions for positioning (the canvas is
+    // absolutely positioned relative to it). The video element's clientHeight
+    // may include browser-native controls that shift the rendered area.
+    const containerW = container.clientWidth;
+    const containerH = container.clientHeight;
     const dpr = window.devicePixelRatio || 1;
     ctx.save();
     ctx.scale(dpr, dpr);
 
+    // Calculate the actual rendered video area within the container
+    // to account for letterboxing (black bars) when aspect ratios don't match.
+    // Uses video.videoWidth/videoHeight for the natural aspect ratio.
+    const videoNaturalW = video.videoWidth || 1280;
+    const videoNaturalH = video.videoHeight || 720;
+    const containerAspect = containerW / containerH;
+    const videoAspect = videoNaturalW / videoNaturalH;
+
+    let renderW: number, renderH: number, offsetX: number, offsetY: number;
+    if (containerAspect > videoAspect) {
+      // Black bars on sides (wider container than video)
+      renderH = containerH;
+      renderW = containerH * videoAspect;
+      offsetX = (containerW - renderW) / 2;
+      offsetY = 0;
+    } else {
+      // Black bars on top/bottom (taller container than video)
+      renderW = containerW;
+      renderH = containerW / videoAspect;
+      offsetX = 0;
+      offsetY = (containerH - renderH) / 2;
+    }
+
     for (const det of frameDetections.filter(
-      (d) => d.confidence >= DISPLAY_CONFIDENCE_THRESHOLD,
+      (d) => d.confidence >= minConfidence,
     )) {
-      const scaleX = clientWidth / det.frameWidth;
-      const scaleY = clientHeight / det.frameHeight;
-      const x = det.xMin * scaleX;
-      const y = det.yMin * scaleY;
+      const scaleX = renderW / det.frameWidth;
+      const scaleY = renderH / det.frameHeight;
+      const x = det.xMin * scaleX + offsetX;
+      const y = det.yMin * scaleY + offsetY;
       const w = (det.xMax - det.xMin) * scaleX;
       const h = (det.yMax - det.yMin) * scaleY;
 
@@ -130,7 +162,7 @@ export function DetectionOverlay({
     }
 
     ctx.restore();
-  }, [isPlaying, currentTime, timestamps, detectionsByFrame, syncCanvasSize, videoRef]);
+  }, [isPlaying, currentTime, timestamps, detectionsByFrame, syncCanvasSize, videoRef, minConfidence]);
 
   return (
     <canvas

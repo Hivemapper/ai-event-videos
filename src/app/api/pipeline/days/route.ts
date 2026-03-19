@@ -168,15 +168,15 @@ export async function GET(request: NextRequest) {
 
   const windowDays = clampWindowDays(request.nextUrl.searchParams.get("window"));
   const days = listRecentDays(windowDays);
-  const activeRun = getActivePipelineRun();
+  const activeRun = await getActivePipelineRun();
 
   try {
     const summaries = await Promise.all(
       days.map(async (day) => {
         const [countResult, states, runs] = await Promise.all([
           getDayCount(apiKey, day),
-          Promise.resolve(listVideoPipelineStatesForDay(day)),
-          Promise.resolve(listPipelineRuns(day)),
+          listVideoPipelineStatesForDay(day),
+          listPipelineRuns(day),
         ]);
 
         return buildDaySummary({

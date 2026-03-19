@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { createCustomLabel, listLabels } from "@/lib/pipeline-store";
 
-export function GET() {
-  return NextResponse.json(listLabels());
+export async function GET() {
+  return NextResponse.json(await listLabels());
 }
 
 export async function POST(request: Request) {
@@ -14,7 +14,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const label = createCustomLabel(name);
+    const label = await createCustomLabel(name);
     return NextResponse.json(label, { status: 201 });
   } catch (err: unknown) {
     if (err instanceof Error && err.message.includes("UNIQUE")) {

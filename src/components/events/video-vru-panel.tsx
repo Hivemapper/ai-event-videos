@@ -5,11 +5,19 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Slider } from "@/components/ui/slider";
 import { useVideoVru } from "@/hooks/use-video-vru";
 import { DETECTION_FRAME_TOLERANCE_MS, VRU_LABEL_COLOR_MAP } from "@/lib/pipeline-config";
 import { cn } from "@/lib/utils";
-import type { VideoDetectionSegment } from "@/types/pipeline";
+import type { FrameDetection, VideoDetectionSegment } from "@/types/pipeline";
 
 interface VideoVruPanelProps {
   videoId: string;
@@ -17,6 +25,12 @@ interface VideoVruPanelProps {
   duration: number;
   isPlaying?: boolean;
   detectionTimestamps?: number[];
+  detectionsByFrame?: Map<number, FrameDetection[]>;
+  availableModels?: string[];
+  selectedModel?: string;
+  onModelChange?: (model: string) => void;
+  minConfidence?: number;
+  onMinConfidenceChange?: (value: number) => void;
   onSeek: (time: number) => void;
 }
 
@@ -46,6 +60,12 @@ export function VideoVruPanel({
   duration,
   isPlaying,
   detectionTimestamps,
+  detectionsByFrame,
+  availableModels,
+  selectedModel,
+  onModelChange,
+  minConfidence,
+  onMinConfidenceChange,
   onSeek,
 }: VideoVruPanelProps) {
   const { data, isLoading } = useVideoVru(videoId);
@@ -98,6 +118,20 @@ export function VideoVruPanel({
     return [...groups.entries()];
   }, [data?.segments]);
 
+  const uniqueLabels = useMemo(() => {
+    if (!detectionsByFrame) return [];
+    const labels = new Set<string>();
+    const threshold = minConfidence ?? 0;
+    for (const detections of detectionsByFrame.values()) {
+      for (const det of detections) {
+        if (det.confidence >= threshold) {
+          labels.add(det.label);
+        }
+      }
+    }
+    return [...labels].sort();
+  }, [detectionsByFrame, minConfidence]);
+
   if (isLoading) {
     return <Skeleton className="h-40 rounded-xl" />;
   }
@@ -107,118 +141,192 @@ export function VideoVruPanel({
   const labelsApplied = state?.labelsApplied ?? [];
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center justify-between gap-3 text-lg">
-          <span>VRU Labels</span>
-          <Badge variant={statusTone(status)}>{status}</Badge>
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex flex-wrap gap-2">
-          {labelsApplied.length > 0 ? (
-            labelsApplied.map((label) => (
-              <Badge key={label} variant="outline" className="text-xs">
-                {label}
-              </Badge>
-            ))
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              {status === "processed"
-                ? "No VRU detections cleared the confidence threshold."
-                : "This video has not completed the VRU pipeline yet."}
-            </p>
-          )}
-        </div>
-
-        {state?.lastError && (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {state.lastError}
-          </div>
-        )}
-
-        {groupedSegments.length > 0 && duration > 0 && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Timeline</span>
-              <span>{formatTimestamp(duration)}</span>
+    <div className="space-y-3">
+      {/* Detection controls — model selector + confidence slider */}
+      {availableModels &&
+        availableModels.length >= 1 &&
+        selectedModel &&
+        onModelChange && (
+          <div className="space-y-3 rounded-lg border bg-card px-4 py-3">
+            <h3 className="text-lg font-semibold">Detections</h3>
+            <div className="flex items-center gap-3">
+              <label
+                htmlFor="model-select"
+                className="text-sm font-medium text-muted-foreground"
+              >
+                Model
+              </label>
+              <Select value={selectedModel} onValueChange={onModelChange}>
+                <SelectTrigger id="model-select" className="flex-1" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableModels.map((model) => (
+                    <SelectItem key={model} value={model}>
+                      {model}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
-            {groupedSegments.map(([label, segments]) => (
-              <div key={label} className="grid grid-cols-[120px_1fr] items-center gap-3">
-                <div className="text-sm font-medium">{label}</div>
-                <div className="relative h-8 rounded-md bg-muted">
-                  {segments.map((segment, index) => {
-                    const key = `${segment.label}-${segment.startMs}-${segment.endMs}-${index}`;
-                    const start = (segment.startMs / 1000 / duration) * 100;
-                    const end = (segment.endMs / 1000 / duration) * 100;
-                    const width = Math.max(1.5, end - start);
-                    const isCurrent =
-                      currentTime * 1000 >= segment.startMs &&
-                      currentTime * 1000 <= segment.endMs;
-                    const isSelected = key === selectedKey;
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        className={cn(
-                          "absolute top-1/2 h-5 -translate-y-1/2 rounded-sm border transition-transform",
-                          (isSelected || isCurrent) && "scale-y-110"
-                        )}
-                        style={{
-                          left: `${start}%`,
-                          width: `${width}%`,
-                          backgroundColor:
-                            VRU_LABEL_COLOR_MAP[segment.label] ?? "#334155",
-                          borderColor: isSelected || isCurrent ? "#ffffff" : "transparent",
-                        }}
-                        title={`${label} ${formatTimestamp(segment.startMs / 1000)}-${formatTimestamp(segment.endMs / 1000)} (${Math.round(segment.maxConfidence * 100)}%)`}
-                        onClick={() => {
-                          setSelectedKey(key);
-                          onSeek(segment.startMs / 1000);
-                        }}
-                      />
-                    );
-                  })}
-                </div>
+            {onMinConfidenceChange && (
+              <div className="flex items-center gap-3">
+                <label className="text-sm font-medium text-muted-foreground whitespace-nowrap">
+                  Min conf
+                </label>
+                <Slider
+                  aria-label="Minimum confidence threshold"
+                  value={[minConfidence ?? 0]}
+                  onValueChange={([v]) => onMinConfidenceChange(v)}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  className="flex-1"
+                />
+                <span className="text-sm tabular-nums text-muted-foreground w-10 text-right">
+                  {Math.round((minConfidence ?? 0) * 100)}%
+                </span>
               </div>
-            ))}
+            )}
+            {uniqueLabels.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {uniqueLabels.map((label) => (
+                  <Badge
+                    key={label}
+                    className="text-xs text-white border-transparent"
+                    style={{
+                      backgroundColor:
+                        VRU_LABEL_COLOR_MAP[label] ?? "#334155",
+                    }}
+                  >
+                    {label}
+                  </Badge>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Frame stepping controls - show when paused on a detection frame */}
-        {!isPlaying && sortedTimestamps.length > 0 && currentFrameIndex >= 0 && (
-          <div className="flex items-center justify-between rounded-lg border bg-muted/50 px-3 py-2">
-            <span className="text-sm text-muted-foreground">
-              Frame at {(sortedTimestamps[currentFrameIndex] / 1000).toFixed(2)}s
-            </span>
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                disabled={!canStepPrev}
-                onClick={stepPrev}
-                title="Previous detection frame"
-              >
-                <ChevronLeft className="h-4 w-4" />
-              </Button>
-              <span className="text-xs tabular-nums text-muted-foreground min-w-[4rem] text-center">
-                {currentFrameIndex + 1} / {sortedTimestamps.length}
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                disabled={!canStepNext}
-                onClick={stepNext}
-                title="Next detection frame"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </Button>
-            </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center justify-between gap-3 text-lg">
+            VRU Labels
+            <Badge variant={statusTone(status)}>{status}</Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {labelsApplied.length > 0 ? (
+              labelsApplied.map((label) => (
+                <Badge key={label} variant="outline" className="text-xs">
+                  {label}
+                </Badge>
+              ))
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                {status === "processed"
+                  ? "No VRU detections cleared the confidence threshold."
+                  : "This video has not completed the VRU pipeline yet."}
+              </p>
+            )}
           </div>
-        )}
-      </CardContent>
-    </Card>
+
+          {state?.lastError && (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              {state.lastError}
+            </div>
+          )}
+
+          {groupedSegments.length > 0 && duration > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <span>Timeline</span>
+                <span>{formatTimestamp(duration)}</span>
+              </div>
+              {groupedSegments.map(([label, segments]) => (
+                <div
+                  key={label}
+                  className="grid grid-cols-[120px_1fr] items-center gap-3"
+                >
+                  <div className="text-sm font-medium">{label}</div>
+                  <div className="relative h-8 rounded-md bg-muted">
+                    {segments.map((segment, index) => {
+                      const key = `${segment.label}-${segment.startMs}-${segment.endMs}-${index}`;
+                      const start = (segment.startMs / 1000 / duration) * 100;
+                      const end = (segment.endMs / 1000 / duration) * 100;
+                      const width = Math.max(1.5, end - start);
+                      const isCurrent =
+                        currentTime * 1000 >= segment.startMs &&
+                        currentTime * 1000 <= segment.endMs;
+                      const isSelected = key === selectedKey;
+                      return (
+                        <button
+                          key={key}
+                          type="button"
+                          className={cn(
+                            "absolute top-1/2 h-5 -translate-y-1/2 rounded-sm border transition-transform",
+                            (isSelected || isCurrent) && "scale-y-110",
+                          )}
+                          style={{
+                            left: `${start}%`,
+                            width: `${width}%`,
+                            backgroundColor:
+                              VRU_LABEL_COLOR_MAP[segment.label] ?? "#334155",
+                            borderColor:
+                              isSelected || isCurrent
+                                ? "#ffffff"
+                                : "transparent",
+                          }}
+                          title={`${label} ${formatTimestamp(segment.startMs / 1000)}-${formatTimestamp(segment.endMs / 1000)} (${Math.round(segment.maxConfidence * 100)}%)`}
+                          onClick={() => {
+                            setSelectedKey(key);
+                            onSeek(segment.startMs / 1000);
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Frame stepping controls - show when paused on a detection frame */}
+          {!isPlaying && sortedTimestamps.length > 0 && currentFrameIndex >= 0 && (
+            <div className="flex items-center justify-between rounded-lg border bg-muted/50 px-3 py-2">
+              <span className="text-sm text-muted-foreground">
+                Frame at{" "}
+                {(sortedTimestamps[currentFrameIndex] / 1000).toFixed(2)}s
+              </span>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  disabled={!canStepPrev}
+                  onClick={stepPrev}
+                  title="Previous detection frame"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="text-xs tabular-nums text-muted-foreground min-w-[4rem] text-center">
+                  {currentFrameIndex + 1} / {sortedTimestamps.length}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  disabled={!canStepNext}
+                  onClick={stepNext}
+                  title="Next detection frame"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

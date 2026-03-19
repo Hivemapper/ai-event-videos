@@ -50,6 +50,7 @@ export const visionScanSchema = z.object({
 
 export const cocoExportSchema = z.object({
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "day must be YYYY-MM-DD"),
+  model: z.string().optional(),
 });
 
 export const detectActorsSchema = z.object({

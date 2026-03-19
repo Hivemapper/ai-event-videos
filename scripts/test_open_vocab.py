@@ -2,14 +2,28 @@
 """
 M2 Open-Vocabulary Detection Viability Test
 
-Compares YOLO11x (standard COCO-trained) vs YOLO-World (yolov8l-worldv2)
-to test whether open-vocabulary detection can find VRU categories that
+Compares four models:
+  1. YOLO11x (standard COCO-trained)
+  2. YOLO-World (yolov8l-worldv2, open vocabulary)
+  3. Grounding DINO (IDEA-Research/grounding-dino-base, open vocabulary)
+  4. MM Grounding DINO (openmmlab-community/mm_grounding_dino_large_all, open vocabulary)
+
+Tests whether open-vocabulary detection can find VRU categories that
 standard COCO classes cannot: electric scooters, wheelchairs, construction
 workers, strollers, traffic cones, etc.
+
+NOTE: MM-GDINO-large-all was trained on broad data including COCO, so it is
+NOT a zero-shot model for shared classes (person, car, etc.). Open-vocab
+class comparisons (stroller, electric scooter, etc.) are more meaningful.
+
+Fetches events from geo-filtered US city polygons for diverse coverage.
+
+Memory: ~4-6 GB with all 4 models loaded simultaneously. 16 GB+ recommended.
 
 Usage:
     cd /Users/tylerlu/Projects/ai-event-videos
     source .venv/bin/activate
+    pip install --upgrade transformers  # MM-GDINO requires recent transformers
     python scripts/test_open_vocab.py
 """
 
@@ -27,13 +41,46 @@ from typing import Any
 import cv2
 import requests
 import torch
+from PIL import Image
 from ultralytics import YOLO
+
+# Try to import transformers for Grounding DINO / MM-GDINO (graceful fallback)
+GDINO_AVAILABLE = False
+MM_GDINO_AVAILABLE = False
+try:
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
+    GDINO_AVAILABLE = True
+    # MM Grounding DINO uses the same Auto classes but needs a newer transformers
+    # version that ships the MMGroundingDino model implementation.
+    try:
+        from transformers import MMGroundingDinoForObjectDetection  # noqa: F401
+
+        MM_GDINO_AVAILABLE = True
+    except ImportError:
+        print("[INFO] transformers version does not include MM Grounding DINO support.")
+        print("       Upgrade with: pip install --upgrade transformers")
+except ImportError:
+    print("[INFO] transformers not installed -- Grounding DINO & MM-GDINO will be skipped.")
+    print("       Install with: pip install transformers")
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
+
+# US cities with bounding-box polygons (lon/lat pairs, closed ring)
+US_CITIES: list[tuple[str, list[list[float]]]] = [
+    ("LA", [[-118.40, 33.90], [-118.15, 33.90], [-118.15, 34.10], [-118.40, 34.10], [-118.40, 33.90]]),
+    ("Chicago", [[-87.75, 41.80], [-87.60, 41.80], [-87.60, 41.95], [-87.75, 41.95], [-87.75, 41.80]]),
+    ("Austin", [[-97.80, 30.20], [-97.65, 30.20], [-97.65, 30.35], [-97.80, 30.35], [-97.80, 30.20]]),
+    ("Denver", [[-105.05, 39.65], [-104.85, 39.65], [-104.85, 39.80], [-105.05, 39.80], [-105.05, 39.65]]),
+    ("NYC", [[-74.05, 40.68], [-73.90, 40.68], [-73.90, 40.82], [-74.05, 40.82], [-74.05, 40.68]]),
+    ("SF", [[-122.52, 37.70], [-122.35, 37.70], [-122.35, 37.82], [-122.52, 37.82], [-122.52, 37.70]]),
+]
+
+EVENTS_PER_CITY = 3
 
 # Standard COCO label map (same as pipeline worker)
 COCO_LABEL_MAP: dict[str, str] = {
@@ -71,7 +118,16 @@ WORLD_CLASSES = [
     "speed limit sign",
 ]
 
-# Classes that YOLO-World can detect but standard COCO YOLO cannot.
+# Grounding DINO prompt (period-separated labels)
+GDINO_TEXT_PROMPT = (
+    "person. car. truck. bus. motorcycle. bicycle. traffic light. stop sign. "
+    "electric scooter. wheelchair. stroller. construction worker. traffic cone. "
+    "child. crosswalk. speed limit sign."
+)
+GDINO_BOX_THRESHOLD = 0.25
+GDINO_TEXT_THRESHOLD = 0.25
+
+# Classes that open-vocab models can detect but standard COCO YOLO cannot.
 # Note: "traffic cone" is confirmed NOT in the COCO-80 class list (class 75 is
 # "vase", not "traffic cone"), so it belongs here as an open-vocab class.
 OPEN_VOCAB_CLASSES = {
@@ -88,14 +144,6 @@ OPEN_VOCAB_CLASSES = {
 # Confidence thresholds
 YOLO11X_CONF = 0.25
 WORLD_CONF = 0.15
-
-# Event types to fetch -- diverse mix for broad coverage
-EVENT_TYPES_TO_FETCH: list[tuple[str, int]] = [
-    ("HARSH_BRAKING", 3),
-    ("SWERVING", 3),
-    ("HIGH_SPEED", 2),
-    ("STOP_SIGN_VIOLATION", 2),
-]
 
 FRAMES_PER_VIDEO = 5
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -204,6 +252,8 @@ class FrameResult:
     frame_index: int
     yolo11x_detections: list[Detection] = field(default_factory=list)
     world_detections: list[Detection] = field(default_factory=list)
+    gdino_detections: list[Detection] = field(default_factory=list)
+    mm_gdino_detections: list[Detection] = field(default_factory=list)
 
 
 def run_yolo11x(model: YOLO, frame: Any, device: str) -> list[Detection]:
@@ -243,6 +293,110 @@ def run_world(model: YOLO, frame: Any, device: str) -> list[Detection]:
     return detections
 
 
+def run_gdino(
+    processor: Any,
+    model: Any,
+    frame: Any,
+    gdino_device: str,
+) -> list[Detection]:
+    """Run Grounding DINO on a BGR cv2 frame and return detections."""
+    # Convert BGR numpy array to RGB PIL Image
+    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    height, width = frame.shape[:2]
+
+    inputs = processor(
+        images=pil_image, text=GDINO_TEXT_PROMPT, return_tensors="pt"
+    )
+    # Move inputs to the correct device
+    inputs = {k: v.to(gdino_device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
+        threshold=GDINO_BOX_THRESHOLD,
+        text_threshold=GDINO_TEXT_THRESHOLD,
+        target_sizes=[(height, width)],
+    )
+
+    detections = []
+    if results:
+        r = results[0]
+        labels = r.get("text_labels", r.get("labels", []))
+        scores = r.get("scores", torch.tensor([]))
+        for label, score in zip(labels, scores):
+            conf = float(score.item()) if hasattr(score, "item") else float(score)
+            detections.append(Detection(class_name=label.strip(), confidence=conf))
+
+    return detections
+
+
+# MM Grounding DINO text labels — list-of-lists format accepted by the
+# processor, which internally converts them to period-separated text.
+MM_GDINO_TEXT_LABELS = [
+    [
+        "person",
+        "car",
+        "truck",
+        "bus",
+        "motorcycle",
+        "bicycle",
+        "traffic light",
+        "stop sign",
+        "electric scooter",
+        "wheelchair",
+        "stroller",
+        "construction worker",
+        "traffic cone",
+        "child",
+        "crosswalk",
+        "speed limit sign",
+    ]
+]
+
+
+def run_mm_gdino(
+    processor: Any,
+    model: Any,
+    frame: Any,
+    mm_gdino_device: str,
+) -> list[Detection]:
+    """Run MM Grounding DINO on a BGR cv2 frame and return detections."""
+    # Convert BGR numpy array to RGB PIL Image
+    pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    height, width = frame.shape[:2]
+
+    inputs = processor(
+        images=pil_image, text=MM_GDINO_TEXT_LABELS, return_tensors="pt"
+    )
+    # Move inputs to the correct device
+    inputs = {k: v.to(mm_gdino_device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    results = processor.post_process_grounded_object_detection(
+        outputs,
+        inputs["input_ids"],
+        threshold=GDINO_BOX_THRESHOLD,
+        text_threshold=GDINO_TEXT_THRESHOLD,
+        target_sizes=[(height, width)],
+    )
+
+    detections = []
+    if results:
+        r = results[0]
+        labels = r.get("text_labels", r.get("labels", []))
+        scores = r.get("scores", torch.tensor([]))
+        for label, score in zip(labels, scores):
+            conf = float(score.item()) if hasattr(score, "item") else float(score)
+            detections.append(Detection(class_name=label.strip(), confidence=conf))
+
+    return detections
+
+
 def summarize_detections(detections: list[Detection]) -> dict[str, tuple[int, float]]:
     """Return {class_name: (count, avg_confidence)}."""
     counts: dict[str, list[float]] = defaultdict(list)
@@ -254,40 +408,64 @@ def summarize_detections(detections: list[Detection]) -> dict[str, tuple[int, fl
     }
 
 
-def print_frame_comparison(result: FrameResult) -> None:
-    """Print side-by-side comparison for a single frame."""
+COL_WIDTH = 35
+
+
+def _fmt_det(cls: str, summary: dict[str, tuple[int, float]]) -> str:
+    """Format a single class detection string for a column."""
+    if cls in summary:
+        count, avg_conf = summary[cls]
+        return f"{cls}: {count}x @ {avg_conf:.3f}"
+    return ""
+
+
+def print_frame_comparison(
+    result: FrameResult, gdino_enabled: bool, mm_gdino_enabled: bool
+) -> None:
+    """Print side-by-side comparison for a single frame (2-4 columns)."""
     yolo_summary = summarize_detections(result.yolo11x_detections)
     world_summary = summarize_detections(result.world_detections)
+    gdino_summary = summarize_detections(result.gdino_detections) if gdino_enabled else {}
+    mm_gdino_summary = (
+        summarize_detections(result.mm_gdino_detections) if mm_gdino_enabled else {}
+    )
 
     print(f"\n  Frame #{result.frame_index}:")
-    print(f"  {'YOLO11x (COCO)':<40} {'YOLO-World (Open Vocab)':<40}")
-    print(f"  {'-' * 40} {'-' * 40}")
+    # Build header columns
+    headers = [f"{'YOLO11x (COCO)':<{COL_WIDTH}}", f"{'YOLO-World (Open Vocab)':<{COL_WIDTH}}"]
+    if gdino_enabled:
+        headers.append(f"{'GDINO (Open Vocab)':<{COL_WIDTH}}")
+    if mm_gdino_enabled:
+        headers.append(f"{'MM-GDINO (Open Vocab)':<{COL_WIDTH}}")
+    print(f"  {' '.join(headers)}")
+    print(f"  {' '.join('-' * COL_WIDTH for _ in headers)}")
 
-    # Collect all class names from both
-    all_classes = sorted(set(yolo_summary.keys()) | set(world_summary.keys()))
+    # Collect all class names from all models
+    all_classes = sorted(
+        set(yolo_summary.keys())
+        | set(world_summary.keys())
+        | set(gdino_summary.keys())
+        | set(mm_gdino_summary.keys())
+    )
 
     for cls in all_classes:
-        yolo_str = ""
-        world_str = ""
+        cols = [
+            f"{_fmt_det(cls, yolo_summary):<{COL_WIDTH}}",
+            f"{_fmt_det(cls, world_summary):<{COL_WIDTH}}",
+        ]
+        if gdino_enabled:
+            cols.append(f"{_fmt_det(cls, gdino_summary):<{COL_WIDTH}}")
+        if mm_gdino_enabled:
+            cols.append(f"{_fmt_det(cls, mm_gdino_summary):<{COL_WIDTH}}")
+
+        # Highlight open-vocab classes found by any open-vocab model
         marker = ""
-
-        if cls in yolo_summary:
-            count, avg_conf = yolo_summary[cls]
-            yolo_str = f"{cls}: {count}x @ {avg_conf:.3f}"
-        else:
-            yolo_str = f"{'':>30}"
-
-        if cls in world_summary:
-            count, avg_conf = world_summary[cls]
-            world_str = f"{cls}: {count}x @ {avg_conf:.3f}"
-        else:
-            world_str = ""
-
-        # Highlight open-vocab classes that YOLO-World found but YOLO11x couldn't
-        if cls in OPEN_VOCAB_CLASSES and cls in world_summary:
+        if cls in OPEN_VOCAB_CLASSES and (
+            cls in world_summary or cls in gdino_summary or cls in mm_gdino_summary
+        ):
             marker = " ** OPEN-VOCAB **"
 
-        print(f"  {yolo_str:<40} {world_str:<40}{marker}")
+        print(f"  {' '.join(cols)}{marker}")
 
 
 # ---------------------------------------------------------------------------
@@ -295,28 +473,24 @@ def print_frame_comparison(result: FrameResult) -> None:
 # ---------------------------------------------------------------------------
 
 def fetch_events(api_key: str) -> list[dict[str, Any]]:
-    """Fetch 10 diverse events from the Bee Maps API."""
+    """Fetch events from US city geo-polygons via the Bee Maps API."""
     all_events: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
 
-    # Use a recent date range (last 30 days)
-    from datetime import datetime, timedelta, timezone
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date - timedelta(days=30)
-    start_str = start_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    end_str = end_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    # Date range: March 1 to March 18, 2026 (17 days, under 31-day API max)
+    start_str = "2026-03-01T00:00:00.000Z"
+    end_str = "2026-03-18T23:59:59.000Z"
 
-    for event_type, count in EVENT_TYPES_TO_FETCH:
-        print(f"  Fetching {count} {event_type} events...")
+    for city_name, polygon in US_CITIES:
+        print(f"  Fetching up to {EVENTS_PER_CITY} events from {city_name}...")
         try:
             resp = requests.post(
                 f"{API_BASE_URL}/search",
                 json={
                     "startDate": start_str,
                     "endDate": end_str,
-                    "types": [event_type],
-                    "limit": count * 3,  # fetch extra in case some fail
-                    "offset": 0,
+                    "limit": EVENTS_PER_CITY * 3,  # fetch extra in case some lack video
+                    "polygon": polygon,
                 },
                 headers={
                     "Content-Type": "application/json",
@@ -329,7 +503,7 @@ def fetch_events(api_key: str) -> list[dict[str, Any]]:
             events = payload.get("events", [])
             added = 0
             for event in events:
-                if added >= count:
+                if added >= EVENTS_PER_CITY:
                     break
                 eid = event.get("id", "")
                 if eid not in seen_ids and event.get("videoUrl"):
@@ -338,9 +512,119 @@ def fetch_events(api_key: str) -> list[dict[str, Any]]:
                     added += 1
             print(f"    Got {added} events (API returned {len(events)} total)")
         except Exception as exc:
-            print(f"    [!] Failed to fetch {event_type}: {exc}")
+            print(f"    [!] Failed to fetch events for {city_name}: {exc}")
 
     return all_events
+
+
+# ---------------------------------------------------------------------------
+# Grounding DINO loader
+# ---------------------------------------------------------------------------
+
+def load_gdino() -> tuple[Any, Any, str] | None:
+    """
+    Attempt to load Grounding DINO model and processor.
+    Returns (processor, model, device_str) or None on failure.
+    Tries MPS first, falls back to CPU.
+    """
+    if not GDINO_AVAILABLE:
+        return None
+
+    model_name = "IDEA-Research/grounding-dino-base"
+    print(f"  Loading Grounding DINO ({model_name})...")
+
+    try:
+        processor = AutoProcessor.from_pretrained(model_name)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name)
+        model.eval()
+
+        # Try MPS first
+        gdino_device = "cpu"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            try:
+                model = model.to("mps")
+                # Quick smoke test to ensure MPS works
+                dummy_img = Image.new("RGB", (64, 64))
+                dummy_inputs = processor(images=dummy_img, text="test.", return_tensors="pt")
+                dummy_inputs = {
+                    k: v.to("mps") if hasattr(v, "to") else v
+                    for k, v in dummy_inputs.items()
+                }
+                with torch.no_grad():
+                    model(**dummy_inputs)
+                gdino_device = "mps"
+                print(f"    Grounding DINO running on MPS")
+            except Exception as mps_exc:
+                print(f"    [!] MPS failed for GDINO ({mps_exc}), falling back to CPU")
+                model = model.to("cpu")
+                gdino_device = "cpu"
+        else:
+            model = model.to("cpu")
+
+        if gdino_device == "cpu":
+            print(f"    Grounding DINO running on CPU")
+
+        return processor, model, gdino_device
+    except Exception as exc:
+        print(f"    [!] Failed to load Grounding DINO: {exc}")
+        print(f"    Continuing with YOLO models only.")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# MM Grounding DINO loader
+# ---------------------------------------------------------------------------
+
+def load_mm_gdino() -> tuple[Any, Any, str] | None:
+    """
+    Attempt to load MM Grounding DINO model and processor.
+    Returns (processor, model, device_str) or None on failure.
+    Tries MPS first, falls back to CPU.
+    """
+    if not MM_GDINO_AVAILABLE:
+        return None
+
+    model_name = "openmmlab-community/mm_grounding_dino_large_all"
+    print(f"  Loading MM Grounding DINO ({model_name})...")
+
+    try:
+        processor = AutoProcessor.from_pretrained(model_name)
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(model_name)
+        model.eval()
+
+        # Try MPS first
+        mm_gdino_device = "cpu"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            try:
+                model = model.to("mps")
+                # Quick smoke test to ensure MPS works
+                dummy_img = Image.new("RGB", (64, 64))
+                dummy_inputs = processor(
+                    images=dummy_img, text=[["test"]], return_tensors="pt"
+                )
+                dummy_inputs = {
+                    k: v.to("mps") if hasattr(v, "to") else v
+                    for k, v in dummy_inputs.items()
+                }
+                with torch.no_grad():
+                    model(**dummy_inputs)
+                mm_gdino_device = "mps"
+                print(f"    MM Grounding DINO running on MPS")
+            except Exception as mps_exc:
+                print(f"    [!] MPS failed for MM-GDINO ({mps_exc}), falling back to CPU")
+                model = model.to("cpu")
+                mm_gdino_device = "cpu"
+        else:
+            model = model.to("cpu")
+
+        if mm_gdino_device == "cpu":
+            print(f"    MM Grounding DINO running on CPU")
+
+        return processor, model, mm_gdino_device
+    except Exception as exc:
+        print(f"    [!] Failed to load MM Grounding DINO: {exc}")
+        print(f"    Continuing without MM-GDINO.")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +634,8 @@ def fetch_events(api_key: str) -> list[dict[str, Any]]:
 def main() -> int:
     print("=" * 80)
     print("M2 Open-Vocabulary Detection Viability Test")
+    print("  Models: YOLO11x  |  YOLO-World  |  GDINO  |  MM-GDINO")
+    print("  Data:   Geo-filtered US city events")
     print("=" * 80)
     print()
 
@@ -381,11 +667,29 @@ def main() -> int:
     model_world = YOLO(str(world_path))
     model_world.set_classes(WORLD_CLASSES)
     model_world.to(device)
-    print("  Models loaded.")
+
+    # Attempt to load Grounding DINO
+    gdino_result = load_gdino()
+    gdino_enabled = gdino_result is not None
+    if gdino_enabled:
+        gdino_processor, gdino_model, gdino_device = gdino_result
+    else:
+        gdino_processor = gdino_model = gdino_device = None
+
+    # Attempt to load MM Grounding DINO
+    mm_gdino_result = load_mm_gdino()
+    mm_gdino_enabled = mm_gdino_result is not None
+    if mm_gdino_enabled:
+        mm_gdino_processor, mm_gdino_model, mm_gdino_device = mm_gdino_result
+    else:
+        mm_gdino_processor = mm_gdino_model = mm_gdino_device = None
+
+    model_count = 2 + int(gdino_enabled) + int(mm_gdino_enabled)
+    print(f"  {model_count} model(s) loaded.")
 
     # Fetch events
     print()
-    print("[4/5] Fetching events from Bee Maps API...")
+    print("[4/5] Fetching events from Bee Maps API (US city geo-filters)...")
     events = fetch_events(api_key)
     print(f"  Total events to process: {len(events)}")
 
@@ -399,9 +703,13 @@ def main() -> int:
     print()
 
     all_results: list[FrameResult] = []
-    # Track open-vocab stats across all frames
-    open_vocab_stats: dict[str, list[float]] = defaultdict(list)
-    open_vocab_frame_counts: dict[str, int] = defaultdict(int)
+    # Track open-vocab stats across all frames per model
+    world_open_vocab_stats: dict[str, list[float]] = defaultdict(list)
+    world_open_vocab_frame_counts: dict[str, int] = defaultdict(int)
+    gdino_open_vocab_stats: dict[str, list[float]] = defaultdict(list)
+    gdino_open_vocab_frame_counts: dict[str, int] = defaultdict(int)
+    mm_gdino_open_vocab_stats: dict[str, list[float]] = defaultdict(list)
+    mm_gdino_open_vocab_frame_counts: dict[str, int] = defaultdict(int)
 
     for i, event in enumerate(events):
         event_id = event["id"]
@@ -434,7 +742,7 @@ def main() -> int:
             continue
         print(f"  Extracted {len(frames)} frames")
 
-        # Run both models on each frame
+        # Run all models on each frame
         for frame_idx, frame_data in frames:
             fr = FrameResult(event_id=event_id, frame_index=frame_idx)
 
@@ -444,18 +752,56 @@ def main() -> int:
             # YOLO-World
             fr.world_detections = run_world(model_world, frame_data, device)
 
+            # Grounding DINO
+            if gdino_enabled:
+                try:
+                    fr.gdino_detections = run_gdino(
+                        gdino_processor, gdino_model, frame_data, gdino_device
+                    )
+                except Exception as exc:
+                    print(f"    [!] GDINO inference failed on frame {frame_idx}: {exc}")
+                    fr.gdino_detections = []
+
+            # MM Grounding DINO
+            if mm_gdino_enabled:
+                try:
+                    fr.mm_gdino_detections = run_mm_gdino(
+                        mm_gdino_processor, mm_gdino_model, frame_data, mm_gdino_device
+                    )
+                except Exception as exc:
+                    print(f"    [!] MM-GDINO inference failed on frame {frame_idx}: {exc}")
+                    fr.mm_gdino_detections = []
+
             all_results.append(fr)
 
-            # Track open-vocab detections
+            # Track open-vocab detections for YOLO-World
             world_summary = summarize_detections(fr.world_detections)
             for cls_name in OPEN_VOCAB_CLASSES:
                 if cls_name in world_summary:
                     count, avg_conf = world_summary[cls_name]
-                    open_vocab_stats[cls_name].append(avg_conf)
-                    open_vocab_frame_counts[cls_name] += 1
+                    world_open_vocab_stats[cls_name].append(avg_conf)
+                    world_open_vocab_frame_counts[cls_name] += 1
+
+            # Track open-vocab detections for Grounding DINO
+            if gdino_enabled:
+                gdino_summary = summarize_detections(fr.gdino_detections)
+                for cls_name in OPEN_VOCAB_CLASSES:
+                    if cls_name in gdino_summary:
+                        count, avg_conf = gdino_summary[cls_name]
+                        gdino_open_vocab_stats[cls_name].append(avg_conf)
+                        gdino_open_vocab_frame_counts[cls_name] += 1
+
+            # Track open-vocab detections for MM Grounding DINO
+            if mm_gdino_enabled:
+                mm_gdino_summary = summarize_detections(fr.mm_gdino_detections)
+                for cls_name in OPEN_VOCAB_CLASSES:
+                    if cls_name in mm_gdino_summary:
+                        count, avg_conf = mm_gdino_summary[cls_name]
+                        mm_gdino_open_vocab_stats[cls_name].append(avg_conf)
+                        mm_gdino_open_vocab_frame_counts[cls_name] += 1
 
             # Print comparison
-            print_frame_comparison(fr)
+            print_frame_comparison(fr, gdino_enabled, mm_gdino_enabled)
 
     # ---------------------------------------------------------------------------
     # Summary
@@ -467,55 +813,126 @@ def main() -> int:
     print()
     print(f"Total frames analyzed: {len(all_results)}")
     print(f"Total events processed: {len(events)}")
+    print(f"Cities queried: {', '.join(c[0] for c in US_CITIES)}")
+    model_names = ["YOLO11x", "YOLO-World"]
+    if gdino_enabled:
+        model_names.append("Grounding DINO")
+    if mm_gdino_enabled:
+        model_names.append("MM Grounding DINO")
+    print(f"Models: {', '.join(model_names)}")
     print()
 
-    # Overall detection counts for both models
+    # Overall detection counts for all models
     yolo11x_total: dict[str, int] = defaultdict(int)
     world_total: dict[str, int] = defaultdict(int)
+    gdino_total: dict[str, int] = defaultdict(int)
+    mm_gdino_total: dict[str, int] = defaultdict(int)
     for fr in all_results:
         for d in fr.yolo11x_detections:
             yolo11x_total[d.class_name] += 1
         for d in fr.world_detections:
             world_total[d.class_name] += 1
+        for d in fr.gdino_detections:
+            gdino_total[d.class_name] += 1
+        for d in fr.mm_gdino_detections:
+            mm_gdino_total[d.class_name] += 1
 
-    print("--- Shared classes (both models can detect) ---")
+    print("--- Shared classes (all models can detect) ---")
     shared_classes = sorted(set(COCO_LABEL_MAP.values()) & set(WORLD_CLASSES))
-    print(f"  {'Class':<25} {'YOLO11x count':<18} {'World count':<18}")
-    print(f"  {'-' * 25} {'-' * 18} {'-' * 18}")
+    # Build header dynamically
+    hdr = f"  {'Class':<25} {'YOLO11x':<14} {'World':<14}"
+    sep = f"  {'-' * 25} {'-' * 14} {'-' * 14}"
+    if gdino_enabled:
+        hdr += f" {'GDINO':<14}"
+        sep += f" {'-' * 14}"
+    if mm_gdino_enabled:
+        hdr += f" {'MM-GDINO':<14}"
+        sep += f" {'-' * 14}"
+    print(hdr)
+    print(sep)
     for cls in shared_classes:
-        y_count = yolo11x_total.get(cls, 0)
-        w_count = world_total.get(cls, 0)
-        print(f"  {cls:<25} {y_count:<18} {w_count:<18}")
-    print(f"\n  Note: YOLO-World ran at conf={WORLD_CONF} vs YOLO11x at conf={YOLO11X_CONF}."
-          " Shared-class counts are not directly comparable.")
+        row = f"  {cls:<25} {yolo11x_total.get(cls, 0):<14} {world_total.get(cls, 0):<14}"
+        if gdino_enabled:
+            row += f" {gdino_total.get(cls, 0):<14}"
+        if mm_gdino_enabled:
+            row += f" {mm_gdino_total.get(cls, 0):<14}"
+        print(row)
+
+    print(f"\n  Note: Confidence thresholds differ -- YOLO11x={YOLO11X_CONF}, "
+          f"World={WORLD_CONF}, GDINO/MM-GDINO box/text="
+          f"{GDINO_BOX_THRESHOLD}/{GDINO_TEXT_THRESHOLD}."
+          " Counts are not directly comparable.")
+    if mm_gdino_enabled:
+        print("  Note: MM-GDINO-large-all was trained on COCO data — shared-class"
+              " counts are NOT zero-shot. Open-vocab classes are more meaningful.")
 
     print()
-    print("--- Open-vocabulary classes (YOLO-World only) ---")
-    print(f"  {'Class':<25} {'Frames detected':<18} {'Avg confidence':<18} {'Verdict':<15}")
-    print(f"  {'-' * 25} {'-' * 18} {'-' * 18} {'-' * 15}")
+    print("--- Open-vocabulary classes (YOLO-World, GDINO, MM-GDINO) ---")
+    # Build header dynamically
+    ov_hdr = f"  {'Class':<22} {'World frm':<12} {'World conf':<12}"
+    ov_sep = f"  {'-' * 22} {'-' * 12} {'-' * 12}"
+    if gdino_enabled:
+        ov_hdr += f" {'GDINO frm':<12} {'GDINO conf':<12}"
+        ov_sep += f" {'-' * 12} {'-' * 12}"
+    if mm_gdino_enabled:
+        ov_hdr += f" {'MM-GD frm':<12} {'MM-GD conf':<12}"
+        ov_sep += f" {'-' * 12} {'-' * 12}"
+    ov_hdr += f" {'Verdict':<15}"
+    ov_sep += f" {'-' * 15}"
+    print(ov_hdr)
+    print(ov_sep)
 
     for cls in sorted(OPEN_VOCAB_CLASSES):
-        frame_count = open_vocab_frame_counts.get(cls, 0)
-        if frame_count > 0:
-            avg_conf = sum(open_vocab_stats[cls]) / len(open_vocab_stats[cls])
-        else:
-            avg_conf = 0.0
+        w_frame_count = world_open_vocab_frame_counts.get(cls, 0)
+        w_avg_conf = (
+            sum(world_open_vocab_stats[cls]) / len(world_open_vocab_stats[cls])
+            if w_frame_count > 0
+            else 0.0
+        )
+
+        g_frame_count = gdino_open_vocab_frame_counts.get(cls, 0) if gdino_enabled else 0
+        g_avg_conf = (
+            sum(gdino_open_vocab_stats[cls]) / len(gdino_open_vocab_stats[cls])
+            if g_frame_count > 0
+            else 0.0
+        )
+
+        mg_frame_count = (
+            mm_gdino_open_vocab_frame_counts.get(cls, 0) if mm_gdino_enabled else 0
+        )
+        mg_avg_conf = (
+            sum(mm_gdino_open_vocab_stats[cls]) / len(mm_gdino_open_vocab_stats[cls])
+            if mg_frame_count > 0
+            else 0.0
+        )
+
+        # Verdict: best of all open-vocab models
+        best_frames = max(w_frame_count, g_frame_count, mg_frame_count)
+        best_conf = max(w_avg_conf, g_avg_conf, mg_avg_conf)
 
         # Verdict logic
-        if frame_count >= 5 and avg_conf > 0.3:
+        if best_frames >= 5 and best_conf > 0.3:
             verdict = "VIABLE"
-        elif frame_count > 0:
+        elif best_frames > 0:
             verdict = "MARGINAL"
         else:
             verdict = "NOT DETECTED"
 
-        conf_str = f"{avg_conf:.3f}" if frame_count > 0 else "N/A"
-        print(f"  {cls:<25} {frame_count:<18} {conf_str:<18} {verdict:<15}")
+        w_conf_str = f"{w_avg_conf:.3f}" if w_frame_count > 0 else "N/A"
+        row = f"  {cls:<22} {w_frame_count:<12} {w_conf_str:<12}"
+        if gdino_enabled:
+            g_conf_str = f"{g_avg_conf:.3f}" if g_frame_count > 0 else "N/A"
+            row += f" {g_frame_count:<12} {g_conf_str:<12}"
+        if mm_gdino_enabled:
+            mg_conf_str = f"{mg_avg_conf:.3f}" if mg_frame_count > 0 else "N/A"
+            row += f" {mg_frame_count:<12} {mg_conf_str:<12}"
+        row += f" {verdict:<15}"
+        print(row)
 
     print()
     print("--- Verdict Legend ---")
-    print("  VIABLE:     Detected in 5+ frames with avg confidence > 0.3")
-    print("  MARGINAL:   Detected but low confidence or rare")
+    print("  VIABLE:       Detected in 5+ frames with avg confidence > 0.3 (by best model)")
+    print("  MARGINAL:     Detected but low confidence or rare")
     print("  NOT DETECTED: Never detected in sample (may appear in other scenes)")
     print()
 

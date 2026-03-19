@@ -9,8 +9,9 @@ export async function GET(
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   const { videoId } = await params;
-  return NextResponse.json({
-    state: getVideoPipelineState(videoId),
-    segments: getVideoDetectionSegments(videoId),
-  });
+  const [state, segments] = await Promise.all([
+    getVideoPipelineState(videoId),
+    getVideoDetectionSegments(videoId),
+  ]);
+  return NextResponse.json({ state, segments });
 }
