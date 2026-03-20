@@ -120,6 +120,17 @@ export const VRU_LABEL_COLOR_MAP: Record<string, string> = {
   child: "#9333ea",
 };
 
+export interface DetectionModelConfig {
+  id: string;
+  name: string;
+}
+
+export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
+  { id: "gdino-base-clip", name: "GDINO Base + CLIP" },
+  { id: "yolo-world", name: "YOLO-World v2" },
+  { id: "yolo11x", name: "YOLO11x (COCO-80)" },
+];
+
 export function createEmptyPipelineTotals(): PipelineRunTotals {
   return {
     totalDiscovered: 0,

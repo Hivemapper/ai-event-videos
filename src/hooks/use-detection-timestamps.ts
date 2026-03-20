@@ -15,7 +15,7 @@ export function useDetectionTimestamps(videoId: string | null, modelName?: strin
     ? `/api/videos/${videoId}/detections${modelName ? `?model=${encodeURIComponent(modelName)}` : ""}`
     : null;
 
-  const { data, error, isLoading } = useSWR<DetectionTimestampsResponse>(
+  const { data, error, isLoading, mutate } = useSWR<DetectionTimestampsResponse>(
     url,
     fetcher
   );
@@ -40,5 +40,6 @@ export function useDetectionTimestamps(videoId: string | null, modelName?: strin
     detectionsByFrame,
     isLoading,
     error,
+    mutate,
   };
 }

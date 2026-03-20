@@ -120,6 +120,25 @@ async function initSchema(db: Client): Promise<void> {
 
     CREATE INDEX IF NOT EXISTS idx_video_pipeline_state_day
       ON video_pipeline_state (day);
+
+    CREATE TABLE IF NOT EXISTS detection_runs (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      config_json TEXT NOT NULL DEFAULT '{}',
+      detection_count INTEGER,
+      worker_pid INTEGER,
+      started_at TEXT,
+      completed_at TEXT,
+      last_heartbeat_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_detection_runs_video
+      ON detection_runs (video_id, created_at DESC);
+
   `);
 
   // Ensure columns exist (idempotent migrations)
@@ -136,6 +155,16 @@ async function initSchema(db: Client): Promise<void> {
   await ensureColumn("labels", "enabled", "INTEGER NOT NULL DEFAULT 1");
   await ensureColumn("labels", "detector_aliases", "TEXT");
   await ensureColumn("frame_detections", "model_name", "TEXT NOT NULL DEFAULT 'yolo11x'");
+  await ensureColumn("frame_detections", "run_id", "TEXT");
+
+  // Index on run_id (must be after ensureColumn adds the column)
+  try {
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_frame_detections_run_id ON frame_detections (run_id)"
+    );
+  } catch {
+    // Index may already exist
+  }
 
   // Seed default labels
   for (const name of ["pedestrian", "motorcycle", "bicycle", "wheelchair", "kids"]) {

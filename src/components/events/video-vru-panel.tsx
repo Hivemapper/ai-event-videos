@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Play } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,9 +15,13 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import { useVideoVru } from "@/hooks/use-video-vru";
-import { DETECTION_FRAME_TOLERANCE_MS, VRU_LABEL_COLOR_MAP } from "@/lib/pipeline-config";
+import {
+  AVAILABLE_DETECTION_MODELS,
+  DETECTION_FRAME_TOLERANCE_MS,
+  VRU_LABEL_COLOR_MAP,
+} from "@/lib/pipeline-config";
 import { cn } from "@/lib/utils";
-import type { FrameDetection, VideoDetectionSegment } from "@/types/pipeline";
+import type { DetectionRun, FrameDetection, VideoDetectionSegment } from "@/types/pipeline";
 
 interface VideoVruPanelProps {
   videoId: string;
@@ -31,6 +35,9 @@ interface VideoVruPanelProps {
   onModelChange?: (model: string) => void;
   minConfidence?: number;
   onMinConfidenceChange?: (value: number) => void;
+  activeDetectionRun?: DetectionRun | null;
+  detectionRuns?: DetectionRun[];
+  onRunDetection?: (modelName: string) => void;
   onSeek: (time: number) => void;
 }
 
@@ -54,6 +61,25 @@ function statusTone(status: string | undefined) {
   }
 }
 
+function formatRelativeTime(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function formatElapsedTime(startedAt: string): string {
+  const elapsed = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000);
+  const minutes = Math.floor(elapsed / 60);
+  const seconds = elapsed % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 export function VideoVruPanel({
   videoId,
   currentTime,
@@ -66,10 +92,16 @@ export function VideoVruPanel({
   onModelChange,
   minConfidence,
   onMinConfidenceChange,
+  activeDetectionRun,
+  detectionRuns,
+  onRunDetection,
   onSeek,
 }: VideoVruPanelProps) {
   const { data, isLoading } = useVideoVru(videoId);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedRunModel, setSelectedRunModel] = useState(
+    AVAILABLE_DETECTION_MODELS[0].id
+  );
 
   // Frame stepping helpers
   const currentMs = currentTime * 1000;
@@ -206,6 +238,103 @@ export function VideoVruPanel({
             )}
           </div>
         )}
+
+      {/* Run Detection — always visible */}
+      {onRunDetection && (
+        <div className="space-y-2 rounded-lg border bg-card px-4 py-3">
+          <h4 className="text-sm font-medium text-muted-foreground">Run Detection</h4>
+          {activeDetectionRun &&
+          (activeDetectionRun.status === "queued" ||
+            activeDetectionRun.status === "running") ? (
+            <div className="flex items-center gap-2 text-sm">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              <span>
+                Running{" "}
+                <span className="font-medium">
+                  {AVAILABLE_DETECTION_MODELS.find(
+                    (m) => m.id === activeDetectionRun.modelName
+                  )?.name ?? activeDetectionRun.modelName}
+                </span>
+                ...
+              </span>
+              {activeDetectionRun.startedAt && (
+                <span className="text-xs text-muted-foreground ml-auto tabular-nums">
+                  {formatElapsedTime(activeDetectionRun.startedAt)}
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Select
+                value={selectedRunModel}
+                onValueChange={setSelectedRunModel}
+              >
+                <SelectTrigger className="flex-1" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {AVAILABLE_DETECTION_MODELS.map((model) => (
+                    <SelectItem key={model.id} value={model.id}>
+                      {model.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                size="sm"
+                onClick={() => onRunDetection(selectedRunModel)}
+              >
+                <Play className="h-3.5 w-3.5 mr-1" />
+                Run
+              </Button>
+            </div>
+          )}
+
+          {/* Run History */}
+          {detectionRuns &&
+            detectionRuns.filter(
+              (r) => r.status === "completed" || r.status === "failed"
+            ).length > 0 && (
+              <div className="space-y-1 border-t pt-2">
+                <p className="text-xs font-medium text-muted-foreground">
+                  Recent runs
+                </p>
+                {detectionRuns
+                  .filter(
+                    (r) =>
+                      r.status === "completed" || r.status === "failed"
+                  )
+                  .slice(0, 3)
+                  .map((run) => (
+                    <div
+                      key={run.id}
+                      className="flex items-center justify-between text-xs text-muted-foreground"
+                    >
+                      <span>
+                        {AVAILABLE_DETECTION_MODELS.find(
+                          (m) => m.id === run.modelName
+                        )?.name ?? run.modelName}
+                      </span>
+                      <span className="flex items-center gap-2">
+                        {run.status === "failed" ? (
+                          <span className="text-destructive">Failed</span>
+                        ) : (
+                          <span>
+                            {run.detectionCount ?? 0} detections
+                          </span>
+                        )}
+                        {run.completedAt && (
+                          <span className="tabular-nums">
+                            {formatRelativeTime(run.completedAt)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+              </div>
+            )}
+        </div>
+      )}
 
       <Card>
         <CardHeader>

@@ -34,6 +34,7 @@ import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
 import { useActorDetection } from "@/hooks/use-actor-detection";
 import { useActorTracking } from "@/hooks/use-actor-tracking";
+import { useDetectionRuns } from "@/hooks/use-detection-runs";
 import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
 import { useEventDetail, useCountryName, useNearestSpeedLimit } from "@/hooks/use-event-detail";
 import { VideoAnalysisCard } from "@/components/events/video-analysis";
@@ -261,7 +262,7 @@ export default function EventDetailPage({
   // Detection timestamps for frame stepping and overlay
   const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
   const [minConfidence, setMinConfidence] = useState(0.1);
-  const { timestamps: detectionTimestamps, models: detectionModels, detectionsByFrame } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedModel);
+  const { timestamps: detectionTimestamps, models: detectionModels, detectionsByFrame, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedModel);
 
   // Auto-select first model when models become available
   useEffect(() => {
@@ -269,6 +270,40 @@ export default function EventDetailPage({
       setSelectedModel(detectionModels[0]);
     }
   }, [detectionModels, selectedModel]);
+
+  // Detection runs
+  const {
+    runs: detectionRuns,
+    activeRun: activeDetectionRun,
+    mutate: mutateRuns,
+  } = useDetectionRuns(id);
+
+  const handleRunDetection = useCallback(
+    async (modelName: string) => {
+      await fetch(`/api/videos/${id}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelName }),
+      });
+      mutateRuns();
+    },
+    [id, mutateRuns]
+  );
+
+  // Auto-refresh detections when a detection run completes
+  const prevActiveRunRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const prevId = prevActiveRunRef.current;
+    const currentId = activeDetectionRun?.id ?? null;
+
+    if (prevId && !currentId) {
+      // A run just completed — refresh detections
+      mutateDetections();
+    }
+
+    prevActiveRunRef.current = currentId;
+  }, [activeDetectionRun?.id, mutateDetections]);
 
   // Reusable camera state interpolation from GNSS path
   const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
@@ -710,6 +745,9 @@ export default function EventDetailPage({
               onModelChange={setSelectedModel}
               minConfidence={minConfidence}
               onMinConfidenceChange={setMinConfidence}
+              activeDetectionRun={activeDetectionRun}
+              detectionRuns={detectionRuns}
+              onRunDetection={handleRunDetection}
               onSeek={(time) => {
                 if (videoRef.current) {
                   videoRef.current.currentTime = time;

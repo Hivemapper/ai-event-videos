@@ -7,6 +7,8 @@ import {
   DEFAULT_PIPELINE_MODEL_NAME,
 } from "@/lib/pipeline-config";
 import type {
+  DetectionRun,
+  DetectionRunStatus,
   FrameDetection,
   LabelDefinition,
   PipelineRunRecord,
@@ -110,6 +112,24 @@ function mapFrameDetection(row: Row): FrameDetection {
     frameHeight: num(row.frame_height),
     pipelineVersion: str(row.pipeline_version),
     modelName: str(row.model_name),
+    runId: strOrNull(row.run_id),
+    createdAt: str(row.created_at),
+  };
+}
+
+function mapDetectionRun(row: Row): DetectionRun {
+  return {
+    id: str(row.id),
+    videoId: str(row.video_id),
+    modelName: str(row.model_name),
+    status: str(row.status) as DetectionRunStatus,
+    config: parseJson<Record<string, unknown>>(strOrNull(row.config_json), {}),
+    detectionCount: numOrNull(row.detection_count),
+    workerPid: numOrNull(row.worker_pid),
+    startedAt: strOrNull(row.started_at),
+    completedAt: strOrNull(row.completed_at),
+    lastHeartbeatAt: strOrNull(row.last_heartbeat_at),
+    lastError: strOrNull(row.last_error),
     createdAt: str(row.created_at),
   };
 }
@@ -428,4 +448,89 @@ export async function getFrameDetectionModels(videoId: string): Promise<string[]
     args: [videoId],
   });
   return result.rows.map((r) => str(r.model_name));
+}
+
+// --- Detection Runs ---
+// Global lock: only one detection run at a time (single GPU on local machine).
+// The atomic INSERT...WHERE NOT EXISTS prevents races.
+
+export async function createDetectionRun(params: {
+  videoId: string;
+  modelName: string;
+  config?: Record<string, unknown>;
+}): Promise<DetectionRun | null> {
+  const db = await getDb();
+  const id = randomUUID();
+  const result = await db.execute({
+    sql: `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
+          SELECT ?, ?, ?, 'queued', ?, datetime('now')
+          WHERE NOT EXISTS (
+            SELECT 1 FROM detection_runs WHERE status IN ('queued', 'running')
+          )`,
+    args: [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {})],
+  });
+  if (result.rowsAffected === 0) return null;
+  return (await getDetectionRun(id))!;
+}
+
+export async function getDetectionRun(id: string): Promise<DetectionRun | null> {
+  const db = await getDb();
+  const result = await db.execute({
+    sql: "SELECT * FROM detection_runs WHERE id = ?",
+    args: [id],
+  });
+  return result.rows.length > 0 ? mapDetectionRun(result.rows[0]) : null;
+}
+
+export async function listDetectionRuns(videoId: string): Promise<DetectionRun[]> {
+  const db = await getDb();
+  const result = await db.execute({
+    sql: `SELECT * FROM detection_runs WHERE video_id = ? ORDER BY created_at DESC`,
+    args: [videoId],
+  });
+  return result.rows.map(mapDetectionRun);
+}
+
+export async function getActiveDetectionRun(): Promise<DetectionRun | null> {
+  const db = await getDb();
+  const result = await db.execute(
+    `SELECT * FROM detection_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`
+  );
+  return result.rows.length > 0 ? mapDetectionRun(result.rows[0]) : null;
+}
+
+export async function updateDetectionRunStatus(
+  id: string,
+  status: DetectionRunStatus,
+  extra?: { detectionCount?: number; lastError?: string }
+) {
+  const db = await getDb();
+  await db.execute({
+    sql: `UPDATE detection_runs
+          SET status = ?,
+              detection_count = COALESCE(?, detection_count),
+              last_error = COALESCE(?, last_error),
+              started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+              completed_at = CASE WHEN ? IN ('completed', 'failed') THEN datetime('now') ELSE completed_at END
+          WHERE id = ?`,
+    args: [
+      status,
+      extra?.detectionCount ?? null,
+      extra?.lastError ?? null,
+      status,
+      status,
+      id,
+    ],
+  });
+}
+
+export async function setDetectionRunWorkerPid(
+  id: string,
+  pid: number | null
+) {
+  const db = await getDb();
+  await db.execute({
+    sql: `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`,
+    args: [pid, id],
+  });
 }

@@ -129,7 +129,25 @@ export interface FrameDetection {
   frameHeight: number;
   pipelineVersion: string;
   modelName: string;
+  runId: string | null;
   createdAt?: string;
+}
+
+export type DetectionRunStatus = "queued" | "running" | "completed" | "failed";
+
+export interface DetectionRun {
+  id: string;
+  videoId: string;
+  modelName: string;
+  status: DetectionRunStatus;
+  config: Record<string, unknown>;
+  detectionCount: number | null;
+  workerPid: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastError: string | null;
+  createdAt: string;
 }
 
 export interface PipelineDaySummary {
