@@ -1,4 +1,4 @@
-import { createClient, type Client } from "@libsql/client";
+import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import {
@@ -7,31 +7,70 @@ import {
 } from "@/lib/pipeline-config";
 
 const DB_DIR = path.join(process.cwd(), "data");
-const LOCAL_DB_PATH = path.join(DB_DIR, "labels.db");
+const DB_PATH = path.join(DB_DIR, "labels.db");
 
-let client: Client | null = null;
-let initialized = false;
+let db: Database.Database | null = null;
 
-function createDbClient(): Client {
-  const tursoUrl = process.env.TURSO_DATABASE_URL;
-  const tursoToken = process.env.TURSO_AUTH_TOKEN;
-
-  if (tursoUrl && tursoToken) {
-    return createClient({ url: tursoUrl, authToken: tursoToken });
-  }
-
-  // Local file-based SQLite
-  fs.mkdirSync(DB_DIR, { recursive: true });
-  return createClient({ url: `file:${LOCAL_DB_PATH}` });
+function tableHasColumn(dbInstance: Database.Database, table: string, column: string): boolean {
+  const rows = dbInstance.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
 }
 
-async function initSchema(db: Client): Promise<void> {
-  if (initialized) return;
+function ensureColumn(
+  dbInstance: Database.Database,
+  table: string,
+  column: string,
+  definition: string
+) {
+  if (!tableHasColumn(dbInstance, table, column)) {
+    dbInstance.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
-  await db.execute("PRAGMA journal_mode = WAL");
-  await db.execute("PRAGMA foreign_keys = ON");
+function seedSystemLabels(dbInstance: Database.Database) {
+  const insert = dbInstance.prepare(`
+    INSERT INTO labels (name, is_system, support_level, enabled, detector_aliases)
+    VALUES (?, 1, ?, 1, ?)
+    ON CONFLICT(name) DO UPDATE SET
+      is_system = excluded.is_system,
+      support_level = excluded.support_level,
+      enabled = excluded.enabled,
+      detector_aliases = excluded.detector_aliases
+  `);
 
-  await db.executeMultiple(`
+  const seedMany = dbInstance.transaction(() => {
+    for (const label of SYSTEM_VRU_LABELS) {
+      insert.run(
+        label.key,
+        label.supportLevel,
+        JSON.stringify(label.detectorAliases)
+      );
+    }
+  });
+
+  seedMany();
+}
+
+function markOutdatedPipelineStates(dbInstance: Database.Database) {
+  dbInstance
+    .prepare(
+      `UPDATE video_pipeline_state
+       SET status = 'stale'
+       WHERE status = 'processed' AND pipeline_version <> ?`
+    )
+    .run(CURRENT_PIPELINE_VERSION);
+}
+
+export function getDb(): Database.Database {
+  if (db) return db;
+
+  fs.mkdirSync(DB_DIR, { recursive: true });
+
+  db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS labels (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
@@ -98,111 +137,21 @@ async function initSchema(db: Client): Promise<void> {
       PRIMARY KEY (run_id, video_id),
       FOREIGN KEY (run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE
     );
-
-    CREATE TABLE IF NOT EXISTS frame_detections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      video_id TEXT NOT NULL,
-      frame_ms INTEGER NOT NULL,
-      label TEXT NOT NULL,
-      x_min REAL NOT NULL,
-      y_min REAL NOT NULL,
-      x_max REAL NOT NULL,
-      y_max REAL NOT NULL,
-      confidence REAL NOT NULL,
-      frame_width INTEGER NOT NULL,
-      frame_height INTEGER NOT NULL,
-      pipeline_version TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_frame_detections_video_frame
-      ON frame_detections (video_id, frame_ms);
-
-    CREATE INDEX IF NOT EXISTS idx_video_pipeline_state_day
-      ON video_pipeline_state (day);
-
-    CREATE TABLE IF NOT EXISTS detection_runs (
-      id TEXT PRIMARY KEY,
-      video_id TEXT NOT NULL,
-      model_name TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'queued',
-      config_json TEXT NOT NULL DEFAULT '{}',
-      detection_count INTEGER,
-      worker_pid INTEGER,
-      started_at TEXT,
-      completed_at TEXT,
-      last_heartbeat_at TEXT,
-      last_error TEXT,
-      created_at TEXT NOT NULL DEFAULT ''
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_detection_runs_video
-      ON detection_runs (video_id, created_at DESC);
-
   `);
 
-  // Ensure columns exist (idempotent migrations)
-  const ensureColumn = async (table: string, column: string, definition: string) => {
-    const info = await db.execute(`PRAGMA table_info(${table})`);
-    const exists = info.rows.some((row) => row.name === column);
-    if (!exists) {
-      await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-    }
-  };
+  ensureColumn(db, "labels", "is_system", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "labels", "support_level", "TEXT NOT NULL DEFAULT 'custom'");
+  ensureColumn(db, "labels", "enabled", "INTEGER NOT NULL DEFAULT 1");
+  ensureColumn(db, "labels", "detector_aliases", "TEXT");
 
-  await ensureColumn("labels", "is_system", "INTEGER NOT NULL DEFAULT 0");
-  await ensureColumn("labels", "support_level", "TEXT NOT NULL DEFAULT 'custom'");
-  await ensureColumn("labels", "enabled", "INTEGER NOT NULL DEFAULT 1");
-  await ensureColumn("labels", "detector_aliases", "TEXT");
-  await ensureColumn("frame_detections", "model_name", "TEXT NOT NULL DEFAULT 'yolo11x'");
-  await ensureColumn("frame_detections", "run_id", "TEXT");
-
-  // Index on run_id (must be after ensureColumn adds the column)
-  try {
-    await db.execute(
-      "CREATE INDEX IF NOT EXISTS idx_frame_detections_run_id ON frame_detections (run_id)"
-    );
-  } catch {
-    // Index may already exist
-  }
-
-  // Seed default labels
-  for (const name of ["pedestrian", "motorcycle", "bicycle", "wheelchair", "kids"]) {
-    await db.execute({
-      sql: "INSERT OR IGNORE INTO labels (name) VALUES (?)",
-      args: [name],
-    });
-  }
-
-  // Seed system labels
-  for (const label of SYSTEM_VRU_LABELS) {
-    await db.execute({
-      sql: `INSERT INTO labels (name, is_system, support_level, enabled, detector_aliases)
-            VALUES (?, 1, ?, 1, ?)
-            ON CONFLICT(name) DO UPDATE SET
-              is_system = excluded.is_system,
-              support_level = excluded.support_level,
-              enabled = excluded.enabled,
-              detector_aliases = excluded.detector_aliases`,
-      args: [label.key, label.supportLevel, JSON.stringify(label.detectorAliases)],
-    });
-  }
-
-  // Mark outdated pipeline states
-  await db.execute({
-    sql: `UPDATE video_pipeline_state
-          SET status = 'stale'
-          WHERE status = 'processed' AND pipeline_version <> ?`,
-    args: [CURRENT_PIPELINE_VERSION],
+  // Seed defaults
+  const insert = db.prepare("INSERT OR IGNORE INTO labels (name) VALUES (?)");
+  const seedMany = db.transaction((names: string[]) => {
+    for (const name of names) insert.run(name);
   });
+  seedMany(["pedestrian", "motorcycle", "bicycle", "wheelchair", "kids"]);
+  seedSystemLabels(db);
+  markOutdatedPipelineStates(db);
 
-  initialized = true;
-}
-
-export async function getDb(): Promise<Client> {
-  if (!client) {
-    client = createDbClient();
-    await initSchema(client);
-  }
-  return client;
+  return db;
 }

@@ -59,7 +59,8 @@ export async function GET(
               : JSON.stringify(errorJson.error);
         }
       } catch {
-        if (errorText) {
+        // errorText may be raw HTML (e.g. Cloudflare challenge) — don't pass it through
+        if (errorText && errorText.length < 500 && !errorText.includes("<")) {
           errorMessage = errorText;
         }
       }
@@ -115,7 +116,11 @@ export async function GET(
       }
     }
 
-    return NextResponse.json(data);
+    return NextResponse.json(data, {
+      headers: {
+        "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
+      },
+    });
   } catch (error) {
     console.error("API proxy error:", error);
     return NextResponse.json(

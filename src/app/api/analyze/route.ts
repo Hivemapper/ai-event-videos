@@ -187,7 +187,7 @@ export async function POST(request: NextRequest) {
     // 5. Extract frames via FFmpeg
     const frameBuffers: Array<{ buffer: Buffer; timestamp: number }> = [];
     for (const ts of frameTimestamps) {
-      const buf = extractFrame(event.videoUrl, ts, 1280);
+      const buf = await extractFrame(event.videoUrl, ts, 1280);
       if (buf) {
         frameBuffers.push({ buffer: buf, timestamp: ts });
       }

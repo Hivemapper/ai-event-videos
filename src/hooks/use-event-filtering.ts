@@ -3,6 +3,8 @@
 import { useMemo, useRef, useEffect } from "react";
 import { AIEvent, Region } from "@/types/events";
 import { getTimeOfDay, TimeOfDay } from "@/lib/sun";
+import { EventIndexEntry } from "@/lib/event-index";
+import { getRoadTypeGroup } from "@/hooks/use-event-index";
 
 interface Coordinates {
   lat: number;
@@ -16,6 +18,9 @@ interface UseEventFilteringOptions {
   selectedTimeOfDay: TimeOfDay[];
   selectedCountries: string[];
   searchCoordinates?: Coordinates | null;
+  eventIndex?: Map<string, EventIndexEntry>;
+  indexCountries?: string[];
+  selectedRoadTypes?: string[];
 }
 
 function getGridCellKey(lat: number, lon: number): string {
@@ -29,6 +34,9 @@ export function useEventFiltering({
   selectedTimeOfDay,
   selectedCountries,
   searchCoordinates,
+  eventIndex,
+  indexCountries,
+  selectedRoadTypes,
 }: UseEventFilteringOptions): AIEvent[] {
   // Cache time-of-day results per event ID, cleared when events change
   const todCacheRef = useRef<Map<string, TimeOfDay>>(new Map());
@@ -51,8 +59,15 @@ export function useEventFiltering({
     return map;
   }, [regions]);
 
-  // Build a set of region IDs in selected countries
+  // Determine whether to use index-based or region-based country filtering
+  const useIndexForCountries = !!eventIndex && eventIndex.size > 0 && !!indexCountries && indexCountries.length > 0;
+
+  // The effective country list for "all selected" check
+  const effectiveCountries = useIndexForCountries ? indexCountries! : countries;
+
+  // Build a set of region IDs in selected countries (fallback when no index)
   const regionIdsInSelectedCountries = useMemo(() => {
+    if (useIndexForCountries) return null; // using index instead
     if (selectedCountries.length === 0 || selectedCountries.length >= countries.length) {
       return null; // no filtering needed
     }
@@ -64,7 +79,7 @@ export function useEventFiltering({
       }
     }
     return ids;
-  }, [regions, countries, selectedCountries]);
+  }, [regions, countries, selectedCountries, useIndexForCountries]);
 
   return useMemo(() => {
     let filtered = events;
@@ -90,10 +105,33 @@ export function useEventFiltering({
 
     // Skip country filtering when using coordinate search (server handles it)
     if (searchCoordinates) {
+      // Still apply road type filtering even with coordinate search
+      if (selectedRoadTypes && selectedRoadTypes.length > 0 && eventIndex) {
+        const rtSet = new Set(selectedRoadTypes);
+        filtered = filtered.filter((event) => {
+          const entry = eventIndex.get(event.id);
+          if (!entry || entry.roadClass === null) return true; // pass unindexed events
+          const group = getRoadTypeGroup(entry.roadClass);
+          return group !== null && rtSet.has(group);
+        });
+      }
       return filtered;
     }
 
-    if (regionIdsInSelectedCountries) {
+    // Country filtering
+    if (useIndexForCountries) {
+      // Index-based country filtering
+      const allSelected = selectedCountries.length === 0 || selectedCountries.length >= effectiveCountries.length;
+      if (!allSelected && selectedCountries.length > 0) {
+        const selectedSet = new Set(selectedCountries);
+        filtered = filtered.filter((event) => {
+          const entry = eventIndex!.get(event.id);
+          if (!entry || !entry.country) return true; // pass unindexed events
+          return selectedSet.has(entry.country);
+        });
+      }
+    } else if (regionIdsInSelectedCountries) {
+      // Fallback: region-based country filtering
       filtered = filtered.filter((event) => {
         const cellKey = getGridCellKey(event.location.lat, event.location.lon);
         const regionId = gridToRegionId.get(cellKey);
@@ -101,6 +139,29 @@ export function useEventFiltering({
       });
     }
 
+    // Road type filtering
+    if (selectedRoadTypes && selectedRoadTypes.length > 0 && eventIndex) {
+      const rtSet = new Set(selectedRoadTypes);
+      filtered = filtered.filter((event) => {
+        const entry = eventIndex.get(event.id);
+        if (!entry || entry.roadClass === null) return true; // pass unindexed events
+        const group = getRoadTypeGroup(entry.roadClass);
+        return group !== null && rtSet.has(group);
+      });
+    }
+
     return filtered;
-  }, [events, selectedTimeOfDay, searchCoordinates, regionIdsInSelectedCountries, gridToRegionId]);
+  }, [
+    events,
+    selectedTimeOfDay,
+    searchCoordinates,
+    regionIdsInSelectedCountries,
+    gridToRegionId,
+    useIndexForCountries,
+    eventIndex,
+    indexCountries,
+    effectiveCountries,
+    selectedCountries,
+    selectedRoadTypes,
+  ]);
 }

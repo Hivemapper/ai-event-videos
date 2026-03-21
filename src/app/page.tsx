@@ -10,9 +10,13 @@ import {
   EventGrid,
   FilterBar,
   NewEventsBanner,
-  AgentView,
 } from "@/components/events";
 import dynamic from "next/dynamic";
+
+const AgentView = dynamic(
+  () => import("@/components/events/agent-dialog").then((m) => m.AgentView),
+  { ssr: false }
+);
 import { Header } from "@/components/layout/header";
 
 const EventsMap = dynamic(
@@ -27,6 +31,7 @@ const EventsMap = dynamic(
 import { Coordinates } from "@/components/events/filter-bar";
 import { AnalysisFiltersBar } from "@/components/events/analysis-filters";
 import { useEvents } from "@/hooks/use-events";
+import { useEventIndex } from "@/hooks/use-event-index";
 import { AIEvent, AIEventType } from "@/types/events";
 import { TimeOfDay } from "@/lib/sun";
 import { getApiKey } from "@/lib/api";
@@ -55,10 +60,10 @@ function parseCoordinates(str: string | null): Coordinates | null {
   return { lat, lon };
 }
 
-function HomeContent() {
+function GalleryView() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const defaultDates = getDefaultDates();
+  const defaultDates = useMemo(() => getDefaultDates(), []);
 
   // Initialize state from URL params or defaults
   const [startDate, setStartDate] = useState(
@@ -76,6 +81,9 @@ function HomeContent() {
   const [selectedTimeOfDay, setSelectedTimeOfDay] = useState<TimeOfDay[]>(
     searchParams.get("timeOfDay")?.split(",").filter(Boolean) as TimeOfDay[] || []
   );
+  const [selectedRoadTypes, setSelectedRoadTypes] = useState<string[]>(
+    searchParams.get("roadTypes")?.split(",").filter(Boolean) || []
+  );
   const [searchCoordinates, setSearchCoordinates] = useState<Coordinates | null>(
     parseCoordinates(searchParams.get("coords"))
   );
@@ -85,7 +93,6 @@ function HomeContent() {
   const [view, setView] = useState<"list" | "map">(
     (searchParams.get("view") as "list" | "map") || "list"
   );
-  const agentOpen = searchParams.has("agent");
 
   // Batch analysis state
   const [analysisFilters, setAnalysisFilters] = useState<AnalysisFilters>({});
@@ -96,6 +103,9 @@ function HomeContent() {
     setCachedAnalyses(getAllCachedAnalyses());
   }, []);
 
+  // Background event index for country + road type discovery
+  const { index: eventIndex, countries: indexCountries, roadTypes: indexRoadTypes, progress: indexProgress } = useEventIndex(startDate, endDate);
+
   // Update URL when filters change
   const updateUrl = useCallback(() => {
     const params = new URLSearchParams();
@@ -104,13 +114,14 @@ function HomeContent() {
     if (selectedTypes.length > 0) params.set("types", selectedTypes.join(","));
     if (selectedTimeOfDay.length > 0) params.set("timeOfDay", selectedTimeOfDay.join(","));
     if (selectedCountries.length > 0) params.set("countries", selectedCountries.join(","));
+    if (selectedRoadTypes.length > 0) params.set("roadTypes", selectedRoadTypes.join(","));
     if (searchCoordinates) params.set("coords", `${searchCoordinates.lat},${searchCoordinates.lon}`);
     if (searchRadius !== 500) params.set("radius", searchRadius.toString());
     if (view !== "list") params.set("view", view);
 
     const queryString = params.toString();
     router.replace(queryString ? `?${queryString}` : "/", { scroll: false });
-  }, [startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, searchCoordinates, searchRadius, view, defaultDates, router]);
+  }, [startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, searchCoordinates, searchRadius, view, defaultDates, router]);
 
   const {
     filteredEvents,
@@ -132,7 +143,13 @@ function HomeContent() {
     selectedCountries,
     searchCoordinates,
     searchRadius,
+    eventIndex,
+    indexCountries,
+    selectedRoadTypes,
   });
+
+  // Use index countries when available, fallback to useEvents countries
+  const effectiveCountries = indexCountries.length > 0 ? indexCountries : countries;
 
   // Initialize selectedCountries to all countries only when countries list first loads
   // Skip if countries were already set from URL params
@@ -140,11 +157,23 @@ function HomeContent() {
     searchParams.get("countries") !== null
   );
   useEffect(() => {
-    if (countries.length > 0 && !countriesInitialized) {
-      setSelectedCountries(countries);
+    if (effectiveCountries.length > 0 && !countriesInitialized) {
+      setSelectedCountries(effectiveCountries);
       setCountriesInitialized(true);
     }
-  }, [countries, countriesInitialized]);
+  }, [effectiveCountries, countriesInitialized]);
+
+  // When index discovers new countries, add them to selection if all were selected
+  const prevIndexCountriesRef = useMemo(() => ({ current: indexCountries.length }), []);
+  useEffect(() => {
+    if (countriesInitialized && indexCountries.length > prevIndexCountriesRef.current) {
+      // If user had all countries selected, keep all selected
+      if (selectedCountries.length >= prevIndexCountriesRef.current && prevIndexCountriesRef.current > 0) {
+        setSelectedCountries(indexCountries);
+      }
+      prevIndexCountriesRef.current = indexCountries.length;
+    }
+  }, [indexCountries, countriesInitialized, selectedCountries.length, prevIndexCountriesRef]);
 
   // Apply analysis filters client-side
   const sceneFilteredEvents = useMemo(() => {
@@ -159,6 +188,13 @@ function HomeContent() {
       return matchesAnalysisFilters(analysis as import("@/types/analysis").VideoAnalysis, analysisFilters);
     });
   }, [filteredEvents, analysisFilters, cachedAnalyses]);
+
+  // Auto-load all events when map view is active
+  useEffect(() => {
+    if (view === "map" && hasMore && !isLoading) {
+      loadMore();
+    }
+  }, [view, hasMore, isLoading, loadMore]);
 
   const analyzedCount = useMemo(
     () => filteredEvents.filter((e) => e.id in cachedAnalyses).length,
@@ -180,25 +216,20 @@ function HomeContent() {
   }, [updateUrl]);
 
   return (
-    <div className="min-h-screen bg-background">
+    <>
       <Header>
-        {!agentOpen && (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={refresh}
-            disabled={isLoading}
-          >
-            <RefreshCw
-              className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
-            />
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={refresh}
+          disabled={isLoading}
+        >
+          <RefreshCw
+            className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`}
+          />
+        </Button>
       </Header>
 
-      {agentOpen ? (
-        <AgentView />
-      ) : (
       <main className="container mx-auto px-4 py-6 space-y-6">
         {/* Filter bar */}
         <FilterBar
@@ -206,11 +237,14 @@ function HomeContent() {
           endDate={endDate}
           selectedTypes={selectedTypes}
           selectedTimeOfDay={selectedTimeOfDay}
-          countries={countries}
+          countries={effectiveCountries}
           selectedCountries={selectedCountries}
           searchCoordinates={searchCoordinates}
           searchRadius={searchRadius}
           view={view}
+          roadTypes={indexRoadTypes}
+          selectedRoadTypes={selectedRoadTypes}
+          indexProgress={indexProgress}
           onStartDateChange={setStartDate}
           onEndDateChange={setEndDate}
           onTypesChange={setSelectedTypes}
@@ -219,6 +253,7 @@ function HomeContent() {
           onCoordinatesChange={setSearchCoordinates}
           onRadiusChange={setSearchRadius}
           onViewChange={setView}
+          onRoadTypesChange={setSelectedRoadTypes}
           onApply={handleApply}
         />
 
@@ -263,13 +298,37 @@ function HomeContent() {
             onEventClick={handleEventClick}
           />
         ) : (
-          <EventsMap
-            events={sceneFilteredEvents}
-            onEventClick={handleEventClick}
-            className="h-[calc(100vh-200px)] rounded-xl"
-          />
+          <>
+            <EventsMap
+              events={sceneFilteredEvents}
+              onEventClick={handleEventClick}
+              className="h-[calc(100vh-200px)] rounded-xl"
+            />
+            {hasMore && (
+              <p className="text-sm text-muted-foreground text-center py-2">
+                Loading all events for map... ({sceneFilteredEvents.length.toLocaleString()} loaded)
+              </p>
+            )}
+          </>
         )}
       </main>
+    </>
+  );
+}
+
+function HomeContent() {
+  const searchParams = useSearchParams();
+  const agentOpen = searchParams.has("agent");
+
+  return (
+    <div className="min-h-screen bg-background">
+      {agentOpen ? (
+        <>
+          <Header />
+          <AgentView />
+        </>
+      ) : (
+        <GalleryView />
       )}
     </div>
   );

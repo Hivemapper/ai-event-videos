@@ -119,4 +119,4 @@ export const ALL_EVENT_TYPES: AIEventType[] = [
 ];
 
 export const API_BASE_URL = "https://beemaps.com/api/developer/aievents";
-export const MAX_DATE_RANGE_DAYS = 31;
+export const MAX_DATE_RANGE_DAYS = 90;

@@ -7,7 +7,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 
-API_KEY = os.environ.get("BEEMAPS_API_KEY")
+API_KEY = "NjhkYjIzZmQ1YjY5YmQ1MDY5NTJlZGU4OmIzYmRkMzc1LTU4MzMtNDMxNC04NjNlLTVhOGUyM2U4YTYwZg=="
 BASE_URL = "https://beemaps.com/api/developer/aievents"
 OUT_DIR = os.path.join(os.getcwd(), "data")
 
@@ -26,9 +26,6 @@ EVENT_IDS = [
 ]
 
 os.makedirs(OUT_DIR, exist_ok=True)
-
-if not API_KEY:
-    raise RuntimeError("Set BEEMAPS_API_KEY in your environment before running.")
 
 for event_id in EVENT_IDS:
     print(f"Fetching event {event_id} ...")

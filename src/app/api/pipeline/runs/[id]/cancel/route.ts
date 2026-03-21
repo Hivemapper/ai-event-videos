@@ -8,7 +8,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const run = await getPipelineRun(id);
+  const run = getPipelineRun(id);
 
   if (!run) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
@@ -21,6 +21,6 @@ export async function POST(
     );
   }
 
-  await updatePipelineRunStatus(id, "cancelled");
-  return NextResponse.json({ run: await getPipelineRun(id) });
+  updatePipelineRunStatus(id, "cancelled");
+  return NextResponse.json({ run: getPipelineRun(id) });
 }

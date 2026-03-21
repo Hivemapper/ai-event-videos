@@ -80,17 +80,3 @@ export async function fetchAllBeeMapsEventsForDay(params: {
 
   return results;
 }
-
-export async function fetchBeeMapsEventCountForDay(params: {
-  apiKey: string;
-  day: string;
-}): Promise<number> {
-  const page = await fetchBeeMapsEventsPage({
-    apiKey: params.apiKey,
-    day: params.day,
-    limit: 1,
-    offset: 0,
-  });
-
-  return page.pagination?.total ?? page.events.length;
-}

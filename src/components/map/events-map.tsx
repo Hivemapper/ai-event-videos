@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { getMapboxToken } from "@/lib/api";
@@ -13,124 +13,191 @@ interface EventsMapProps {
 }
 
 const MAPBOX_STYLE = "mapbox://styles/arielseidman/clyf7l1at00u001r1eyc63yyy";
+const SOURCE_ID = "events";
+const CLUSTER_THRESHOLD = 25;
+
+function eventsToGeoJSON(events: AIEvent[]): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: events.map((e) => ({
+      type: "Feature" as const,
+      geometry: { type: "Point" as const, coordinates: [e.location.lon, e.location.lat] },
+      properties: { id: e.id },
+    })),
+  };
+}
 
 export function EventsMap({ events, onEventClick, className = "" }: EventsMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
-  const markersRef = useRef<mapboxgl.Marker[]>([]);
+  const eventsLookupRef = useRef<Map<string, AIEvent>>(new Map());
+  const hasFittedRef = useRef(false);
   const [token, setToken] = useState<string | null>(null);
   const [tokenChecked, setTokenChecked] = useState(false);
-  const [mapLoaded, setMapLoaded] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
 
-  // Check for token on mount
+  // Keep a lookup map of events by id for click handling
+  useEffect(() => {
+    const lookup = new Map<string, AIEvent>();
+    for (const e of events) lookup.set(e.id, e);
+    eventsLookupRef.current = lookup;
+  }, [events]);
+
   useEffect(() => {
     const mapboxToken = getMapboxToken();
     setToken(mapboxToken);
     setTokenChecked(true);
   }, []);
 
-  // Initialize map
+  // Initialize map with clustering layers
   useEffect(() => {
     if (!mapContainer.current || !token || !tokenChecked) return;
 
     mapboxgl.accessToken = token;
 
-    // Default center (world view) if no events
-    const defaultCenter: [number, number] = [-98.5795, 39.8283]; // Center of USA
-    const defaultZoom = 3;
-
-    map.current = new mapboxgl.Map({
+    const m = new mapboxgl.Map({
       container: mapContainer.current,
       style: MAPBOX_STYLE,
-      center: defaultCenter,
-      zoom: defaultZoom,
+      center: [-98.5795, 39.8283],
+      zoom: 3,
     });
+    map.current = m;
 
-    const mapInstance = map.current;
+    m.on("load", () => {
+      m.addControl(new mapboxgl.NavigationControl(), "top-right");
 
-    mapInstance.on("load", () => {
-      mapInstance.addControl(new mapboxgl.NavigationControl(), "top-right");
-      setMapLoaded(true);
+      // Add clustered GeoJSON source
+      m.addSource(SOURCE_ID, {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+        cluster: true,
+        clusterMaxZoom: 14,
+        clusterRadius: 60,
+        clusterMinPoints: CLUSTER_THRESHOLD,
+      });
+
+      // Cluster circle layer
+      m.addLayer({
+        id: "clusters",
+        type: "circle",
+        source: SOURCE_ID,
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": [
+            "step", ["get", "point_count"],
+            "#8b5cf6",   // < 100: purple
+            100, "#7c3aed", // 100+: darker purple
+            500, "#6d28d9", // 500+: even darker
+          ],
+          "circle-radius": [
+            "step", ["get", "point_count"],
+            20,      // < 100
+            100, 28, // 100+
+            500, 36, // 500+
+          ],
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+
+      // Cluster count label
+      m.addLayer({
+        id: "cluster-count",
+        type: "symbol",
+        source: SOURCE_ID,
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": "{point_count_abbreviated}",
+          "text-font": ["DIN Pro Medium", "Arial Unicode MS Bold"],
+          "text-size": 13,
+        },
+        paint: {
+          "text-color": "#ffffff",
+        },
+      });
+
+      // Unclustered individual points
+      m.addLayer({
+        id: "unclustered-point",
+        type: "circle",
+        source: SOURCE_ID,
+        filter: ["!", ["has", "point_count"]],
+        paint: {
+          "circle-color": "#8b5cf6",
+          "circle-radius": 7,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+
+      // Click on cluster → zoom in
+      m.on("click", "clusters", (e) => {
+        const features = m.queryRenderedFeatures(e.point, { layers: ["clusters"] });
+        if (!features.length) return;
+        const clusterId = features[0].properties?.cluster_id;
+        const source = m.getSource(SOURCE_ID) as mapboxgl.GeoJSONSource;
+        source.getClusterExpansionZoom(clusterId, (err, zoom) => {
+          if (err) return;
+          const coords = (features[0].geometry as GeoJSON.Point).coordinates as [number, number];
+          m.easeTo({ center: coords, zoom: zoom ?? 10 });
+        });
+      });
+
+      // Click on individual point → navigate to event
+      m.on("click", "unclustered-point", (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        const eventId = feature.properties?.id;
+        const event = eventsLookupRef.current.get(eventId);
+        if (event) onEventClick(event);
+      });
+
+      // Cursor styling
+      m.on("mouseenter", "clusters", () => { m.getCanvas().style.cursor = "pointer"; });
+      m.on("mouseleave", "clusters", () => { m.getCanvas().style.cursor = ""; });
+      m.on("mouseenter", "unclustered-point", () => { m.getCanvas().style.cursor = "pointer"; });
+      m.on("mouseleave", "unclustered-point", () => { m.getCanvas().style.cursor = ""; });
+
+      setMapReady(true);
     });
 
     return () => {
-      mapInstance.remove();
-      setMapLoaded(false);
+      m.remove();
+      setMapReady(false);
+      hasFittedRef.current = false;
     };
-  }, [token, tokenChecked]);
+  }, [token, tokenChecked, onEventClick]);
 
-  // Add/update markers when events change
+  // Update source data when events change (no fitBounds except first load)
   useEffect(() => {
-    const mapInstance = map.current;
-    if (!mapInstance || !mapLoaded) return;
+    const m = map.current;
+    if (!m || !mapReady) return;
 
-    // Remove existing markers
-    markersRef.current.forEach((marker) => marker.remove());
-    markersRef.current = [];
+    const source = m.getSource(SOURCE_ID) as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
 
-    if (events.length === 0) {
-      // No events - reset to default view
-      mapInstance.flyTo({
-        center: [-98.5795, 39.8283],
-        zoom: 3,
-      });
-      return;
+    source.setData(eventsToGeoJSON(events));
+
+    // Only fit bounds once on the first batch that has events
+    if (!hasFittedRef.current && events.length > 0) {
+      hasFittedRef.current = true;
+
+      if (events.length === 1) {
+        m.flyTo({
+          center: [events[0].location.lon, events[0].location.lat],
+          zoom: 14,
+        });
+      } else {
+        const bounds = new mapboxgl.LngLatBounds();
+        for (const e of events) bounds.extend([e.location.lon, e.location.lat]);
+        m.fitBounds(bounds, { padding: 50 });
+      }
     }
-
-    // Add markers for each event
-    events.forEach((event) => {
-      const markerEl = document.createElement("div");
-      markerEl.className = "events-map-marker";
-      markerEl.style.cssText = `
-        width: 14px;
-        height: 14px;
-        background: #8b5cf6;
-        border: 2px solid white;
-        border-radius: 50%;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-        cursor: pointer;
-        transition: transform 0.15s ease;
-      `;
-
-      markerEl.addEventListener("mouseenter", () => {
-        markerEl.style.transform = "scale(1.3)";
-      });
-      markerEl.addEventListener("mouseleave", () => {
-        markerEl.style.transform = "scale(1)";
-      });
-      markerEl.addEventListener("click", () => {
-        onEventClick(event);
-      });
-
-      const marker = new mapboxgl.Marker(markerEl)
-        .setLngLat([event.location.lon, event.location.lat])
-        .addTo(mapInstance);
-
-      markersRef.current.push(marker);
-    });
-
-    // Fit bounds to show all events
-    if (events.length === 1) {
-      // Single event - center on it with fixed zoom
-      mapInstance.flyTo({
-        center: [events[0].location.lon, events[0].location.lat],
-        zoom: 14,
-      });
-    } else {
-      // Multiple events - fit to bounds
-      const bounds = new mapboxgl.LngLatBounds();
-      events.forEach((event) => {
-        bounds.extend([event.location.lon, event.location.lat]);
-      });
-      mapInstance.fitBounds(bounds, { padding: 50 });
-    }
-  }, [events, mapLoaded, onEventClick]);
+  }, [events, mapReady]);
 
   if (!tokenChecked) {
     return (
-      <div
-        className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}
-      >
+      <div className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}>
         <p>Loading map...</p>
       </div>
     );
@@ -138,9 +205,7 @@ export function EventsMap({ events, onEventClick, className = "" }: EventsMapPro
 
   if (!token) {
     return (
-      <div
-        className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}
-      >
+      <div className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}>
         <p>Mapbox token not configured. Add it in Settings.</p>
       </div>
     );

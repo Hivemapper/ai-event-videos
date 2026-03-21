@@ -90,6 +90,17 @@ export function SpeedProfileChart({
 
   const { speedPoints, accelPoints, maxSpeed } = profile;
 
+  // Memoize SVG path computations so they only recompute when speedPoints/accelPoints change
+  const speedScreenPoints = useMemo(
+    () =>
+      speedPoints.map((p) => ({
+        t: p.t,
+        speed: p.speed,
+        x: PADDING.left + p.t * (400 - PADDING.left - PADDING.right),
+      })),
+    [speedPoints]
+  );
+
   // Determine Y-axis max in display units
   const maxDisplaySpeed = speedMsToDisplay(maxSpeed, unit);
   const speedLimitMs = speedLimit

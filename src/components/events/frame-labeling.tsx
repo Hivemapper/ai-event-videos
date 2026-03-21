@@ -73,42 +73,30 @@ function getFeatureColor(className: string) {
 interface FrameLabelingProps {
   event: AIEvent;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  currentTime?: number;
+  duration?: number;
 }
 
-export function FrameLabeling({ event, videoRef }: FrameLabelingProps) {
+export function FrameLabeling({ event, videoRef, currentTime: externalTime, duration: externalDuration }: FrameLabelingProps) {
   const [timestamp, setTimestamp] = useState(0);
-  const [videoDuration, setVideoDuration] = useState(10);
+  const [videoDuration, setVideoDuration] = useState(externalDuration || 10);
   const [isExtracting, setIsExtracting] = useState(false);
   const [labeledData, setLabeledData] = useState<LabeledFrameData | null>(null);
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync timestamp with video
+  // Sync timestamp from parent prop (avoids duplicate timeupdate listener)
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const handleTimeUpdate = () => {
-      setTimestamp(video.currentTime);
-    };
-
-    const handleLoadedMetadata = () => {
-      setVideoDuration(video.duration || 10);
-    };
-
-    video.addEventListener("timeupdate", handleTimeUpdate);
-    video.addEventListener("loadedmetadata", handleLoadedMetadata);
-
-    // Set initial duration if already loaded
-    if (video.duration) {
-      setVideoDuration(video.duration);
+    if (externalTime !== undefined) {
+      setTimestamp(externalTime);
     }
+  }, [externalTime]);
 
-    return () => {
-      video.removeEventListener("timeupdate", handleTimeUpdate);
-      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-    };
-  }, [videoRef]);
+  useEffect(() => {
+    if (externalDuration !== undefined && externalDuration > 0) {
+      setVideoDuration(externalDuration);
+    }
+  }, [externalDuration]);
 
   const handleSliderChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {

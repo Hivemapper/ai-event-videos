@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const imageBuffer = extractFrame(url, timestamp, width);
+    const imageBuffer = await extractFrame(url, timestamp, width);
 
     if (!imageBuffer) {
       return NextResponse.json(

@@ -9,9 +9,6 @@ import {
   Download,
   Loader2,
   ChevronRight,
-  Maximize2,
-  Minimize2,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -34,17 +31,26 @@ import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
 import { useActorDetection } from "@/hooks/use-actor-detection";
 import { useActorTracking } from "@/hooks/use-actor-tracking";
-import { useDetectionRuns } from "@/hooks/use-detection-runs";
-import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
 import { useEventDetail, useCountryName, useNearestSpeedLimit } from "@/hooks/use-event-detail";
-import { VideoAnalysisCard } from "@/components/events/video-analysis";
+const VideoAnalysisCard = dynamic(
+  () => import("@/components/events/video-analysis").then((m) => m.VideoAnalysisCard),
+  { loading: () => <Skeleton className="h-32" /> }
+);
 import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
 import { MetadataTable } from "@/components/events/metadata-table";
-import { FrameLabeling } from "@/components/events/frame-labeling";
-import { PositioningSection } from "@/components/events/positioning-section";
-import { VideoVruPanel } from "@/components/events/video-vru-panel";
+const FrameLabeling = dynamic(
+  () => import("@/components/events/frame-labeling").then((m) => m.FrameLabeling),
+  { loading: () => <Skeleton className="h-32" /> }
+);
+const PositioningSection = dynamic(
+  () => import("@/components/events/positioning-section").then((m) => m.PositioningSection),
+  { loading: () => <Skeleton className="h-32" /> }
+);
+const VideoVruPanel = dynamic(
+  () => import("@/components/events/video-vru-panel").then((m) => m.VideoVruPanel),
+  { loading: () => <Skeleton className="h-16" /> }
+);
 import { SpeedOverlay } from "@/components/events/speed-overlay";
-import { DetectionOverlay } from "@/components/events/detection-overlay";
 import { ActorControls } from "@/components/events/actor-controls";
 import { calculateBearing } from "@/lib/geo-projection";
 import {
@@ -139,7 +145,7 @@ export default function EventDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = use(params);
-  const { data: event, error: eventError, isLoading, mutate: mutateEvent } = useEventDetail(id);
+  const { data: event, error: eventError, isLoading } = useEventDetail(id);
   const error = eventError?.message ?? null;
   const { data: countryName = null } = useCountryName(
     event?.location.lat ?? null,
@@ -156,24 +162,12 @@ export default function EventDetailPage({
   const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isRefreshingVideo, setIsRefreshingVideo] = useState(false);
-  const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
-  const [videoReloadKey, setVideoReloadKey] = useState(0);
   const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
-  const hasRetriedVideoRef = useRef(false);
 
   useEffect(() => {
     setSpeedUnitState(getSpeedUnit());
   }, []);
-
-  useEffect(() => {
-    hasRetriedVideoRef.current = false;
-    setVideoLoadError(null);
-    setVideoReloadKey(0);
-  }, [event?.id, event?.videoUrl]);
 
   // Measure video container height to sync map height
   useEffect(() => {
@@ -191,7 +185,11 @@ export default function EventDetailPage({
     const video = videoRef.current;
     if (!video) return;
 
+    let lastUpdate = 0;
     const handleTimeUpdate = () => {
+      const now = performance.now();
+      if (now - lastUpdate < 200) return; // Throttle to ~5Hz
+      lastUpdate = now;
       setVideoCurrentTime(video.currentTime);
     };
 
@@ -199,13 +197,8 @@ export default function EventDetailPage({
       setVideoDuration(video.duration || 0);
     };
 
-    const handlePlay = () => setIsPlaying(true);
-    const handlePause = () => setIsPlaying(false);
-
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
-    video.addEventListener("play", handlePlay);
-    video.addEventListener("pause", handlePause);
 
     // Set initial duration if already loaded
     if (video.duration) {
@@ -215,8 +208,6 @@ export default function EventDetailPage({
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      video.removeEventListener("play", handlePlay);
-      video.removeEventListener("pause", handlePause);
     };
   }, [event]); // Re-run when event loads (video element gets src)
 
@@ -225,26 +216,6 @@ export default function EventDetailPage({
     const intrinsics = getCameraIntrinsics();
     setCameraIntrinsics(intrinsics);
   }, []);
-
-  // Escape key exits fullscreen
-  useEffect(() => {
-    if (!isFullscreen) return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setIsFullscreen(false);
-    };
-    window.addEventListener("keydown", handleEsc);
-    return () => window.removeEventListener("keydown", handleEsc);
-  }, [isFullscreen]);
-
-  // Prevent body scroll when fullscreen
-  useEffect(() => {
-    if (isFullscreen) {
-      document.body.classList.add("overflow-hidden");
-    } else {
-      document.body.classList.remove("overflow-hidden");
-    }
-    return () => document.body.classList.remove("overflow-hidden");
-  }, [isFullscreen]);
 
   // Fetch road type from Mapbox (samples multiple GNSS points for accuracy)
   const { roadType, isLoading: roadTypeLoading } = useRoadType(
@@ -258,52 +229,6 @@ export default function EventDetailPage({
 
   // Actor tracking
   const { trackingResult, isTracking, progress: trackingProgress, error: trackingError, track: trackActors, clear: clearTracking } = useActorTracking();
-
-  // Detection timestamps for frame stepping and overlay
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
-  const [minConfidence, setMinConfidence] = useState(0.1);
-  const { timestamps: detectionTimestamps, models: detectionModels, detectionsByFrame, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedModel);
-
-  // Auto-select first model when models become available
-  useEffect(() => {
-    if (detectionModels.length > 0 && selectedModel === undefined) {
-      setSelectedModel(detectionModels[0]);
-    }
-  }, [detectionModels, selectedModel]);
-
-  // Detection runs
-  const {
-    runs: detectionRuns,
-    activeRun: activeDetectionRun,
-    mutate: mutateRuns,
-  } = useDetectionRuns(id);
-
-  const handleRunDetection = useCallback(
-    async (modelName: string) => {
-      await fetch(`/api/videos/${id}/runs`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelName }),
-      });
-      mutateRuns();
-    },
-    [id, mutateRuns]
-  );
-
-  // Auto-refresh detections when a detection run completes
-  const prevActiveRunRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const prevId = prevActiveRunRef.current;
-    const currentId = activeDetectionRun?.id ?? null;
-
-    if (prevId && !currentId) {
-      // A run just completed — refresh detections
-      mutateDetections();
-    }
-
-    prevActiveRunRef.current = currentId;
-  }, [activeDetectionRun?.id, mutateDetections]);
 
   // Reusable camera state interpolation from GNSS path
   const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
@@ -397,9 +322,6 @@ export default function EventDetailPage({
     setIsDownloading(true);
     try {
       const response = await fetch(getProxyVideoUrl(event.videoUrl));
-      if (!response.ok) {
-        throw new Error("Failed to download video");
-      }
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -414,68 +336,6 @@ export default function EventDetailPage({
       setIsDownloading(false);
     }
   };
-
-  const probeVideoFailure = useCallback(async (videoUrl: string) => {
-    const response = await fetch(`${getProxyVideoUrl(videoUrl)}&probe=1&retry=${Date.now()}`, {
-      cache: "no-store",
-      headers: {
-        Range: "bytes=0-1",
-      },
-    });
-
-    if (response.ok || response.status === 206) {
-      return null;
-    }
-
-    const contentType = response.headers.get("content-type") ?? "";
-
-    if (contentType.includes("application/json")) {
-      const payload = (await response.json()) as { error?: string };
-      return payload.error ?? `Failed to load video (${response.status})`;
-    }
-
-    const text = (await response.text()).trim();
-    return text || `Failed to load video (${response.status})`;
-  }, []);
-
-  const refreshVideoSource = useCallback(async () => {
-    if (!event?.videoUrl) return;
-
-    setIsRefreshingVideo(true);
-    setVideoLoadError(null);
-
-    try {
-      const refreshedEvent = await mutateEvent();
-      const latestVideoUrl = refreshedEvent?.videoUrl ?? event.videoUrl;
-      const probeError = await probeVideoFailure(latestVideoUrl);
-
-      if (probeError) {
-        setVideoLoadError(probeError);
-        return;
-      }
-
-      setVideoReloadKey((current) => current + 1);
-    } catch (refreshError) {
-      setVideoLoadError(
-        refreshError instanceof Error ? refreshError.message : "Failed to refresh video URL"
-      );
-    } finally {
-      setIsRefreshingVideo(false);
-    }
-  }, [event?.videoUrl, mutateEvent, probeVideoFailure]);
-
-  const handleVideoError = useCallback(async () => {
-    if (!event?.videoUrl) return;
-
-    if (!hasRetriedVideoRef.current) {
-      hasRetriedVideoRef.current = true;
-      await refreshVideoSource();
-      return;
-    }
-
-    const probeError = await probeVideoFailure(event.videoUrl);
-    setVideoLoadError(probeError ?? "Failed to load video");
-  }, [event?.videoUrl, probeVideoFailure, refreshVideoSource]);
 
   if (isLoading) {
     return <EventDetailSkeleton />;
@@ -532,55 +392,19 @@ export default function EventDetailPage({
           {/* Left column - Video */}
           <div className="space-y-4">
             {/* Video player */}
-            <div ref={videoContainerRef} className={cn("overflow-hidden rounded-xl", isFullscreen && "fixed inset-0 z-50 bg-black flex items-center justify-center rounded-none")}>
-              <div className={cn("relative aspect-video bg-black", isFullscreen && "w-full h-full aspect-auto")}>
-                {isFullscreen && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="absolute top-4 right-4 z-10 text-white/70 hover:text-white hover:bg-white/20"
-                    onClick={() => setIsFullscreen(false)}
-                  >
-                    <X className="w-5 h-5" />
-                  </Button>
-                )}
+            <div ref={videoContainerRef} className="overflow-hidden rounded-xl">
+              <div className="relative aspect-video bg-black">
                 {event.videoUrl ? (
-                  videoLoadError ? (
-                    <div className="flex h-full w-full items-center justify-center p-6 text-center text-white">
-                      <div className="max-w-md space-y-4">
-                        <div className="space-y-2">
-                          <div className="text-lg font-semibold">Video unavailable</div>
-                          <p className="text-sm text-white/75">{videoLoadError}</p>
-                        </div>
-                        <div className="flex justify-center gap-2">
-                          <Button
-                            variant="secondary"
-                            onClick={() => void refreshVideoSource()}
-                            disabled={isRefreshingVideo}
-                          >
-                            {isRefreshingVideo ? (
-                              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            ) : null}
-                            Retry video
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <video
-                      key={`${event.id}-${videoReloadKey}`}
-                      ref={videoRef}
-                      src={`${getProxyVideoUrl(event.videoUrl)}&reload=${videoReloadKey}`}
-                      controls
-                      autoPlay
-                      className="w-full h-full"
-                      controlsList="nodownload"
-                      onLoadedData={() => setVideoLoadError(null)}
-                      onError={() => void handleVideoError()}
-                    >
-                      Your browser does not support the video tag.
-                    </video>
-                  )
+                  <video
+                    ref={videoRef}
+                    src={getProxyVideoUrl(event.videoUrl)}
+                    controls
+                    autoPlay
+                    className="w-full h-full"
+                    controlsList="nodownload"
+                  >
+                    Your browser does not support the video tag.
+                  </video>
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-muted-foreground">
                     No video available
@@ -595,35 +419,9 @@ export default function EventDetailPage({
                     speedLimit={nearestSpeedLimit}
                   />
                 )}
-                {event.videoUrl && (
-                  <DetectionOverlay
-                    videoRef={videoRef}
-                    isPlaying={isPlaying}
-                    currentTime={videoCurrentTime}
-                    timestamps={detectionTimestamps}
-                    detectionsByFrame={detectionsByFrame}
-                    minConfidence={minConfidence}
-                  />
-                )}
               </div>
               {event.videoUrl && (
-                <div className={cn(
-                  "flex justify-end px-3 py-1.5 bg-black/80",
-                  isFullscreen && "absolute bottom-12 right-4 z-10 rounded-lg bg-black/60 backdrop-blur-sm"
-                )}>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-white/70 hover:text-white hover:bg-white/10"
-                    onClick={() => setIsFullscreen((f) => !f)}
-                  >
-                    {isFullscreen ? (
-                      <Minimize2 className="w-4 h-4 mr-2" />
-                    ) : (
-                      <Maximize2 className="w-4 h-4 mr-2" />
-                    )}
-                    {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                  </Button>
+                <div className="flex justify-end px-3 py-1.5 bg-black/80">
                   <Button
                     variant="ghost"
                     size="sm"
@@ -737,17 +535,6 @@ export default function EventDetailPage({
               videoId={id}
               currentTime={videoCurrentTime}
               duration={videoDuration}
-              isPlaying={isPlaying}
-              detectionTimestamps={detectionTimestamps}
-              detectionsByFrame={detectionsByFrame}
-              availableModels={detectionModels.length > 0 ? detectionModels : undefined}
-              selectedModel={selectedModel}
-              onModelChange={setSelectedModel}
-              minConfidence={minConfidence}
-              onMinConfidenceChange={setMinConfidence}
-              activeDetectionRun={activeDetectionRun}
-              detectionRuns={detectionRuns}
-              onRunDetection={handleRunDetection}
               onSeek={(time) => {
                 if (videoRef.current) {
                   videoRef.current.currentTime = time;
@@ -883,7 +670,7 @@ export default function EventDetailPage({
             {/* Frame Labeling */}
             {event.videoUrl && (
               <CollapsibleSection title="Frame Labeling">
-                <FrameLabeling event={event} videoRef={videoRef} />
+                <FrameLabeling event={event} videoRef={videoRef} currentTime={videoCurrentTime} duration={videoDuration} />
               </CollapsibleSection>
             )}
           </div>

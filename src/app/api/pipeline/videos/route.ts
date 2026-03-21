@@ -6,7 +6,7 @@ import {
   listVideoPipelineStatesForDay,
   summarizeVideoStates,
 } from "@/lib/pipeline-store";
-import type { PipelineVideoRow, VideoPipelineState } from "@/types/pipeline";
+import { PipelineVideoRow, VideoPipelineState } from "@/types/pipeline";
 
 export const runtime = "nodejs";
 
@@ -33,12 +33,12 @@ export async function GET(request: NextRequest) {
   try {
     const [events, states, runs] = await Promise.all([
       fetchAllBeeMapsEventsForDay({ apiKey, day }),
-      listVideoPipelineStatesForDay(day),
-      listPipelineRuns(day),
+      Promise.resolve(listVideoPipelineStatesForDay(day)),
+      Promise.resolve(listPipelineRuns(day)),
     ]);
     const activeRun =
       runs.find((run) => ["queued", "running", "paused"].includes(run.status)) ??
-      (await getActivePipelineRun());
+      getActivePipelineRun();
 
     const stateMap = mapStateByVideo(states);
     const videos: PipelineVideoRow[] = events.map((event) => {

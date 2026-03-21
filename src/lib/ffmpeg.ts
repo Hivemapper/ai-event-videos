@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
-import { execSync } from "child_process";
+import { execFile as execFileCb } from "child_process";
 import { tmpdir } from "os";
 
 const FRAMES_DIR = join(tmpdir(), "video-frames");
@@ -21,16 +21,26 @@ export function formatFfmpegTimestamp(seconds: number): string {
     .padStart(2, "0")}:${secs.toFixed(3).padStart(6, "0")}`;
 }
 
+function runFFmpegFrame(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = execFileCb("ffmpeg", args, { timeout: 30000 }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+    proc.stderr?.resume();
+  });
+}
+
 /**
  * Extract a single JPEG frame from a video URL at a given timestamp.
  * Uses a disk cache keyed on (url, timestamp, width).
  * Returns the JPEG buffer or null on failure.
  */
-export function extractFrame(
+export async function extractFrame(
   videoUrl: string,
   timestamp: number,
   width: number
-): Buffer | null {
+): Promise<Buffer | null> {
   ensureDir(FRAMES_DIR);
 
   const hash = createHash("md5")
@@ -43,10 +53,18 @@ export function extractFrame(
   }
 
   const timeFormatted = formatFfmpegTimestamp(timestamp);
-  const cmd = `ffmpeg -ss ${timeFormatted} -i "${videoUrl}" -vframes 1 -q:v 2 -vf "scale=${width}:-1" -f image2 "${framePath}" -y 2>/dev/null`;
 
   try {
-    execSync(cmd, { timeout: 30000 });
+    await runFFmpegFrame([
+      "-ss", timeFormatted,
+      "-i", videoUrl,
+      "-vframes", "1",
+      "-q:v", "2",
+      "-vf", `scale=${width}:-1`,
+      "-f", "image2",
+      framePath,
+      "-y",
+    ]);
   } catch {
     return null;
   }

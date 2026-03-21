@@ -88,7 +88,11 @@ export async function GET(request: NextRequest) {
       })
       .sort((a, b) => (a.distance as number) - (b.distance as number));
 
-    return NextResponse.json({ features, raw: data });
+    return NextResponse.json({ features, raw: data }, {
+      headers: {
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
   } catch (error) {
     console.error("Map features proxy error:", error);
     return NextResponse.json(

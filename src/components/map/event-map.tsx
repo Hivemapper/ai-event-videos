@@ -153,16 +153,13 @@ export function EventMap({ location, path, currentTime, videoDuration, className
 
         if (response.ok) {
           const data = await response.json();
-          console.log("Map features API response:", data);
           if (data.features) {
             setMapFeatures(data.features);
           }
         } else {
           const errorData = await response.json().catch(() => ({}));
-          console.error("Map features API error:", response.status, errorData);
         }
       } catch (error) {
-        console.error("Failed to fetch map features:", error);
       }
     };
 
@@ -310,13 +307,24 @@ export function EventMap({ location, path, currentTime, videoDuration, className
     };
   }, [location, path, token, tokenChecked]);
 
+  // Resize map when container dimensions change
+  useEffect(() => {
+    const container = mapContainer.current;
+    const mapInstance = map.current;
+    if (!container || !mapInstance) return;
+
+    const observer = new ResizeObserver(() => {
+      mapInstance.resize();
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [mapLoaded]);
+
   // Add map feature markers when features are loaded and map is ready
   useEffect(() => {
     const mapInstance = map.current;
     if (!mapInstance || !mapLoaded || mapFeatures.length === 0) return;
 
-    console.log("Adding map features:", mapFeatures.length, "features");
-    console.log("Feature structure sample:", JSON.stringify(mapFeatures[0], null, 2));
 
     const markers: mapboxgl.Marker[] = [];
 
@@ -336,7 +344,6 @@ export function EventMap({ location, path, currentTime, videoDuration, className
         [lon, lat] = feature.geometry.coordinates;
         featureClass = feature.properties?.type || feature.class;
       } else {
-        console.log("Unknown feature format:", feature);
         return;
       }
 
@@ -375,7 +382,6 @@ export function EventMap({ location, path, currentTime, videoDuration, className
           </svg>
         `;
       } else {
-        console.log("Unknown feature class:", featureClass);
         return; // Skip unknown feature types
       }
 

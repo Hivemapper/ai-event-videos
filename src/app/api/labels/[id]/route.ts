@@ -7,7 +7,7 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
-    const deleted = await deleteCustomLabel(Number(id));
+    const deleted = deleteCustomLabel(Number(id));
     if (!deleted) {
       return NextResponse.json({ error: "Label not found" }, { status: 404 });
     }
