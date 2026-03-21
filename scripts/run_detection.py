@@ -10,6 +10,7 @@ Supported models:
   - gdino-base-clip  (Grounding DINO base + OpenCLIP verification)
   - yolo-world       (YOLO-World v2 open vocabulary)
   - yolo11x          (YOLO11x standard COCO-80)
+  - yolo26x          (YOLO26x standard COCO-80)
 
 Usage:
     cd /Users/tylerlu/Projects/ai-event-videos
