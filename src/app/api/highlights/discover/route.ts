@@ -130,8 +130,8 @@ export async function POST(request: NextRequest) {
     const typeResults = await Promise.all(
       DISCOVER_TYPES.map(async (type) => {
         const body = {
-          startDate: startDate.toISOString().split("T")[0],
-          endDate: endDate.toISOString().split("T")[0],
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
           types: [type],
           limit: 100,
           offset: 0,

@@ -2,7 +2,10 @@ import type { NextConfig } from "next";
 import { resolve } from "path";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["@libsql/client"],
+  serverExternalPackages: ["better-sqlite3"],
+  experimental: {
+    optimizePackageImports: ["lucide-react", "radix-ui"],
+  },
   turbopack: {
     root: resolve(__dirname),
   },

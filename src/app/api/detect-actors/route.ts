@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
 
   try {
     // 1. Extract frame
-    const frameBuffer = extractFrame(videoUrl, timestamp, 1280);
+    const frameBuffer = await extractFrame(videoUrl, timestamp, 1280);
     if (!frameBuffer) {
       return NextResponse.json(
         { error: "Failed to extract frame from video" },

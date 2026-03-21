@@ -14,11 +14,10 @@ export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
   const day = request.nextUrl.searchParams.get("day") ?? undefined;
-  const [runs, activeRun] = await Promise.all([
-    listPipelineRuns(day),
-    getActivePipelineRun(),
-  ]);
-  return NextResponse.json({ runs, activeRun });
+  return NextResponse.json({
+    runs: listPipelineRuns(day),
+    activeRun: getActivePipelineRun(),
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -37,7 +36,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const activeRun = await getActivePipelineRun();
+  const activeRun = getActivePipelineRun();
   if (activeRun) {
     return NextResponse.json(
       { error: `Run ${activeRun.id} is still ${activeRun.status}` },
@@ -45,7 +44,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const run = await createPipelineRun({
+  const run = createPipelineRun({
     day: parsed.data.day,
     batchSize: parsed.data.batchSize,
     beeMapsKey: parsed.data.beeMapsApiKey,
@@ -59,9 +58,9 @@ export async function POST(request: NextRequest) {
       batchSize: run.batchSize,
       modelName: run.modelName,
     });
-    await setPipelineRunWorkerPid(run.id, worker.pid);
+    setPipelineRunWorkerPid(run.id, worker.pid);
   } catch (error) {
-    await updatePipelineRunStatus(run.id, "failed");
+    updatePipelineRunStatus(run.id, "failed");
     return NextResponse.json(
       {
         error:
@@ -73,5 +72,5 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ run: await getPipelineRun(run.id) }, { status: 201 });
+  return NextResponse.json({ run: getPipelineRun(run.id) }, { status: 201 });
 }

@@ -141,7 +141,11 @@ export async function GET(request: NextRequest) {
       classLabel,
       structure: bestResult.structure,
       toll: bestResult.toll,
-    } as RoadTypeResponse);
+    } as RoadTypeResponse, {
+      headers: {
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
   } catch (error) {
     console.error("Road type API error:", error);
     return NextResponse.json(

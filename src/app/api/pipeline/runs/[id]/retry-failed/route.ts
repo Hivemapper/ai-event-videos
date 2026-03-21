@@ -14,7 +14,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const activeRun = await getActivePipelineRun();
+  const activeRun = getActivePipelineRun();
 
   if (activeRun) {
     return NextResponse.json(
@@ -24,8 +24,8 @@ export async function POST(
   }
 
   try {
-    const run = await createRetryRunFrom(id);
-    const beeMapsKey = await getPipelineRunBeeMapsKey(run.id);
+    const run = createRetryRunFrom(id);
+    const beeMapsKey = getPipelineRunBeeMapsKey(run.id);
     if (!beeMapsKey) {
       throw new Error("Retry run is missing Bee Maps credentials");
     }
@@ -36,7 +36,7 @@ export async function POST(
       batchSize: run.batchSize,
       modelName: run.modelName,
     });
-    await setPipelineRunWorkerPid(run.id, worker.pid);
+    setPipelineRunWorkerPid(run.id, worker.pid);
     return NextResponse.json({ run }, { status: 201 });
   } catch (error) {
     return NextResponse.json(

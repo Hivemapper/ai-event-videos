@@ -1,7 +1,8 @@
 "use client";
 
-import { KeyboardEvent, useEffect, useMemo, useState, useTransition } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState, useTransition } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,127 +10,131 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { getApiKey } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { PipelineDaySummary, PipelineRunRecord } from "@/types/pipeline";
+import { PipelineRunRecord, PipelineVideoRow } from "@/types/pipeline";
 
-const DEFAULT_BATCH_SIZE = "50";
-const dayFormatter = new Intl.DateTimeFormat(undefined, {
-  weekday: "short",
+const videoTimestampFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
-  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
 });
-const detailTimeFormatter = new Intl.DateTimeFormat(undefined, {
+
+const pipelineTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
   hour: "numeric",
   minute: "2-digit",
 });
 
-interface PipelineDaysResponse {
-  days: PipelineDaySummary[];
-  activeRun: PipelineRunRecord | null;
+function localDateInputValue() {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
 }
 
-function formatDayLabel(day: string) {
-  return dayFormatter.format(new Date(`${day}T12:00:00`));
-}
-
-function formatDetailTime(value: string | null) {
+function formatRelativeDate(value: string | null) {
   if (!value) return "—";
-  return detailTimeFormatter.format(new Date(value));
+  return new Date(value).toLocaleString();
 }
 
-function formatPercent(value: number | null) {
-  if (value === null) return "Count unavailable";
-  return `${value.toFixed(value % 1 === 0 ? 0 : 1)}% processed`;
-}
-
-function runBadgeClass(status: string | null | undefined) {
+function runStatusTone(status: string | null | undefined) {
   switch (status) {
     case "running":
-      return "border-sky-500/20 bg-sky-500/10 text-sky-700";
+      return "default";
     case "paused":
-      return "border-amber-500/20 bg-amber-500/10 text-amber-700";
+      return "secondary";
     case "failed":
     case "cancelled":
-      return "border-destructive/20 bg-destructive/10 text-destructive";
-    case "completed":
+      return "destructive";
+    default:
+      return "outline";
+  }
+}
+
+function videoStatusTone(status: string) {
+  switch (status) {
+    case "processed":
+      return "default";
+    case "running":
+    case "queued":
+      return "secondary";
+    case "failed":
+      return "destructive";
+    default:
+      return "outline";
+  }
+}
+
+function formatVideoTimestamp(value: string) {
+  return videoTimestampFormatter.format(new Date(value));
+}
+
+function formatPipelineTimestamp(value: string | null) {
+  if (!value) return "—";
+  return pipelineTimeFormatter.format(new Date(value));
+}
+
+function formatEventType(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function videoStatusClass(status: string) {
+  switch (status) {
+    case "processed":
       return "border-emerald-500/20 bg-emerald-500/10 text-emerald-700";
+    case "running":
+      return "border-sky-500/20 bg-sky-500/10 text-sky-700";
+    case "queued":
+      return "border-amber-500/20 bg-amber-500/10 text-amber-700";
+    case "failed":
+      return "border-destructive/20 bg-destructive/10 text-destructive";
     default:
       return "border-border bg-background text-foreground";
   }
 }
 
-function dayStatus(summary: PipelineDaySummary) {
-  if (summary.latestRun?.status) return summary.latestRun.status;
-  if ((summary.totalVideos ?? 0) > 0 && summary.processedCount >= (summary.totalVideos ?? 0)) {
-    return "completed";
+function rowClassName(video: PipelineVideoRow) {
+  switch (video.status) {
+    case "running":
+      return "border-sky-500/20 bg-sky-500/[0.04]";
+    case "processed":
+      return "border-emerald-500/15 bg-emerald-500/[0.03]";
+    case "failed":
+      return "border-destructive/20 bg-destructive/[0.03]";
+    default:
+      return "border-border/70 bg-card/90";
   }
-  if (
-    summary.processedCount > 0 ||
-    summary.failedCount > 0 ||
-    summary.runningCount > 0 ||
-    summary.queuedCount > 0 ||
-    summary.staleCount > 0
-  ) {
-    return "partial";
-  }
-  return "idle";
 }
 
-function currentWorkLabel(summary: PipelineDaySummary) {
-  if (summary.latestRun?.status === "running" && summary.currentVideoId) {
-    return `Processing ${summary.currentVideoId}`;
-  }
-  if (summary.latestRun?.status === "paused" && summary.currentVideoId) {
-    return `Paused on ${summary.currentVideoId}`;
-  }
-  if (summary.latestRun?.status === "queued") {
-    return "Queued";
-  }
-  if (summary.lastCompletedAt) {
-    return `Last completed ${formatDetailTime(summary.lastCompletedAt)}`;
-  }
-  return "No active work";
-}
-
-function progressSegments(summary: PipelineDaySummary) {
-  const total = summary.totalVideos ?? 0;
-  if (total <= 0) {
-    return [{ className: "bg-muted-foreground/10", width: 100 }];
-  }
-
-  const processed = (summary.processedCount / total) * 100;
-  const inProgress = ((summary.runningCount + summary.queuedCount) / total) * 100;
-  const failed = (summary.failedCount / total) * 100;
-  const stale = (summary.staleCount / total) * 100;
-  const accounted = processed + inProgress + failed + stale;
-
-  return [
-    { className: "bg-emerald-500", width: processed },
-    { className: "bg-sky-500", width: inProgress },
-    { className: "bg-destructive", width: failed },
-    { className: "bg-amber-500", width: stale },
-    { className: "bg-muted-foreground/15", width: Math.max(100 - accounted, 0) },
-  ].filter((segment) => segment.width > 0);
+interface PipelineResponse {
+  day: string;
+  videos: PipelineVideoRow[];
+  summary: {
+    total: number;
+    processed: number;
+    failed: number;
+    stale: number;
+    running: number;
+    queued: number;
+    remaining: number;
+  };
+  latestRun: PipelineRunRecord | null;
+  activeRun: PipelineRunRecord | null;
 }
 
 export default function PipelinePage() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [data, setData] = useState<PipelineDaysResponse | null>(null);
+  const [day, setDay] = useState(localDateInputValue());
+  const [batchSize, setBatchSize] = useState("50");
+  const [data, setData] = useState<PipelineResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [batchSizes, setBatchSizes] = useState<Record<string, string>>({});
   const [isPending, startTransition] = useTransition();
 
-  useEffect(() => {
-    const legacyDay = searchParams.get("day");
-    if (legacyDay) {
-      router.replace(`/pipeline/${legacyDay}`);
-    }
-  }, [router, searchParams]);
-
-  const load = async () => {
+  const load = async (selectedDay = day) => {
     const apiKey = getApiKey();
     if (!apiKey) {
       setError("Configure your Bee Maps API key in Settings to use the pipeline.");
@@ -138,12 +143,12 @@ export default function PipelinePage() {
 
     try {
       setError(null);
-      const response = await fetch("/api/pipeline/days?window=30", {
+      const response = await fetch(`/api/pipeline/videos?day=${selectedDay}`, {
         headers: { Authorization: apiKey },
       });
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload.error || "Failed to load pipeline day summaries");
+        throw new Error(payload.error || "Failed to load pipeline videos");
       }
       setData(payload);
     } catch (err) {
@@ -152,12 +157,16 @@ export default function PipelinePage() {
   };
 
   useEffect(() => {
-    void load();
-    const interval = window.setInterval(() => void load(), 5000);
+    load(day);
+    const interval = window.setInterval(() => load(day), 5000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [day]);
 
-  const runAction = (url: string, init?: RequestInit) => {
+  const runAction = (
+    url: string,
+    init?: RequestInit,
+    onSuccess?: (payload: { run?: PipelineRunRecord }) => void
+  ) => {
     startTransition(() => {
       void (async () => {
         try {
@@ -167,7 +176,8 @@ export default function PipelinePage() {
           if (!response.ok) {
             throw new Error(payload.error || "Pipeline action failed");
           }
-          await load();
+          onSuccess?.(payload);
+          await load(day);
         } catch (err) {
           setError(err instanceof Error ? err.message : "Pipeline action failed");
         }
@@ -176,46 +186,118 @@ export default function PipelinePage() {
   };
 
   const activeRun = data?.activeRun ?? null;
-  const stats = useMemo(() => {
-    const summaries = data?.days ?? [];
-    return {
-      daysTracked: summaries.length,
-      totalVideos: summaries.reduce((sum, day) => sum + (day.totalVideos ?? 0), 0),
-      processedVideos: summaries.reduce((sum, day) => sum + day.processedCount, 0),
-    };
-  }, [data]);
-
-  const navigateToDay = (day: string) => {
-    router.push(`/pipeline/${day}`);
-  };
-
-  const openDayInNewTab = (day: string) => {
-    window.open(`/pipeline/${day}`, "_blank", "noopener,noreferrer");
-  };
-
-  const handleRowKeyDown = (event: KeyboardEvent<HTMLElement>, day: string) => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      navigateToDay(day);
-    }
-  };
+  const latestRun = activeRun?.day === day ? activeRun : data?.latestRun ?? null;
+  const canStart = !activeRun;
+  const summaryCards = useMemo(
+    () => [
+      { label: "Total", value: data?.summary.total ?? 0 },
+      { label: "Processed", value: data?.summary.processed ?? 0 },
+      { label: "Remaining", value: data?.summary.remaining ?? 0 },
+      { label: "Failed", value: data?.summary.failed ?? 0 },
+    ],
+    [data]
+  );
 
   return (
     <div className="min-h-screen bg-background">
       <Header />
-      <main className="container mx-auto space-y-6 px-4 py-6">
+      <main className="container mx-auto px-4 py-6 space-y-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div className="space-y-1">
             <h1 className="text-2xl font-semibold">Pipeline</h1>
             <p className="text-sm text-muted-foreground">
-              Track the last 30 days of Bee Maps videos, see what is in flight, and jump into a
-              single day only when you need detail.
+              Auto-drain one day of Bee Maps videos through the local VRU worker.
             </p>
           </div>
-          <div className="flex flex-wrap gap-3 text-sm text-muted-foreground">
-            <span>{stats.daysTracked} active days</span>
-            <span>{stats.totalVideos.toLocaleString()} videos</span>
-            <span>{stats.processedVideos.toLocaleString()} processed</span>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Day</label>
+              <Input
+                type="date"
+                value={day}
+                onChange={(event) => setDay(event.target.value)}
+                className="w-[180px]"
+              />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Batch Size</label>
+              <Input
+                type="number"
+                min={1}
+                max={500}
+                value={batchSize}
+                onChange={(event) => setBatchSize(event.target.value)}
+                className="w-[120px]"
+              />
+            </div>
+            <Button
+              disabled={!canStart || isPending}
+              onClick={() =>
+                runAction("/api/pipeline/runs", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    day,
+                    batchSize: Number(batchSize),
+                    beeMapsApiKey: getApiKey(),
+                  }),
+                })
+              }
+            >
+              Start Run
+            </Button>
+            {activeRun?.status === "running" && (
+              <Button
+                variant="outline"
+                disabled={isPending}
+                onClick={() =>
+                  runAction(`/api/pipeline/runs/${activeRun.id}/pause`, {
+                    method: "POST",
+                  })
+                }
+              >
+                Pause {activeRun.day !== day ? activeRun.day : ""}
+              </Button>
+            )}
+            {activeRun?.status === "paused" && (
+              <Button
+                variant="outline"
+                disabled={isPending}
+                onClick={() =>
+                  runAction(`/api/pipeline/runs/${activeRun.id}/resume`, {
+                    method: "POST",
+                  })
+                }
+              >
+                Resume {activeRun.day !== day ? activeRun.day : ""}
+              </Button>
+            )}
+            {activeRun && (
+              <Button
+                variant="outline"
+                disabled={isPending}
+                onClick={() =>
+                  runAction(`/api/pipeline/runs/${activeRun.id}/cancel`, {
+                    method: "POST",
+                  })
+                }
+              >
+                Cancel {activeRun.day !== day ? activeRun.day : ""}
+              </Button>
+            )}
+            {latestRun && !activeRun && (
+              <Button
+                variant="outline"
+                disabled={isPending}
+                onClick={() =>
+                  runAction(`/api/pipeline/runs/${latestRun.id}/retry-failed`, {
+                    method: "POST",
+                  })
+                }
+              >
+                Retry Failed
+              </Button>
+            )}
           </div>
         </div>
 
@@ -225,220 +307,203 @@ export default function PipelinePage() {
           </div>
         )}
 
-        {activeRun && (
-          <div className="rounded-xl border border-sky-500/30 bg-sky-500/8 px-4 py-3 text-sm text-sky-800">
-            Active run: {activeRun.day} is currently {activeRun.status}.
+        {activeRun && activeRun.day !== day && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800">
+            Another run is active for {activeRun.day}. Finish or cancel it before starting {day}.
           </div>
         )}
 
+        <div className="grid gap-4 md:grid-cols-4">
+          {summaryCards.map((card) => (
+            <Card key={card.label}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                  {card.label}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-semibold">{card.value.toLocaleString()}</div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+
         <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-lg">Daily Queue</CardTitle>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between gap-3 text-lg">
+              <span>Latest Run</span>
+              <Badge variant={runStatusTone(latestRun?.status)}>
+                {latestRun?.status ?? "idle"}
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-4 md:grid-cols-4">
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Started
+              </div>
+              <div className="mt-1 text-sm">{formatRelativeDate(latestRun?.startedAt ?? null)}</div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Completed
+              </div>
+              <div className="mt-1 text-sm">{formatRelativeDate(latestRun?.completedAt ?? null)}</div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Throughput
+              </div>
+              <div className="mt-1 text-sm">
+                {latestRun?.totals.throughputPerHour ?? 0} videos/hour
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Current Video
+              </div>
+              <div className="mt-1 text-sm font-mono">
+                {latestRun?.totals.currentVideoId ?? "—"}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Videos for {day}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
-            {(data?.days ?? []).length === 0 ? (
+            <div className="hidden items-center gap-4 rounded-xl border border-border/60 bg-muted/30 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground lg:grid lg:grid-cols-[136px_minmax(0,1.6fr)_minmax(0,0.9fr)_minmax(0,1.1fr)]">
+              <div>Preview</div>
+              <div>Event</div>
+              <div>Pipeline</div>
+              <div>Labels & Errors</div>
+            </div>
+
+            {(data?.videos ?? []).length === 0 ? (
               <div className="rounded-2xl border border-dashed border-border/70 bg-muted/20 px-6 py-10 text-center text-sm text-muted-foreground">
-                No days with Bee Maps videos or pipeline activity were found in the last 30 days.
+                No videos found for this day.
               </div>
             ) : (
-              data?.days.map((summary) => {
-                const status = dayStatus(summary);
-                const batchSize = batchSizes[summary.day] ?? DEFAULT_BATCH_SIZE;
-                const isActiveDay = activeRun?.day === summary.day;
-                const canStart = !activeRun;
-                const canRetry = !activeRun && summary.latestRun && summary.failedCount > 0;
-
-                return (
-                  <article
-                    key={summary.day}
-                    role="link"
-                    tabIndex={0}
-                    onClick={() => navigateToDay(summary.day)}
-                    onKeyDown={(event) => handleRowKeyDown(event, summary.day)}
-                    className="cursor-pointer rounded-2xl border border-border/70 bg-card/90 p-4 shadow-sm transition-colors hover:border-border hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              <div className="space-y-3">
+                {(data?.videos ?? []).map((video) => (
+                  <Link
+                    key={video.videoId}
+                    href={`/event/${video.videoId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={cn(
+                      "block rounded-2xl border p-3 shadow-sm transition-colors hover:border-border hover:bg-card lg:p-4",
+                      rowClassName(video)
+                    )}
+                    style={{
+                      contentVisibility: "auto",
+                      containIntrinsicSize: "144px",
+                    }}
                   >
-                    <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)_340px] xl:items-center">
-                      <div className="space-y-3">
+                    <div className="grid gap-4 lg:grid-cols-[136px_minmax(0,1.6fr)_minmax(0,0.9fr)_minmax(0,1.1fr)] lg:items-center">
+                      <div className="group/preview relative block overflow-hidden rounded-xl border border-border/70 bg-muted">
+                        <Image
+                          src={`/api/thumbnail?url=${encodeURIComponent(video.videoUrl)}`}
+                          alt=""
+                          width={136}
+                          height={80}
+                          unoptimized
+                          className="h-24 w-full object-cover transition-transform duration-200 group-hover/preview:scale-[1.03] lg:h-20"
+                        />
+                        <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/65 via-black/15 to-transparent px-3 py-2 text-xs font-medium text-white">
+                          Open video
+                        </div>
+                      </div>
+
+                      <div className="min-w-0 space-y-3">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h2 className="text-lg font-semibold tracking-tight">
-                            {formatDayLabel(summary.day)}
-                          </h2>
-                          <Badge
-                            variant="outline"
-                            className={cn("rounded-full px-2.5 py-1 text-xs", runBadgeClass(status))}
-                          >
-                            {status}
+                          <Badge variant="outline" className="rounded-full px-2.5 py-1 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                            {video.type.toLowerCase().replaceAll("_", " ")}
                           </Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {formatVideoTimestamp(video.timestamp)}
+                          </span>
                         </div>
-                        <div className="space-y-1 text-sm text-muted-foreground">
-                          <div>
-                            {summary.totalVideos === null
-                              ? "Video count unavailable"
-                              : `${summary.totalVideos.toLocaleString()} videos`}
+                        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                          <div className="min-w-0">
+                            <div className="block truncate text-lg font-semibold tracking-tight text-foreground transition-colors hover:text-primary">
+                              {formatEventType(video.type)}
+                            </div>
+                            <div className="mt-1 text-xs font-mono text-muted-foreground/80">
+                              {video.videoId}
+                            </div>
                           </div>
-                          <div>{formatPercent(summary.processedPercent)}</div>
-                          {summary.countError && (
-                            <div className="text-amber-700">Bee Maps count temporarily unavailable</div>
-                          )}
                         </div>
                       </div>
 
                       <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="text-sm font-medium text-foreground">
-                            {formatPercent(summary.processedPercent)}
+                        <div>
+                          <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                            Pipeline
                           </div>
-                          <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                            {summary.processedCount.toLocaleString()} done
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <Badge
+                              variant={videoStatusTone(video.status)}
+                              className={cn("rounded-full px-3 py-1 text-sm", videoStatusClass(video.status))}
+                            >
+                              {video.status}
+                            </Badge>
                           </div>
                         </div>
-                        <div className="flex h-2 overflow-hidden rounded-full bg-muted">
-                          {progressSegments(summary).map((segment, index) => (
-                            <div
-                              key={`${summary.day}-${index}`}
-                              className={segment.className}
-                              style={{ width: `${segment.width}%` }}
-                            />
-                          ))}
-                        </div>
-                        <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">
-                          <span>{summary.processedCount.toLocaleString()} processed</span>
-                          <span>{(summary.runningCount + summary.queuedCount).toLocaleString()} in flight</span>
-                          <span>{summary.failedCount.toLocaleString()} failed</span>
-                          <span>{summary.staleCount.toLocaleString()} stale</span>
-                          {summary.remainingCount !== null && (
-                            <span>{summary.remainingCount.toLocaleString()} remaining</span>
-                          )}
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                          <div>
+                            <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                              Processed
+                            </div>
+                            <div className="mt-1 text-sm text-foreground">
+                              {formatPipelineTimestamp(video.completedAt)}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                              Error
+                            </div>
+                            <div className="mt-1 text-sm text-destructive/90">
+                              {video.lastError ? (
+                                <span className="line-clamp-2">{video.lastError}</span>
+                              ) : (
+                                <span className="text-muted-foreground">None</span>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
 
-                      <div
-                        className="space-y-3"
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      >
-                        <div className="rounded-xl border border-border/70 bg-background/60 p-3">
+                      <div className="space-y-3">
+                        <div>
                           <div className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                            Current Work
+                            VRU Labels
                           </div>
-                          <div className="mt-1 text-sm font-medium text-foreground">
-                            {currentWorkLabel(summary)}
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {video.labelsApplied.length > 0 ? (
+                              video.labelsApplied.map((label) => (
+                                <Badge
+                                  key={label}
+                                  variant="outline"
+                                  className="rounded-full border-border/80 bg-background/80 px-2.5 py-1 text-xs font-medium"
+                                >
+                                  {label}
+                                </Badge>
+                              ))
+                            ) : (
+                              <span className="text-sm text-muted-foreground">
+                                No VRU labels yet
+                              </span>
+                            )}
                           </div>
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {summary.lastCompletedAt
-                              ? `Last completion ${formatDetailTime(summary.lastCompletedAt)}`
-                              : "Open day for per-video detail"}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-end gap-2">
-                          <div className="space-y-1">
-                            <label className="text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                              Batch
-                            </label>
-                            <Input
-                              type="number"
-                              min={1}
-                              max={500}
-                              value={batchSize}
-                              onChange={(event) =>
-                                setBatchSizes((current) => ({
-                                  ...current,
-                                  [summary.day]: event.target.value,
-                                }))
-                              }
-                              className="w-24"
-                            />
-                          </div>
-
-                          {isActiveDay && activeRun?.status === "running" && (
-                            <Button
-                              variant="outline"
-                              disabled={isPending}
-                              onClick={() =>
-                                runAction(`/api/pipeline/runs/${activeRun.id}/pause`, {
-                                  method: "POST",
-                                })
-                              }
-                            >
-                              Pause
-                            </Button>
-                          )}
-
-                          {isActiveDay && activeRun?.status === "paused" && (
-                            <Button
-                              variant="outline"
-                              disabled={isPending}
-                              onClick={() =>
-                                runAction(`/api/pipeline/runs/${activeRun.id}/resume`, {
-                                  method: "POST",
-                                })
-                              }
-                            >
-                              Resume
-                            </Button>
-                          )}
-
-                          {isActiveDay && activeRun && (
-                            <Button
-                              variant="outline"
-                              disabled={isPending}
-                              onClick={() =>
-                                runAction(`/api/pipeline/runs/${activeRun.id}/cancel`, {
-                                  method: "POST",
-                                })
-                              }
-                            >
-                              Cancel
-                            </Button>
-                          )}
-
-                          {!isActiveDay && canStart && (
-                            <Button
-                              disabled={isPending}
-                              onClick={() =>
-                                runAction("/api/pipeline/runs", {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({
-                                    day: summary.day,
-                                    batchSize: Number(batchSize),
-                                    beeMapsApiKey: getApiKey(),
-                                  }),
-                                })
-                              }
-                            >
-                              Start
-                            </Button>
-                          )}
-
-                          {!isActiveDay && canRetry && summary.latestRun && (
-                            <Button
-                              variant="outline"
-                              disabled={isPending}
-                              onClick={() =>
-                                runAction(`/api/pipeline/runs/${summary.latestRun!.id}/retry-failed`, {
-                                  method: "POST",
-                                })
-                              }
-                            >
-                              Retry Failed
-                            </Button>
-                          )}
-
-                          <Button
-                            variant="ghost"
-                            disabled={isPending}
-                            onClick={() => openDayInNewTab(summary.day)}
-                          >
-                            Open Day
-                          </Button>
                         </div>
                       </div>
                     </div>
-                  </article>
-                );
-              })
+                  </Link>
+                ))}
+              </div>
             )}
           </CardContent>
         </Card>

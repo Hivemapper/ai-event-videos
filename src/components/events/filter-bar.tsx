@@ -15,6 +15,8 @@ import {
   Sunset,
   LayoutGrid,
   Map,
+  Route,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +40,7 @@ import { AIEventType } from "@/types/events";
 import { ALL_EVENT_TYPES, EVENT_TYPE_CONFIG } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { TimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
+import { EventIndexProgress } from "@/hooks/use-event-index";
 
 const TIME_OF_DAY_OPTIONS: { value: TimeOfDay; label: string; icon: typeof Sun }[] = [
   { value: "Day", label: "Day", icon: Sun },
@@ -70,6 +73,9 @@ interface FilterBarProps {
   searchCoordinates: Coordinates | null;
   searchRadius: number;
   view: "list" | "map";
+  roadTypes?: string[];
+  selectedRoadTypes?: string[];
+  indexProgress?: EventIndexProgress;
   onStartDateChange: (date: string) => void;
   onEndDateChange: (date: string) => void;
   onTypesChange: (types: AIEventType[]) => void;
@@ -78,6 +84,7 @@ interface FilterBarProps {
   onCoordinatesChange: (coords: Coordinates | null) => void;
   onRadiusChange: (radius: number) => void;
   onViewChange: (view: "list" | "map") => void;
+  onRoadTypesChange?: (types: string[]) => void;
   onApply?: () => void;
 }
 
@@ -91,6 +98,9 @@ export function FilterBar({
   searchCoordinates,
   searchRadius,
   view,
+  roadTypes = [],
+  selectedRoadTypes = [],
+  indexProgress,
   onStartDateChange,
   onEndDateChange,
   onTypesChange,
@@ -99,6 +109,7 @@ export function FilterBar({
   onCoordinatesChange,
   onRadiusChange,
   onViewChange,
+  onRoadTypesChange,
   onApply,
 }: FilterBarProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -110,6 +121,7 @@ export function FilterBar({
   const [draftTypes, setDraftTypes] = useState<AIEventType[]>(selectedTypes);
   const [draftTimeOfDay, setDraftTimeOfDay] = useState<TimeOfDay[]>(selectedTimeOfDay);
   const [draftCountries, setDraftCountries] = useState<string[]>(selectedCountries);
+  const [draftRoadTypes, setDraftRoadTypes] = useState<string[]>(selectedRoadTypes);
   const [draftCoordinates, setDraftCoordinates] = useState<Coordinates | null>(searchCoordinates);
   const [draftRadius, setDraftRadius] = useState(searchRadius);
   const [draftCoordsInput, setDraftCoordsInput] = useState("");
@@ -122,13 +134,14 @@ export function FilterBar({
       setDraftTypes([...selectedTypes]);
       setDraftTimeOfDay([...selectedTimeOfDay]);
       setDraftCountries([...selectedCountries]);
+      setDraftRoadTypes([...selectedRoadTypes]);
       setDraftCoordinates(searchCoordinates);
       setDraftRadius(searchRadius);
       setDraftCoordsInput(
         searchCoordinates ? `${searchCoordinates.lat},${searchCoordinates.lon}` : ""
       );
     }
-  }, [advancedOpen, startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, searchCoordinates, searchRadius]);
+  }, [advancedOpen, startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, searchCoordinates, searchRadius]);
 
   const handleTypeToggle = (type: AIEventType) => {
     if (draftTypes.includes(type)) {
@@ -178,6 +191,18 @@ export function FilterBar({
     setDraftCountries([]);
   };
 
+  const handleRoadTypeToggle = (type: string) => {
+    if (draftRoadTypes.includes(type)) {
+      setDraftRoadTypes(draftRoadTypes.filter((t) => t !== type));
+    } else {
+      setDraftRoadTypes([...draftRoadTypes, type]);
+    }
+  };
+
+  const handleClearAllRoadTypes = () => {
+    setDraftRoadTypes([]);
+  };
+
   const handleCoordsInputChange = (value: string) => {
     setDraftCoordsInput(value);
 
@@ -209,6 +234,7 @@ export function FilterBar({
     onTypesChange(draftTypes);
     onTimeOfDayChange(draftTimeOfDay);
     onCountriesChange(draftCountries);
+    onRoadTypesChange?.(draftRoadTypes);
     onCoordinatesChange(draftCoordinates);
     onRadiusChange(draftRadius);
     onApply?.();
@@ -219,6 +245,7 @@ export function FilterBar({
     onTypesChange([]);
     onTimeOfDayChange([]);
     onCountriesChange([...countries]);
+    onRoadTypesChange?.([]);
     onCoordinatesChange(null);
   };
 
@@ -227,6 +254,15 @@ export function FilterBar({
 
   const draftAllCountriesSelected =
     countries.length > 0 && draftCountries.length === countries.length;
+
+  const isIndexing = indexProgress && indexProgress.phase !== "idle" && indexProgress.phase !== "complete";
+
+  const activeFilterCount =
+    (searchCoordinates ? 1 : 0) +
+    (selectedTypes.length > 0 ? 1 : 0) +
+    (selectedTimeOfDay.length > 0 ? 1 : 0) +
+    (!allCountriesSelected && selectedCountries.length > 0 ? 1 : 0) +
+    (selectedRoadTypes.length > 0 ? 1 : 0);
 
   return (
     <div className="space-y-4">
@@ -240,36 +276,38 @@ export function FilterBar({
               size="sm"
               className={cn(
                 "gap-2",
-                (searchCoordinates ||
-                  selectedTypes.length > 0 ||
-                  selectedTimeOfDay.length > 0 ||
-                  (!allCountriesSelected && selectedCountries.length > 0)) &&
-                  "border-primary text-primary"
+                activeFilterCount > 0 && "border-primary text-primary"
               )}
             >
               <SlidersHorizontal className="w-4 h-4" />
               Filters
-              {(searchCoordinates ||
-                selectedTypes.length > 0 ||
-                selectedTimeOfDay.length > 0 ||
-                (!allCountriesSelected && selectedCountries.length > 0)) && (
+              {activeFilterCount > 0 && (
                 <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-xs">
-                  {(searchCoordinates ? 1 : 0) +
-                    (selectedTypes.length > 0 ? 1 : 0) +
-                    (selectedTimeOfDay.length > 0 ? 1 : 0) +
-                    (!allCountriesSelected && selectedCountries.length > 0
-                      ? 1
-                      : 0)}
+                  {activeFilterCount}
                 </Badge>
               )}
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-4xl">
+          <DialogContent className="sm:max-w-5xl">
             <DialogHeader>
-              <DialogTitle>Filters</DialogTitle>
+              <DialogTitle className="flex items-center gap-2">
+                Filters
+                {isIndexing && (
+                  <span className="flex items-center gap-1.5 text-xs font-normal text-muted-foreground">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {indexProgress.phase === "loading-countries" && "Loading country data..."}
+                    {indexProgress.phase === "discovering" && (
+                      <>Indexing events ({indexProgress.eventsDiscovered.toLocaleString()}/{indexProgress.totalEvents.toLocaleString()})</>
+                    )}
+                    {indexProgress.phase === "road-types" && (
+                      <>Road types ({indexProgress.roadTypesResolved}/{indexProgress.roadTypesTotal})</>
+                    )}
+                  </span>
+                )}
+              </DialogTitle>
             </DialogHeader>
 
-            <div className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr] gap-8 py-4">
+            <div className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] gap-6 py-4">
               {/* Column 1: Date Range + Coordinate Search */}
               <div className="space-y-6">
                 {/* Date range */}
@@ -278,12 +316,13 @@ export function FilterBar({
                     <Calendar className="w-4 h-4" />
                     Date Range
                   </label>
-                  <div className="flex gap-1.5">
+                  <div className="flex flex-wrap gap-1.5">
                     {[
                       { label: "24h", days: 1 },
                       { label: "7d", days: 7 },
                       { label: "30d", days: 30 },
                       { label: "60d", days: 60 },
+                      { label: "90d", days: 90 },
                     ].map(({ label, days }) => {
                       const presetStart = new Date();
                       presetStart.setDate(presetStart.getDate() - days);
@@ -460,12 +499,12 @@ export function FilterBar({
                 </div>
               </div>
 
-              {/* Column 4: Region Filter */}
+              {/* Column 4: Country Filter */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide">
                     <Globe className="w-4 h-4" />
-                    Region
+                    Country
                   </label>
                   <Button
                     variant="ghost"
@@ -521,7 +560,58 @@ export function FilterBar({
                   </div>
                 ) : (
                   <p className="text-xs text-muted-foreground py-2">
-                    No regions available
+                    {isIndexing ? "Discovering..." : "No countries available"}
+                  </p>
+                )}
+              </div>
+
+              {/* Column 5: Road Type Filter */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide">
+                    <Route className="w-4 h-4" />
+                    Road Type
+                  </label>
+                  {draftRoadTypes.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearAllRoadTypes}
+                      className="text-xs h-6 px-2"
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+
+                {roadTypes.length > 0 ? (
+                  <div className="space-y-1">
+                    {roadTypes.map((type) => {
+                      const isSelected = draftRoadTypes.includes(type);
+                      return (
+                        <button
+                          key={type}
+                          type="button"
+                          onClick={() => handleRoadTypeToggle(type)}
+                          className={cn(
+                            "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left",
+                            "hover:bg-accent",
+                            isSelected && "bg-accent/50"
+                          )}
+                        >
+                          <span className="text-xs flex-1">{type}</span>
+                          {isSelected && <Check className="w-3 h-3 shrink-0 text-primary" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground py-2">
+                    {indexProgress?.phase === "road-types"
+                      ? "Resolving road types..."
+                      : indexProgress?.phase === "discovering" || indexProgress?.phase === "loading-countries"
+                        ? "Pending..."
+                        : "No road types available"}
                   </p>
                 )}
               </div>
@@ -539,10 +629,7 @@ export function FilterBar({
         </Dialog>
 
         {/* Clear all button */}
-        {(selectedTypes.length > 0 ||
-          selectedTimeOfDay.length > 0 ||
-          (countries.length > 0 && !allCountriesSelected) ||
-          searchCoordinates) && (
+        {activeFilterCount > 0 && (
           <Button
             variant="ghost"
             size="sm"
@@ -575,7 +662,7 @@ export function FilterBar({
       </div>
 
       {/* Selected filter chips */}
-      {(selectedTypes.length > 0 || selectedTimeOfDay.length > 0) && (
+      {(selectedTypes.length > 0 || selectedTimeOfDay.length > 0 || selectedRoadTypes.length > 0) && (
         <div className="flex flex-wrap gap-2">
           {selectedTypes.map((type) => {
             const config = EVENT_TYPE_CONFIG[type];
@@ -633,6 +720,23 @@ export function FilterBar({
               </Badge>
             );
           })}
+          {selectedRoadTypes.map((type) => (
+            <Badge
+              key={type}
+              variant="secondary"
+              className="pl-2 pr-1 py-1 flex items-center gap-1 border"
+            >
+              <Route className="w-3 h-3" />
+              <span>{type}</span>
+              <button
+                type="button"
+                onClick={() => onRoadTypesChange?.(selectedRoadTypes.filter((t) => t !== type))}
+                className="ml-1 p-0.5 rounded-full hover:bg-black/10"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </Badge>
+          ))}
         </div>
       )}
     </div>

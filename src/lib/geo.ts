@@ -1,5 +1,4 @@
 import { AIEvent, Region } from "@/types/events";
-import { getMapboxToken } from "@/lib/api";
 
 const GRID_SIZE = 0.1; // ~10km grid cells
 const GEOCODE_CACHE_KEY = "geocode-cache";
@@ -53,25 +52,32 @@ export async function reverseGeocode(
   }
 
   try {
-    const token = getMapboxToken();
     const response = await fetch(
-      `/api/reverse-geocode?lat=${latitude}&lon=${longitude}`,
-      token
-        ? {
-            headers: {
-              "X-Mapbox-Token": token,
-            },
-          }
-        : undefined
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10`,
+      {
+        headers: {
+          "User-Agent": "AI-Event-Videos-App",
+        },
+      }
     );
 
     if (!response.ok) {
       throw new Error("Geocoding failed");
     }
 
-    const data = (await response.json()) as GeocodeResult;
-    const name = data.name || `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`;
-    const country = data.country;
+    const data = await response.json();
+    const address = data.address;
+
+    // Try to get a meaningful location name
+    const name =
+      address?.city ||
+      address?.town ||
+      address?.village ||
+      address?.county ||
+      address?.state ||
+      `${latitude.toFixed(2)}, ${longitude.toFixed(2)}`;
+
+    const country = address?.country;
 
     // Update cache
     cache[cacheKey] = { name, country, timestamp: Date.now() };

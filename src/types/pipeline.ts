@@ -6,11 +6,7 @@ export type VruLabelKey =
   | "wheelchair"
   | "kids"
   | "bicycle"
-  | "work-zone-person"
-  | "vehicle"
-  | "traffic_light"
-  | "stop_sign"
-  | "skateboard";
+  | "work-zone-person";
 
 export type VruSupportLevel =
   | "supported"
@@ -113,56 +109,4 @@ export interface PipelineVideoRow {
   modelName: string | null;
   completedAt: string | null;
   lastError: string | null;
-}
-
-export interface FrameDetection {
-  id?: number;
-  videoId: string;
-  frameMs: number;
-  label: string;
-  xMin: number;
-  yMin: number;
-  xMax: number;
-  yMax: number;
-  confidence: number;
-  frameWidth: number;
-  frameHeight: number;
-  pipelineVersion: string;
-  modelName: string;
-  runId: string | null;
-  createdAt?: string;
-}
-
-export type DetectionRunStatus = "queued" | "running" | "completed" | "failed";
-
-export interface DetectionRun {
-  id: string;
-  videoId: string;
-  modelName: string;
-  status: DetectionRunStatus;
-  config: Record<string, unknown>;
-  detectionCount: number | null;
-  workerPid: number | null;
-  startedAt: string | null;
-  completedAt: string | null;
-  lastHeartbeatAt: string | null;
-  lastError: string | null;
-  createdAt: string;
-}
-
-export interface PipelineDaySummary {
-  day: string;
-  totalVideos: number | null;
-  processedCount: number;
-  failedCount: number;
-  queuedCount: number;
-  runningCount: number;
-  staleCount: number;
-  unprocessedCount: number;
-  remainingCount: number | null;
-  processedPercent: number | null;
-  latestRun: PipelineRunRecord | null;
-  currentVideoId: string | null;
-  lastCompletedAt: string | null;
-  countError: string | null;
 }

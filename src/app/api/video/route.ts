@@ -19,14 +19,22 @@ export async function GET(request: NextRequest) {
     const response = await fetch(url, { headers: fetchHeaders });
 
     if (!response.ok && response.status !== 206) {
-      const errorText = (await response.text()).trim();
       return NextResponse.json(
-        { error: errorText || `Failed to fetch video: ${response.status}` },
+        { error: `Failed to fetch video: ${response.status}` },
         { status: response.status }
       );
     }
 
     const contentType = response.headers.get("content-type") || "video/mp4";
+
+    // Detect CDN challenge pages returning HTML instead of video
+    if (contentType.includes("text/html")) {
+      return NextResponse.json(
+        { error: "Video temporarily unavailable (CDN challenge)" },
+        { status: 503 }
+      );
+    }
+
     const contentLength = response.headers.get("content-length");
     const contentRange = response.headers.get("content-range");
 

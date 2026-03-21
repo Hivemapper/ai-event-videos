@@ -48,11 +48,6 @@ export const visionScanSchema = z.object({
   mapboxToken: z.string().optional(),
 });
 
-export const cocoExportSchema = z.object({
-  day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "day must be YYYY-MM-DD"),
-  model: z.string().optional(),
-});
-
 export const detectActorsSchema = z.object({
   eventId: z.string().min(1, "eventId is required"),
   videoUrl: z.string().min(1, "videoUrl is required"),

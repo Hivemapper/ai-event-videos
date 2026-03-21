@@ -34,7 +34,7 @@ export function useEventPolling({
     if (!enabled) return;
 
     const checkForNewEvents = async () => {
-      if (isPollingRef.current) return;
+      if (isPollingRef.current || document.hidden) return;
       isPollingRef.current = true;
 
       try {
@@ -50,7 +50,19 @@ export function useEventPolling({
     };
 
     const intervalId = setInterval(checkForNewEvents, POLL_INTERVAL);
-    return () => clearInterval(intervalId);
+
+    // Pause polling when tab is hidden
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      // Tab became visible — check now
+      checkForNewEvents();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, [enabled, fetchCount]);
 
   const showNewEvents = useCallback(() => {

@@ -15,7 +15,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const run = await getPipelineRun(id);
+  const run = getPipelineRun(id);
 
   if (!run) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });
@@ -28,10 +28,10 @@ export async function POST(
     );
   }
 
-  await updatePipelineRunStatus(id, "running");
+  updatePipelineRunStatus(id, "running");
 
   if (isRunHeartbeatStale(run)) {
-    const beeMapsKey = await getPipelineRunBeeMapsKey(id);
+    const beeMapsKey = getPipelineRunBeeMapsKey(id);
     if (!beeMapsKey) {
       return NextResponse.json(
         { error: "Run is missing Bee Maps credentials" },
@@ -46,8 +46,8 @@ export async function POST(
       batchSize: run.batchSize,
       modelName: run.modelName,
     });
-    await setPipelineRunWorkerPid(id, worker.pid);
+    setPipelineRunWorkerPid(id, worker.pid);
   }
 
-  return NextResponse.json({ run: await getPipelineRun(id) });
+  return NextResponse.json({ run: getPipelineRun(id) });
 }

@@ -8,6 +8,16 @@ import { TimeOfDay } from "@/lib/sun";
 import { createCirclePolygon } from "@/lib/geo-utils";
 import { useEventPolling } from "@/hooks/use-event-polling";
 import { useEventFiltering } from "@/hooks/use-event-filtering";
+import { EventIndexEntry } from "@/lib/event-index";
+
+function deduplicateEvents(events: AIEvent[]): AIEvent[] {
+  const seen = new Set<string>();
+  return events.filter((e) => {
+    if (seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+}
 
 interface Coordinates {
   lat: number;
@@ -23,6 +33,9 @@ interface UseEventsOptions {
   searchCoordinates?: Coordinates | null;
   searchRadius?: number;
   limit?: number;
+  eventIndex?: Map<string, EventIndexEntry>;
+  indexCountries?: string[];
+  selectedRoadTypes?: string[];
 }
 
 interface UseEventsResult {
@@ -42,7 +55,7 @@ interface UseEventsResult {
 }
 
 export function useEvents(options: UseEventsOptions): UseEventsResult {
-  const { startDate, endDate, types, selectedTimeOfDay = [], selectedCountries = [], searchCoordinates, searchRadius = 500, limit = 50 } = options;
+  const { startDate, endDate, types, selectedTimeOfDay = [], selectedCountries = [], searchCoordinates, searchRadius = 500, limit = 50, eventIndex, indexCountries, selectedRoadTypes } = options;
 
   const [events, setEvents] = useState<AIEvent[]>([]);
   const [regions, setRegions] = useState<Region[]>([]);
@@ -100,7 +113,7 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
 
         const newEvents = reset
           ? response.events
-          : [...eventsRef.current, ...response.events];
+          : deduplicateEvents([...eventsRef.current, ...response.events]);
 
         // Show events immediately — no geocoding blocking here
         setEvents(newEvents);
@@ -202,6 +215,9 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
     selectedTimeOfDay,
     selectedCountries,
     searchCoordinates,
+    eventIndex,
+    indexCountries,
+    selectedRoadTypes,
   });
 
   return {
