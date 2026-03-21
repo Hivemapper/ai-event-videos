@@ -8,6 +8,8 @@ import {
   Check,
   Download,
   Loader2,
+  Maximize2,
+  X,
   ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -53,6 +55,7 @@ const VideoVruPanel = dynamic(
   () => import("@/components/events/video-vru-panel").then((m) => m.VideoVruPanel),
   { loading: () => <Skeleton className="h-16" /> }
 );
+import { DetectionOverlay } from "@/components/events/detection-overlay";
 import { SpeedOverlay } from "@/components/events/speed-overlay";
 import { ActorControls } from "@/components/events/actor-controls";
 import { calculateBearing } from "@/lib/geo-projection";
@@ -165,6 +168,8 @@ export default function EventDetailPage({
   const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
 
@@ -183,6 +188,20 @@ export default function EventDetailPage({
     return () => observer.disconnect();
   }, []);
 
+  // Fullscreen: escape key + body scroll lock
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFullscreen(false);
+    };
+    document.addEventListener("keydown", handler);
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handler);
+      document.body.style.overflow = "";
+    };
+  }, [isFullscreen]);
+
   // Track video playback time
   useEffect(() => {
     const video = videoRef.current;
@@ -200,8 +219,13 @@ export default function EventDetailPage({
       setVideoDuration(video.duration || 0);
     };
 
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
+
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("play", handlePlay);
+    video.addEventListener("pause", handlePause);
 
     // Set initial duration if already loaded
     if (video.duration) {
@@ -211,6 +235,8 @@ export default function EventDetailPage({
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("play", handlePlay);
+      video.removeEventListener("pause", handlePause);
     };
   }, [event]); // Re-run when event loads (video element gets src)
 
@@ -457,19 +483,39 @@ export default function EventDetailPage({
           {/* Left column - Video */}
           <div className="space-y-4">
             {/* Video player */}
-            <div ref={videoContainerRef} className="overflow-hidden rounded-xl">
-              <div className="relative aspect-video bg-black">
-                {event.videoUrl ? (
-                  <video
-                    ref={videoRef}
-                    src={getProxyVideoUrl(event.videoUrl)}
-                    controls
-                    autoPlay
-                    className="w-full h-full"
-                    controlsList="nodownload"
+            <div ref={videoContainerRef} className={cn("overflow-hidden rounded-xl", isFullscreen && "fixed inset-0 z-50 bg-black flex items-center justify-center rounded-none")}>
+              <div className={cn("relative aspect-video bg-black", isFullscreen && "w-full h-full aspect-auto")}>
+                {isFullscreen && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-4 right-4 z-10 text-white/70 hover:text-white hover:bg-white/20"
+                    onClick={() => setIsFullscreen(false)}
                   >
-                    Your browser does not support the video tag.
-                  </video>
+                    <X className="w-5 h-5" />
+                  </Button>
+                )}
+                {event.videoUrl ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      src={getProxyVideoUrl(event.videoUrl)}
+                      controls
+                      autoPlay
+                      className="w-full h-full"
+                      controlsList="nodownload"
+                    >
+                      Your browser does not support the video tag.
+                    </video>
+                    <DetectionOverlay
+                      videoRef={videoRef}
+                      isPlaying={isPlaying}
+                      currentTime={videoCurrentTime}
+                      timestamps={detectionTimestamps ?? []}
+                      detectionsByFrame={detectionsByFrame ?? new Map()}
+                      minConfidence={minConfidence}
+                    />
+                  </>
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-muted-foreground">
                     No video available
@@ -486,7 +532,19 @@ export default function EventDetailPage({
                 )}
               </div>
               {event.videoUrl && (
-                <div className="flex justify-end px-3 py-1.5 bg-black/80">
+                <div className={cn(
+                  "flex justify-end gap-1 px-3 py-1.5 bg-black/80",
+                  isFullscreen && "absolute bottom-12 right-4 z-10 rounded-lg bg-black/60 backdrop-blur-sm"
+                )}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={() => setIsFullscreen((f) => !f)}
+                  >
+                    <Maximize2 className="w-4 h-4 mr-2" />
+                    Fullscreen
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -600,6 +658,7 @@ export default function EventDetailPage({
               videoId={id}
               currentTime={videoCurrentTime}
               duration={videoDuration}
+              isPlaying={isPlaying}
               detectionTimestamps={detectionTimestamps}
               detectionsByFrame={detectionsByFrame}
               minConfidence={minConfidence}
