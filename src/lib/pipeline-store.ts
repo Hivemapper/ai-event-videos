@@ -5,7 +5,7 @@ import {
   CURRENT_PIPELINE_VERSION,
   DEFAULT_PIPELINE_MODEL_NAME,
 } from "@/lib/pipeline-config";
-import {
+import type {
   DetectionRun,
   DetectionRunStatus,
   FrameDetection,
@@ -194,38 +194,44 @@ function mapDetectionRun(row: DbDetectionRunRow): DetectionRun {
   };
 }
 
-export function listLabels(): LabelDefinition[] {
-  const db = getDb();
-  return db
-    .prepare(
-      `SELECT id, name, created_at, is_system, support_level, enabled, detector_aliases
-       FROM labels
-       ORDER BY is_system DESC, id ASC`
-    )
-    .all() as LabelDefinition[];
+// ---------------------------------------------------------------------------
+// Labels
+// ---------------------------------------------------------------------------
+
+export async function listLabels(): Promise<LabelDefinition[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT id, name, created_at, is_system, support_level, enabled, detector_aliases
+     FROM labels
+     ORDER BY is_system DESC, id ASC`
+  );
+  return result.rows as unknown as LabelDefinition[];
 }
 
-export function createCustomLabel(name: string): LabelDefinition {
-  const db = getDb();
-  const result = db
-    .prepare(
-      `INSERT INTO labels (name, is_system, support_level, enabled)
-       VALUES (?, 0, 'custom', 1)`
-    )
-    .run(name);
-  return db
-    .prepare(
-      `SELECT id, name, created_at, is_system, support_level, enabled, detector_aliases
-       FROM labels WHERE id = ?`
-    )
-    .get(result.lastInsertRowid) as LabelDefinition;
+export async function createCustomLabel(
+  name: string
+): Promise<LabelDefinition> {
+  const db = await getDb();
+  const insertResult = await db.run(
+    `INSERT INTO labels (name, is_system, support_level, enabled)
+     VALUES (?, 0, 'custom', 1)`,
+    [name]
+  );
+  const result = await db.query(
+    `SELECT id, name, created_at, is_system, support_level, enabled, detector_aliases
+     FROM labels WHERE id = ?`,
+    [insertResult.lastInsertRowid]
+  );
+  return result.rows[0] as unknown as LabelDefinition;
 }
 
-export function deleteCustomLabel(id: number): boolean {
-  const db = getDb();
-  const label = db
-    .prepare("SELECT is_system FROM labels WHERE id = ?")
-    .get(id) as { is_system: number } | undefined;
+export async function deleteCustomLabel(id: number): Promise<boolean> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT is_system FROM labels WHERE id = ?",
+    [id]
+  );
+  const label = result.rows[0] as { is_system: number } | undefined;
 
   if (!label) {
     return false;
@@ -235,59 +241,65 @@ export function deleteCustomLabel(id: number): boolean {
     throw new Error("System labels cannot be removed");
   }
 
-  db.prepare("DELETE FROM labels WHERE id = ?").run(id);
+  await db.run("DELETE FROM labels WHERE id = ?", [id]);
   return true;
 }
 
-export function getActivePipelineRun(): PipelineRunRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT * FROM pipeline_runs
-       WHERE status IN ('queued', 'running', 'paused')
-       ORDER BY created_at DESC
-       LIMIT 1`
-    )
-    .get() as DbPipelineRunRow | undefined;
+// ---------------------------------------------------------------------------
+// Pipeline Runs
+// ---------------------------------------------------------------------------
+
+export async function getActivePipelineRun(): Promise<PipelineRunRecord | null> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT * FROM pipeline_runs
+     WHERE status IN ('queued', 'running', 'paused')
+     ORDER BY created_at DESC
+     LIMIT 1`
+  );
+  const row = result.rows[0] as unknown as DbPipelineRunRow | undefined;
   return row ? mapRun(row) : null;
 }
 
-export function listPipelineRuns(day?: string): PipelineRunRecord[] {
-  const db = getDb();
-  const rows = (day
-    ? db
-        .prepare(
-          `SELECT * FROM pipeline_runs
-           WHERE day = ?
-           ORDER BY created_at DESC
-           LIMIT 20`
-        )
-        .all(day)
-    : db
-        .prepare(
-          `SELECT * FROM pipeline_runs
-           ORDER BY created_at DESC
-           LIMIT 20`
-        )
-        .all()) as DbPipelineRunRow[];
-  return rows.map(mapRun);
+export async function listPipelineRuns(
+  day?: string
+): Promise<PipelineRunRecord[]> {
+  const db = await getDb();
+  const result = day
+    ? await db.query(
+        `SELECT * FROM pipeline_runs
+         WHERE day = ?
+         ORDER BY created_at DESC
+         LIMIT 20`,
+        [day]
+      )
+    : await db.query(
+        `SELECT * FROM pipeline_runs
+         ORDER BY created_at DESC
+         LIMIT 20`
+      );
+  return (result.rows as unknown as DbPipelineRunRow[]).map(mapRun);
 }
 
-export function getPipelineRun(id: string): PipelineRunRecord | null {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM pipeline_runs WHERE id = ?")
-    .get(id) as DbPipelineRunRow | undefined;
+export async function getPipelineRun(
+  id: string
+): Promise<PipelineRunRecord | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM pipeline_runs WHERE id = ?",
+    [id]
+  );
+  const row = result.rows[0] as unknown as DbPipelineRunRow | undefined;
   return row ? mapRun(row) : null;
 }
 
-export function createPipelineRun(params: {
+export async function createPipelineRun(params: {
   day: string;
   batchSize: number;
   beeMapsKey: string;
   modelName?: string | null;
-}): PipelineRunRecord {
-  const db = getDb();
+}): Promise<PipelineRunRecord> {
+  const db = await getDb();
   const run = {
     id: randomUUID(),
     day: params.day,
@@ -298,58 +310,72 @@ export function createPipelineRun(params: {
     modelName: params.modelName ?? DEFAULT_PIPELINE_MODEL_NAME,
   };
 
-  db.prepare(
+  await db.run(
     `INSERT INTO pipeline_runs (
       id, day, batch_size, status, cursor_offset, totals_json,
       pipeline_version, model_name, bee_maps_key
-    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`
-  ).run(
-    run.id,
-    run.day,
-    run.batchSize,
-    run.status,
-    JSON.stringify(run.totals),
-    run.pipelineVersion,
-    run.modelName,
-    params.beeMapsKey
+    ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+    [
+      run.id,
+      run.day,
+      run.batchSize,
+      run.status,
+      JSON.stringify(run.totals),
+      run.pipelineVersion,
+      run.modelName,
+      params.beeMapsKey,
+    ]
   );
 
-  return getPipelineRun(run.id)!;
+  return (await getPipelineRun(run.id))!;
 }
 
-export function updatePipelineRunStatus(id: string, status: PipelineRunStatus) {
-  const db = getDb();
-  db.prepare(
+export async function updatePipelineRunStatus(
+  id: string,
+  status: PipelineRunStatus
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
     `UPDATE pipeline_runs
      SET status = ?, completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN datetime('now') ELSE completed_at END
-     WHERE id = ?`
-  ).run(status, status, id);
+     WHERE id = ?`,
+    [status, status, id]
+  );
 }
 
-export function setPipelineRunWorkerPid(id: string, pid: number | null) {
-  const db = getDb();
-  db.prepare(
+export async function setPipelineRunWorkerPid(
+  id: string,
+  pid: number | null
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
     `UPDATE pipeline_runs
      SET worker_pid = ?, last_heartbeat_at = datetime('now')
-     WHERE id = ?`
-  ).run(pid, id);
+     WHERE id = ?`,
+    [pid, id]
+  );
 }
 
-export function isRunHeartbeatStale(run: PipelineRunRecord, staleSeconds = 120): boolean {
+export function isRunHeartbeatStale(
+  run: PipelineRunRecord,
+  staleSeconds = 120
+): boolean {
   if (!run.lastHeartbeatAt) return true;
   const ageMs = Date.now() - new Date(run.lastHeartbeatAt).getTime();
   return ageMs > staleSeconds * 1000;
 }
 
-export function createRetryRunFrom(sourceRunId: string): PipelineRunRecord {
-  const db = getDb();
-  const source = db
-    .prepare(
-      `SELECT day, batch_size, bee_maps_key, model_name
-       FROM pipeline_runs
-       WHERE id = ?`
-    )
-    .get(sourceRunId) as
+export async function createRetryRunFrom(
+  sourceRunId: string
+): Promise<PipelineRunRecord> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT day, batch_size, bee_maps_key, model_name
+     FROM pipeline_runs
+     WHERE id = ?`,
+    [sourceRunId]
+  );
+  const source = result.rows[0] as
     | {
         day: string;
         batch_size: number;
@@ -370,58 +396,76 @@ export function createRetryRunFrom(sourceRunId: string): PipelineRunRecord {
   });
 }
 
-export function getPipelineRunBeeMapsKey(runId: string): string | null {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT bee_maps_key FROM pipeline_runs WHERE id = ?")
-    .get(runId) as { bee_maps_key: string | null } | undefined;
+export async function getPipelineRunBeeMapsKey(
+  runId: string
+): Promise<string | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT bee_maps_key FROM pipeline_runs WHERE id = ?",
+    [runId]
+  );
+  const row = result.rows[0] as { bee_maps_key: string | null } | undefined;
   return row?.bee_maps_key ?? null;
 }
 
-export function listVideoPipelineStatesForDay(day: string): VideoPipelineState[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT * FROM video_pipeline_state
-       WHERE day = ?
-       ORDER BY COALESCE(completed_at, started_at, queued_at) DESC`
-    )
-    .all(day) as DbVideoStateRow[];
-  return rows.map(mapVideoState);
+// ---------------------------------------------------------------------------
+// Video Pipeline States
+// ---------------------------------------------------------------------------
+
+export async function listVideoPipelineStatesForDay(
+  day: string
+): Promise<VideoPipelineState[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT * FROM video_pipeline_state
+     WHERE day = ?
+     ORDER BY COALESCE(completed_at, started_at, queued_at) DESC`,
+    [day]
+  );
+  return (result.rows as unknown as DbVideoStateRow[]).map(mapVideoState);
 }
 
-export function getVideoPipelineState(videoId: string): VideoPipelineState | null {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM video_pipeline_state WHERE video_id = ?")
-    .get(videoId) as DbVideoStateRow | undefined;
+export async function getVideoPipelineState(
+  videoId: string
+): Promise<VideoPipelineState | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM video_pipeline_state WHERE video_id = ?",
+    [videoId]
+  );
+  const row = result.rows[0] as unknown as DbVideoStateRow | undefined;
   return row ? mapVideoState(row) : null;
 }
 
-export function getVideoDetectionSegments(videoId: string): VideoDetectionSegment[] {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT pipeline_version
-       FROM video_pipeline_state
-       WHERE video_id = ?`
-    )
-    .get(videoId) as { pipeline_version: string } | undefined;
+export async function getVideoDetectionSegments(
+  videoId: string
+): Promise<VideoDetectionSegment[]> {
+  const db = await getDb();
+  const stateResult = await db.query(
+    `SELECT pipeline_version
+     FROM video_pipeline_state
+     WHERE video_id = ?`,
+    [videoId]
+  );
+  const stateRow = stateResult.rows[0] as
+    | { pipeline_version: string }
+    | undefined;
 
-  const query = row
-    ? db.prepare(
+  const segmentResult = stateRow
+    ? await db.query(
         `SELECT * FROM video_detection_segments
          WHERE video_id = ? AND pipeline_version = ?
-         ORDER BY start_ms ASC`
+         ORDER BY start_ms ASC`,
+        [videoId, stateRow.pipeline_version]
       )
-    : db.prepare(
+    : await db.query(
         `SELECT * FROM video_detection_segments
          WHERE video_id = ?
-         ORDER BY start_ms ASC`
+         ORDER BY start_ms ASC`,
+        [videoId]
       );
 
-  const rows = (row ? query.all(videoId, row.pipeline_version) : query.all(videoId)) as DbSegmentRow[];
-  return rows.map(mapSegment);
+  return (segmentResult.rows as unknown as DbSegmentRow[]).map(mapSegment);
 }
 
 export function summarizeVideoStates(states: VideoPipelineState[]) {
@@ -441,200 +485,212 @@ export function summarizeVideoStates(states: VideoPipelineState[]) {
   );
 }
 
-export function getFrameDetections(
+// ---------------------------------------------------------------------------
+// Frame Detections
+// ---------------------------------------------------------------------------
+
+export async function getFrameDetections(
   videoId: string,
   frameMs?: number,
   modelName?: string,
   runId?: string
-): FrameDetection[] {
-  const db = getDb();
+): Promise<FrameDetection[]> {
+  const db = await getDb();
 
   // When runId is provided, filter by run_id instead of model_name
   if (runId !== undefined) {
     if (frameMs !== undefined) {
-      return (db
-        .prepare(
-          `SELECT * FROM frame_detections
-           WHERE video_id = ? AND frame_ms = ? AND run_id = ?
-           ORDER BY confidence DESC`
-        )
-        .all(videoId, frameMs, runId) as DbFrameDetectionRow[]).map(mapFrameDetection);
-    }
-    return (db
-      .prepare(
+      const result = await db.query(
         `SELECT * FROM frame_detections
-         WHERE video_id = ? AND run_id = ?
-         ORDER BY frame_ms ASC, confidence DESC`
-      )
-      .all(videoId, runId) as DbFrameDetectionRow[]).map(mapFrameDetection);
+         WHERE video_id = ? AND frame_ms = ? AND run_id = ?
+         ORDER BY confidence DESC`,
+        [videoId, frameMs, runId]
+      );
+      return (result.rows as unknown as DbFrameDetectionRow[]).map(
+        mapFrameDetection
+      );
+    }
+    const result = await db.query(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ? AND run_id = ?
+       ORDER BY frame_ms ASC, confidence DESC`,
+      [videoId, runId]
+    );
+    return (result.rows as unknown as DbFrameDetectionRow[]).map(
+      mapFrameDetection
+    );
   }
 
-  let rows: DbFrameDetectionRow[];
+  let result;
   if (frameMs !== undefined && modelName !== undefined) {
-    rows = db
-      .prepare(
-        `SELECT * FROM frame_detections
-         WHERE video_id = ? AND frame_ms = ? AND model_name = ?
-         ORDER BY confidence DESC`
-      )
-      .all(videoId, frameMs, modelName) as DbFrameDetectionRow[];
+    result = await db.query(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ? AND frame_ms = ? AND model_name = ?
+       ORDER BY confidence DESC`,
+      [videoId, frameMs, modelName]
+    );
   } else if (frameMs !== undefined) {
-    rows = db
-      .prepare(
-        `SELECT * FROM frame_detections
-         WHERE video_id = ? AND frame_ms = ?
-         ORDER BY confidence DESC`
-      )
-      .all(videoId, frameMs) as DbFrameDetectionRow[];
+    result = await db.query(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ? AND frame_ms = ?
+       ORDER BY confidence DESC`,
+      [videoId, frameMs]
+    );
   } else if (modelName !== undefined) {
-    rows = db
-      .prepare(
-        `SELECT * FROM frame_detections
-         WHERE video_id = ? AND model_name = ?
-         ORDER BY frame_ms ASC, confidence DESC`
-      )
-      .all(videoId, modelName) as DbFrameDetectionRow[];
+    result = await db.query(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ? AND model_name = ?
+       ORDER BY frame_ms ASC, confidence DESC`,
+      [videoId, modelName]
+    );
   } else {
-    rows = db
-      .prepare(
-        `SELECT * FROM frame_detections
-         WHERE video_id = ?
-         ORDER BY frame_ms ASC, confidence DESC`
-      )
-      .all(videoId) as DbFrameDetectionRow[];
+    result = await db.query(
+      `SELECT * FROM frame_detections
+       WHERE video_id = ?
+       ORDER BY frame_ms ASC, confidence DESC`,
+      [videoId]
+    );
   }
-  return rows.map(mapFrameDetection);
+  return (result.rows as unknown as DbFrameDetectionRow[]).map(
+    mapFrameDetection
+  );
 }
 
-export function getFrameDetectionTimestamps(
+export async function getFrameDetectionTimestamps(
   videoId: string,
   modelName?: string,
   runId?: string
-): number[] {
-  const db = getDb();
+): Promise<number[]> {
+  const db = await getDb();
 
   // When runId is provided, filter by run_id instead of model_name
   if (runId !== undefined) {
-    const rows = db
-      .prepare(
-        `SELECT DISTINCT frame_ms FROM frame_detections
-         WHERE video_id = ? AND run_id = ?
-         ORDER BY frame_ms ASC`
-      )
-      .all(videoId, runId) as Array<{ frame_ms: number }>;
-    return rows.map((r) => r.frame_ms);
+    const result = await db.query(
+      `SELECT DISTINCT frame_ms FROM frame_detections
+       WHERE video_id = ? AND run_id = ?
+       ORDER BY frame_ms ASC`,
+      [videoId, runId]
+    );
+    return (result.rows as Array<{ frame_ms: number }>).map((r) => r.frame_ms);
   }
 
-  const rows = (modelName !== undefined
-    ? db
-        .prepare(
+  const result =
+    modelName !== undefined
+      ? await db.query(
           `SELECT DISTINCT frame_ms FROM frame_detections
            WHERE video_id = ? AND model_name = ?
-           ORDER BY frame_ms ASC`
+           ORDER BY frame_ms ASC`,
+          [videoId, modelName]
         )
-        .all(videoId, modelName)
-    : db
-        .prepare(
+      : await db.query(
           `SELECT DISTINCT frame_ms FROM frame_detections
            WHERE video_id = ?
-           ORDER BY frame_ms ASC`
-        )
-        .all(videoId)) as Array<{ frame_ms: number }>;
-  return rows.map((r) => r.frame_ms);
+           ORDER BY frame_ms ASC`,
+          [videoId]
+        );
+  return (result.rows as Array<{ frame_ms: number }>).map((r) => r.frame_ms);
 }
 
-export function getFrameDetectionModels(videoId: string): string[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT DISTINCT model_name FROM frame_detections WHERE video_id = ?`
-    )
-    .all(videoId) as Array<{ model_name: string }>;
-  return rows.map((r) => r.model_name);
+export async function getFrameDetectionModels(
+  videoId: string
+): Promise<string[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT DISTINCT model_name FROM frame_detections WHERE video_id = ?`,
+    [videoId]
+  );
+  return (result.rows as Array<{ model_name: string }>).map(
+    (r) => r.model_name
+  );
 }
 
-// --- Detection Runs ---
-// Global lock: only one detection run at a time (single GPU on local machine).
-// The atomic INSERT...WHERE NOT EXISTS prevents races.
+// ---------------------------------------------------------------------------
+// Detection Runs
+// ---------------------------------------------------------------------------
 
-export function createDetectionRun(params: {
+export async function createDetectionRun(params: {
   videoId: string;
   modelName: string;
   config?: Record<string, unknown>;
-}): DetectionRun | null {
-  const db = getDb();
+}): Promise<DetectionRun | null> {
+  const db = await getDb();
   const id = randomUUID();
-  const result = db
-    .prepare(
-      `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
-       SELECT ?, ?, ?, 'queued', ?, datetime('now')
-       WHERE NOT EXISTS (
-         SELECT 1 FROM detection_runs WHERE status IN ('queued', 'running')
-       )`
-    )
-    .run(id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}));
+  const result = await db.run(
+    `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
+     SELECT ?, ?, ?, 'queued', ?, datetime('now')
+     WHERE NOT EXISTS (
+       SELECT 1 FROM detection_runs WHERE status IN ('queued', 'running')
+     )`,
+    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {})]
+  );
   if (result.changes === 0) return null;
-  return getDetectionRun(id)!;
+  return (await getDetectionRun(id))!;
 }
 
-export function getDetectionRun(id: string): DetectionRun | null {
-  const db = getDb();
-  const row = db
-    .prepare("SELECT * FROM detection_runs WHERE id = ?")
-    .get(id) as DbDetectionRunRow | undefined;
+export async function getDetectionRun(
+  id: string
+): Promise<DetectionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM detection_runs WHERE id = ?",
+    [id]
+  );
+  const row = result.rows[0] as unknown as DbDetectionRunRow | undefined;
   return row ? mapDetectionRun(row) : null;
 }
 
-export function listDetectionRuns(videoId: string): DetectionRun[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT * FROM detection_runs WHERE video_id = ? ORDER BY created_at DESC`
-    )
-    .all(videoId) as DbDetectionRunRow[];
-  return rows.map(mapDetectionRun);
+export async function listDetectionRuns(
+  videoId: string
+): Promise<DetectionRun[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT * FROM detection_runs WHERE video_id = ? ORDER BY created_at DESC`,
+    [videoId]
+  );
+  return (result.rows as unknown as DbDetectionRunRow[]).map(mapDetectionRun);
 }
 
-export function getActiveDetectionRun(): DetectionRun | null {
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT * FROM detection_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`
-    )
-    .get() as DbDetectionRunRow | undefined;
+export async function getActiveDetectionRun(): Promise<DetectionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT * FROM detection_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`
+  );
+  const row = result.rows[0] as unknown as DbDetectionRunRow | undefined;
   return row ? mapDetectionRun(row) : null;
 }
 
-export function updateDetectionRunStatus(
+export async function updateDetectionRunStatus(
   id: string,
   status: DetectionRunStatus,
   extra?: { detectionCount?: number; lastError?: string }
-) {
-  const db = getDb();
-  db.prepare(
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
     `UPDATE detection_runs
      SET status = ?,
          detection_count = COALESCE(?, detection_count),
          last_error = COALESCE(?, last_error),
          started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
          completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN datetime('now') ELSE completed_at END
-     WHERE id = ?`
-  ).run(
-    status,
-    extra?.detectionCount ?? null,
-    extra?.lastError ?? null,
-    status,
-    status,
-    id
+     WHERE id = ?`,
+    [
+      status,
+      extra?.detectionCount ?? null,
+      extra?.lastError ?? null,
+      status,
+      status,
+      id,
+    ]
   );
 }
 
-export function setDetectionRunWorkerPid(
+export async function setDetectionRunWorkerPid(
   id: string,
   pid: number | null
-) {
-  const db = getDb();
-  db.prepare(
-    `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`
-  ).run(pid, id);
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`,
+    [pid, id]
+  );
 }

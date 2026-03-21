@@ -261,25 +261,90 @@ def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, in
 # Database — uses Turso if env vars are set, otherwise local SQLite
 # ---------------------------------------------------------------------------
 
+class TursoCursor:
+    """Mimics sqlite3.Cursor for libsql_client results."""
+
+    def __init__(self, result_set):
+        self._rs = result_set
+        self._rows = result_set.rows if result_set else []
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TursoDb:
+    """Wrapper around libsql_client that provides a sqlite3-like interface."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def execute(self, sql, params=None):
+        import libsql_client
+        if params:
+            stmt = libsql_client.Statement(sql, list(params))
+            rs = self._client.execute(stmt)
+        else:
+            rs = self._client.execute(sql)
+        return TursoCursor(rs)
+
+    def executemany(self, sql, rows):
+        # Don't use this — use batch_insert instead
+        raise NotImplementedError("Use batch_insert() for bulk inserts with TursoDb")
+
+    def executescript(self, sql):
+        import libsql_client
+        # Split on semicolons and batch
+        stmts = [s.strip() for s in sql.split(';') if s.strip()]
+        if stmts:
+            self._client.batch([libsql_client.Statement(s) for s in stmts])
+
+    def batch_insert(self, sql, rows):
+        """Efficient bulk insert using batch()."""
+        import libsql_client
+        stmts = [libsql_client.Statement(sql, list(row)) for row in rows]
+        # batch() has a limit, chunk into groups of 500
+        CHUNK = 500
+        for i in range(0, len(stmts), CHUNK):
+            self._client.batch(stmts[i:i + CHUNK])
+
+    def commit(self):
+        pass  # libsql_client auto-commits
+
+    def sync(self):
+        pass  # No-op for direct HTTP
+
+    def close(self):
+        self._client.close()
+
+
 def get_db():
     turso_url = _load_env_var("TURSO_DATABASE_URL")
     turso_token = _load_env_var("TURSO_AUTH_TOKEN")
 
     if turso_url and turso_token:
         try:
-            import libsql
-            conn = libsql.connect("ai-event-videos", sync_url=turso_url, auth_token=turso_token)
-            conn.sync()
+            import libsql_client
+            # libsql_client needs https:// not libsql://
+            http_url = turso_url.replace("libsql://", "https://")
+            client = libsql_client.create_client_sync(
+                url=http_url,
+                auth_token=turso_token,
+            )
+            conn = TursoDb(client)
             print(f"  DB: Connected to Turso ({turso_url.split('//')[1].split('.')[0]})")
         except ImportError:
-            print("  [!] libsql not installed, falling back to local SQLite")
-            print("      Install with: pip install libsql")
+            print("  [!] libsql_client not installed, falling back to local SQLite")
+            print("      Install with: pip install libsql-client")
             conn = sqlite3.connect(str(DB_PATH))
     else:
         conn = sqlite3.connect(str(DB_PATH))
         print("  DB: Using local SQLite")
 
-    conn.execute("PRAGMA journal_mode=WAL")
+    if not isinstance(conn, TursoDb):
+        conn.execute("PRAGMA journal_mode=WAL")
 
     # Ensure run_id column exists on frame_detections
     cols = [r[1] for r in conn.execute("PRAGMA table_info(frame_detections)").fetchall()]
@@ -296,10 +361,8 @@ def get_db():
 
 
 def commit_and_sync(conn) -> None:
-    """Commit and sync to Turso if using embedded replica."""
+    """Commit and, for sqlite3, flush to disk. TursoDb auto-commits."""
     conn.commit()
-    if hasattr(conn, "sync"):
-        conn.sync()
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +455,10 @@ def save_detections(
     model_name: str,
     run_id: str,
 ) -> int:
+    sql = """INSERT INTO frame_detections (
+            video_id, frame_ms, label, x_min, y_min, x_max, y_max,
+            confidence, frame_width, frame_height, pipeline_version, model_name, run_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
     rows = [
         (
             video_id, frame_ms, d["label"],
@@ -401,13 +468,10 @@ def save_detections(
         )
         for d in detections
     ]
-    conn.executemany(
-        """INSERT INTO frame_detections (
-            video_id, frame_ms, label, x_min, y_min, x_max, y_max,
-            confidence, frame_width, frame_height, pipeline_version, model_name, run_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        rows,
-    )
+    if isinstance(conn, TursoDb):
+        conn.batch_insert(sql, rows)
+    else:
+        conn.executemany(sql, rows)
     # Don't sync here — caller batches inserts and syncs once at the end
     conn.commit()
     return len(rows)
@@ -1249,45 +1313,37 @@ def main() -> int:
         else:
             raise RuntimeError(f"Unknown model_name: {model_name}")
 
-        # Save all detections — use executescript with inline values to avoid
-        # libsql_experimental's slow executemany (which does per-row transactions)
+        # Save all detections using parameterized batch insert
         print(f"\n  Saving {len(detections)} detections to DB...")
         t_save = time.time()
 
-        def sql_escape(v: Any) -> str:
-            if v is None:
-                return "NULL"
-            if isinstance(v, (int, float)):
-                return str(v)
-            return "'" + str(v).replace("'", "''") + "'"
-
-        insert_stmts = []
-        for d in detections:
-            vals = ", ".join([
-                sql_escape(video_id), sql_escape(d["frame_ms"]), sql_escape(d["label"]),
-                sql_escape(d["x_min"]), sql_escape(d["y_min"]),
-                sql_escape(d["x_max"]), sql_escape(d["y_max"]),
-                sql_escape(d["confidence"]), sql_escape(d["frame_width"]),
-                sql_escape(d["frame_height"]), sql_escape(PIPELINE_VERSION),
-                sql_escape(model_name), sql_escape(run_id),
-            ])
-            insert_stmts.append(
-                f"INSERT INTO frame_detections (video_id, frame_ms, label, x_min, y_min, x_max, y_max, "
-                f"confidence, frame_width, frame_height, pipeline_version, model_name, run_id) "
-                f"VALUES ({vals})"
+        insert_sql = (
+            "INSERT INTO frame_detections (video_id, frame_ms, label, x_min, y_min, x_max, y_max, "
+            "confidence, frame_width, frame_height, pipeline_version, model_name, run_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        insert_rows = [
+            (
+                video_id, d["frame_ms"], d["label"],
+                d["x_min"], d["y_min"], d["x_max"], d["y_max"],
+                d["confidence"], d["frame_width"], d["frame_height"],
+                PIPELINE_VERSION, model_name, run_id,
             )
+            for d in detections
+        ]
 
         t_build = time.time()
-        # Execute all inserts as a single script inside one transaction
-        script = "BEGIN;\n" + ";\n".join(insert_stmts) + ";\nCOMMIT;"
-        conn.executescript(script)
+        if isinstance(conn, TursoDb):
+            conn.batch_insert(insert_sql, insert_rows)
+        else:
+            # sqlite3: use executemany inside a transaction for speed
+            conn.execute("BEGIN")
+            conn.executemany(insert_sql, insert_rows)
+            conn.execute("COMMIT")
         t_insert = time.time()
-        if hasattr(conn, "sync"):
-            conn.sync()
-        t_sync = time.time()
         total_saved = len(detections)
         print(f"  Saved {total_saved} detections for {video_id}")
-        print(f"    Build SQL: {(t_build - t_save) * 1000:.0f}ms | Execute: {(t_insert - t_build) * 1000:.0f}ms | Sync: {(t_sync - t_insert) * 1000:.0f}ms | Total: {(t_sync - t_save) * 1000:.0f}ms")
+        print(f"    Build rows: {(t_build - t_save) * 1000:.0f}ms | Execute: {(t_insert - t_build) * 1000:.0f}ms | Total: {(t_insert - t_save) * 1000:.0f}ms")
 
         # Per-class breakdown
         label_counts: dict[str, int] = defaultdict(int)
