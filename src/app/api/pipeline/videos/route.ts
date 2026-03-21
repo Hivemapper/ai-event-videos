@@ -33,12 +33,12 @@ export async function GET(request: NextRequest) {
   try {
     const [events, states, runs] = await Promise.all([
       fetchAllBeeMapsEventsForDay({ apiKey, day }),
-      Promise.resolve(listVideoPipelineStatesForDay(day)),
-      Promise.resolve(listPipelineRuns(day)),
+      listVideoPipelineStatesForDay(day),
+      listPipelineRuns(day),
     ]);
     const activeRun =
       runs.find((run) => ["queued", "running", "paused"].includes(run.status)) ??
-      getActivePipelineRun();
+      (await getActivePipelineRun());
 
     const stateMap = mapStateByVideo(states);
     const videos: PipelineVideoRow[] = events.map((event) => {
