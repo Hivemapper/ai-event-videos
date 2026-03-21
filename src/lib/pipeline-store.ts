@@ -6,6 +6,9 @@ import {
   DEFAULT_PIPELINE_MODEL_NAME,
 } from "@/lib/pipeline-config";
 import {
+  DetectionRun,
+  DetectionRunStatus,
+  FrameDetection,
   LabelDefinition,
   PipelineRunRecord,
   PipelineRunStatus,
@@ -56,6 +59,39 @@ interface DbSegmentRow {
   support_level: VideoDetectionSegment["supportLevel"];
   pipeline_version: string;
   source: string;
+  created_at: string;
+}
+
+interface DbFrameDetectionRow {
+  id: number;
+  video_id: string;
+  frame_ms: number;
+  label: string;
+  x_min: number;
+  y_min: number;
+  x_max: number;
+  y_max: number;
+  confidence: number;
+  frame_width: number;
+  frame_height: number;
+  pipeline_version: string;
+  model_name: string;
+  run_id: string | null;
+  created_at: string;
+}
+
+interface DbDetectionRunRow {
+  id: string;
+  video_id: string;
+  model_name: string;
+  status: DetectionRunStatus;
+  config_json: string;
+  detection_count: number | null;
+  worker_pid: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  last_heartbeat_at: string | null;
+  last_error: string | null;
   created_at: string;
 }
 
@@ -117,6 +153,43 @@ function mapSegment(row: DbSegmentRow): VideoDetectionSegment {
     supportLevel: row.support_level,
     pipelineVersion: row.pipeline_version,
     source: row.source,
+    createdAt: row.created_at,
+  };
+}
+
+function mapFrameDetection(row: DbFrameDetectionRow): FrameDetection {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    frameMs: row.frame_ms,
+    label: row.label,
+    xMin: row.x_min,
+    yMin: row.y_min,
+    xMax: row.x_max,
+    yMax: row.y_max,
+    confidence: row.confidence,
+    frameWidth: row.frame_width,
+    frameHeight: row.frame_height,
+    pipelineVersion: row.pipeline_version,
+    modelName: row.model_name,
+    runId: row.run_id,
+    createdAt: row.created_at,
+  };
+}
+
+function mapDetectionRun(row: DbDetectionRunRow): DetectionRun {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    modelName: row.model_name,
+    status: row.status,
+    config: parseJson<Record<string, unknown>>(row.config_json, {}),
+    detectionCount: row.detection_count,
+    workerPid: row.worker_pid,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    lastError: row.last_error,
     createdAt: row.created_at,
   };
 }
@@ -366,4 +439,202 @@ export function summarizeVideoStates(states: VideoPipelineState[]) {
       stale: 0,
     } as Record<VideoPipelineStatus, number>
   );
+}
+
+export function getFrameDetections(
+  videoId: string,
+  frameMs?: number,
+  modelName?: string,
+  runId?: string
+): FrameDetection[] {
+  const db = getDb();
+
+  // When runId is provided, filter by run_id instead of model_name
+  if (runId !== undefined) {
+    if (frameMs !== undefined) {
+      return (db
+        .prepare(
+          `SELECT * FROM frame_detections
+           WHERE video_id = ? AND frame_ms = ? AND run_id = ?
+           ORDER BY confidence DESC`
+        )
+        .all(videoId, frameMs, runId) as DbFrameDetectionRow[]).map(mapFrameDetection);
+    }
+    return (db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ? AND run_id = ?
+         ORDER BY frame_ms ASC, confidence DESC`
+      )
+      .all(videoId, runId) as DbFrameDetectionRow[]).map(mapFrameDetection);
+  }
+
+  let rows: DbFrameDetectionRow[];
+  if (frameMs !== undefined && modelName !== undefined) {
+    rows = db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ? AND frame_ms = ? AND model_name = ?
+         ORDER BY confidence DESC`
+      )
+      .all(videoId, frameMs, modelName) as DbFrameDetectionRow[];
+  } else if (frameMs !== undefined) {
+    rows = db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ? AND frame_ms = ?
+         ORDER BY confidence DESC`
+      )
+      .all(videoId, frameMs) as DbFrameDetectionRow[];
+  } else if (modelName !== undefined) {
+    rows = db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ? AND model_name = ?
+         ORDER BY frame_ms ASC, confidence DESC`
+      )
+      .all(videoId, modelName) as DbFrameDetectionRow[];
+  } else {
+    rows = db
+      .prepare(
+        `SELECT * FROM frame_detections
+         WHERE video_id = ?
+         ORDER BY frame_ms ASC, confidence DESC`
+      )
+      .all(videoId) as DbFrameDetectionRow[];
+  }
+  return rows.map(mapFrameDetection);
+}
+
+export function getFrameDetectionTimestamps(
+  videoId: string,
+  modelName?: string,
+  runId?: string
+): number[] {
+  const db = getDb();
+
+  // When runId is provided, filter by run_id instead of model_name
+  if (runId !== undefined) {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT frame_ms FROM frame_detections
+         WHERE video_id = ? AND run_id = ?
+         ORDER BY frame_ms ASC`
+      )
+      .all(videoId, runId) as Array<{ frame_ms: number }>;
+    return rows.map((r) => r.frame_ms);
+  }
+
+  const rows = (modelName !== undefined
+    ? db
+        .prepare(
+          `SELECT DISTINCT frame_ms FROM frame_detections
+           WHERE video_id = ? AND model_name = ?
+           ORDER BY frame_ms ASC`
+        )
+        .all(videoId, modelName)
+    : db
+        .prepare(
+          `SELECT DISTINCT frame_ms FROM frame_detections
+           WHERE video_id = ?
+           ORDER BY frame_ms ASC`
+        )
+        .all(videoId)) as Array<{ frame_ms: number }>;
+  return rows.map((r) => r.frame_ms);
+}
+
+export function getFrameDetectionModels(videoId: string): string[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT model_name FROM frame_detections WHERE video_id = ?`
+    )
+    .all(videoId) as Array<{ model_name: string }>;
+  return rows.map((r) => r.model_name);
+}
+
+// --- Detection Runs ---
+// Global lock: only one detection run at a time (single GPU on local machine).
+// The atomic INSERT...WHERE NOT EXISTS prevents races.
+
+export function createDetectionRun(params: {
+  videoId: string;
+  modelName: string;
+  config?: Record<string, unknown>;
+}): DetectionRun | null {
+  const db = getDb();
+  const id = randomUUID();
+  const result = db
+    .prepare(
+      `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
+       SELECT ?, ?, ?, 'queued', ?, datetime('now')
+       WHERE NOT EXISTS (
+         SELECT 1 FROM detection_runs WHERE status IN ('queued', 'running')
+       )`
+    )
+    .run(id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}));
+  if (result.changes === 0) return null;
+  return getDetectionRun(id)!;
+}
+
+export function getDetectionRun(id: string): DetectionRun | null {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT * FROM detection_runs WHERE id = ?")
+    .get(id) as DbDetectionRunRow | undefined;
+  return row ? mapDetectionRun(row) : null;
+}
+
+export function listDetectionRuns(videoId: string): DetectionRun[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT * FROM detection_runs WHERE video_id = ? ORDER BY created_at DESC`
+    )
+    .all(videoId) as DbDetectionRunRow[];
+  return rows.map(mapDetectionRun);
+}
+
+export function getActiveDetectionRun(): DetectionRun | null {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT * FROM detection_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`
+    )
+    .get() as DbDetectionRunRow | undefined;
+  return row ? mapDetectionRun(row) : null;
+}
+
+export function updateDetectionRunStatus(
+  id: string,
+  status: DetectionRunStatus,
+  extra?: { detectionCount?: number; lastError?: string }
+) {
+  const db = getDb();
+  db.prepare(
+    `UPDATE detection_runs
+     SET status = ?,
+         detection_count = COALESCE(?, detection_count),
+         last_error = COALESCE(?, last_error),
+         started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+         completed_at = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN datetime('now') ELSE completed_at END
+     WHERE id = ?`
+  ).run(
+    status,
+    extra?.detectionCount ?? null,
+    extra?.lastError ?? null,
+    status,
+    status,
+    id
+  );
+}
+
+export function setDetectionRunWorkerPid(
+  id: string,
+  pid: number | null
+) {
+  const db = getDb();
+  db.prepare(
+    `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`
+  ).run(pid, id);
 }
