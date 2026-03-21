@@ -137,6 +137,51 @@ export function getDb(): Database.Database {
       PRIMARY KEY (run_id, video_id),
       FOREIGN KEY (run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS frame_detections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      video_id TEXT NOT NULL,
+      frame_ms INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      x_min REAL NOT NULL,
+      y_min REAL NOT NULL,
+      x_max REAL NOT NULL,
+      y_max REAL NOT NULL,
+      confidence REAL NOT NULL,
+      frame_width INTEGER NOT NULL,
+      frame_height INTEGER NOT NULL,
+      pipeline_version TEXT NOT NULL,
+      model_name TEXT NOT NULL DEFAULT 'yolo11x',
+      run_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_frame_detections_video_frame
+      ON frame_detections (video_id, frame_ms);
+
+    CREATE INDEX IF NOT EXISTS idx_frame_detections_run_id
+      ON frame_detections (run_id);
+
+    CREATE TABLE IF NOT EXISTS detection_runs (
+      id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'queued',
+      config_json TEXT NOT NULL DEFAULT '{}',
+      detection_count INTEGER,
+      worker_pid INTEGER,
+      started_at TEXT,
+      completed_at TEXT,
+      last_heartbeat_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_detection_runs_video
+      ON detection_runs (video_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_video_pipeline_state_day
+      ON video_pipeline_state (day);
   `);
 
   ensureColumn(db, "labels", "is_system", "INTEGER NOT NULL DEFAULT 0");
