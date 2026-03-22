@@ -6,10 +6,12 @@ export async function GET(
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   const { videoId } = await params;
-  const db = getDb();
-  const row = db
-    .prepare("SELECT summary FROM clip_summaries WHERE video_id = ?")
-    .get(videoId) as { summary: string } | undefined;
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT summary FROM clip_summaries WHERE video_id = ?",
+    [videoId]
+  );
+  const row = result.rows[0] as { summary: string } | undefined;
 
   return NextResponse.json({ summary: row?.summary ?? null });
 }
@@ -20,18 +22,19 @@ export async function PUT(
 ) {
   const { videoId } = await params;
   const { summary } = (await request.json()) as { summary: string | null };
-  const db = getDb();
+  const db = await getDb();
 
   if (!summary || summary.trim() === "") {
-    db.prepare("DELETE FROM clip_summaries WHERE video_id = ?").run(videoId);
+    await db.run("DELETE FROM clip_summaries WHERE video_id = ?", [videoId]);
     return NextResponse.json({ summary: null });
   }
 
-  db.prepare(
+  await db.run(
     `INSERT INTO clip_summaries (video_id, summary, updated_at)
      VALUES (?, ?, datetime('now'))
-     ON CONFLICT(video_id) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at`
-  ).run(videoId, summary.trim());
+     ON CONFLICT(video_id) DO UPDATE SET summary = excluded.summary, updated_at = excluded.updated_at`,
+    [videoId, summary.trim()]
+  );
 
   return NextResponse.json({ summary: summary.trim() });
 }

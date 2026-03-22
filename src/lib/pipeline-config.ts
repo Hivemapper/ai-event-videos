@@ -140,13 +140,110 @@ export const VRU_LABEL_COLOR_MAP: Record<string, string> = {
 export interface DetectionModelConfig {
   id: string;
   name: string;
+  type: string;
+  device: string;
+  classes?: string[];
+  prompt?: string;
+  features?: string[];
+  estimatedTime?: string;
 }
 
 export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
-  { id: "gdino-base-clip", name: "GDINO Base + CLIP" },
-  { id: "yolo-world", name: "YOLO-World v2" },
-  { id: "yolo26x", name: "YOLO26x (COCO-80)" },
-  { id: "yolo11x", name: "YOLO11x (COCO-80)" },
+  {
+    id: "gdino-base-clip",
+    name: "GDINO Base + CLIP",
+    type: "Open-vocabulary (detect anything described in text)",
+    device: "MPS (GPU)",
+    prompt:
+      "person. bicycle. motorcycle. person on electric scooter. electric kick scooter. wheelchair. stroller. person wearing safety vest. skateboard. dog. traffic cone. car. truck. bus.",
+    features: ["OpenCLIP verification (filters false positives)"],
+    estimatedTime: "~1.5 min for 75 frames",
+  },
+  {
+    id: "mm-gdino",
+    name: "MM-GDINO Base (V3Det)",
+    type: "Open-vocabulary (V3Det trained, 13K categories)",
+    device: "MPS (GPU)",
+    classes: [
+      "person",
+      "bicycle",
+      "motorcycle",
+      "car",
+      "truck",
+      "bus",
+      "electric scooter",
+      "wheelchair",
+      "stroller",
+      "skateboard",
+      "dog",
+      "cat",
+      "traffic cone",
+      "construction worker",
+    ],
+    estimatedTime: "~1.3 min for 75 frames",
+  },
+  {
+    id: "yolo-world",
+    name: "YOLO-World v2",
+    type: "Open-vocabulary YOLO",
+    device: "MPS (GPU)",
+    classes: [
+      "person",
+      "bicycle",
+      "motorcycle",
+      "scooter",
+      "wheelchair",
+      "stroller",
+      "person wearing safety vest",
+      "skateboard",
+      "dog",
+      "traffic cone",
+      "car",
+      "truck",
+      "bus",
+    ],
+    estimatedTime: "~2 min for 75 frames",
+  },
+  {
+    id: "yolo26x",
+    name: "YOLO26x (COCO-80)",
+    type: "Closed-vocabulary (COCO-80 classes only)",
+    device: "MPS (GPU)",
+    classes: [
+      "person",
+      "bicycle",
+      "motorcycle",
+      "car",
+      "truck",
+      "bus",
+      "stop sign",
+      "cat",
+      "dog",
+      "skateboard",
+    ],
+    features: ["CLAHE night enhancement", "imgsz=1280"],
+    estimatedTime: "~1 min for 75 frames",
+  },
+  {
+    id: "yolo11x",
+    name: "YOLO11x (COCO-80)",
+    type: "Closed-vocabulary (COCO-80 classes only)",
+    device: "MPS (GPU)",
+    classes: [
+      "person",
+      "bicycle",
+      "motorcycle",
+      "car",
+      "truck",
+      "bus",
+      "stop sign",
+      "cat",
+      "dog",
+      "skateboard",
+    ],
+    features: ["CLAHE night enhancement", "imgsz=1280"],
+    estimatedTime: "~1.5 min for 75 frames",
+  },
 ];
 
 export function createEmptyPipelineTotals(): PipelineRunTotals {

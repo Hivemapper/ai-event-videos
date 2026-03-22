@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Play, Plus, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Clock, Cpu, Info, Loader2, Play, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,10 +13,15 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Slider } from "@/components/ui/slider";
 import { useVideoVru } from "@/hooks/use-video-vru";
@@ -69,9 +74,23 @@ function statusTone(status: string | undefined) {
   }
 }
 
+function parseTimestamp(dateStr: string): number {
+  // SQLite datetime('now') returns "2026-03-22 06:10:02" (no T, no Z)
+  // Python ISO format returns "2026-03-22T06:14:11Z"
+  // Normalize: if no T or Z, treat as UTC by appending Z
+  let normalized = dateStr;
+  if (!normalized.includes("T")) {
+    normalized = normalized.replace(" ", "T");
+  }
+  if (!normalized.endsWith("Z") && !normalized.includes("+")) {
+    normalized += "Z";
+  }
+  return new Date(normalized).getTime();
+}
+
 function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const seconds = Math.floor(diff / 1000);
+  const diff = Date.now() - parseTimestamp(dateStr);
+  const seconds = Math.max(0, Math.floor(diff / 1000));
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
@@ -82,7 +101,7 @@ function formatRelativeTime(dateStr: string): string {
 }
 
 function formatElapsedTime(startedAt: string): string {
-  const elapsed = Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000);
+  const elapsed = Math.max(0, Math.floor((Date.now() - parseTimestamp(startedAt)) / 1000));
   const minutes = Math.floor(elapsed / 60);
   const seconds = elapsed % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
@@ -112,7 +131,7 @@ export function VideoVruPanel({
     AVAILABLE_DETECTION_MODELS[0].id
   );
   const [logsOpen, setLogsOpen] = useState(true);
-  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll logs to bottom
@@ -125,6 +144,11 @@ export function VideoVruPanel({
   const isRunActive =
     activeDetectionRun &&
     (activeDetectionRun.status === "queued" || activeDetectionRun.status === "running");
+
+  const selectedModelConfig = useMemo(
+    () => AVAILABLE_DETECTION_MODELS.find((m) => m.id === selectedRunModel) ?? null,
+    [selectedRunModel]
+  );
 
   // Frame stepping helpers
   const currentMs = currentTime * 1000;
@@ -211,43 +235,100 @@ export function VideoVruPanel({
         <div className="space-y-3 rounded-lg border bg-card px-4 py-3">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold">Detections</h3>
-            <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-              <PopoverTrigger asChild>
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+              <DialogTrigger asChild>
                 <Button size="sm" variant="outline" disabled={!!isRunActive}>
                   <Plus className="h-3.5 w-3.5 mr-1" />
                   New Run
                 </Button>
-              </PopoverTrigger>
-              <PopoverContent align="end" className="w-64 space-y-3">
-                <p className="text-sm font-medium">Start a detection run</p>
-                <Select
-                  value={selectedRunModel}
-                  onValueChange={setSelectedRunModel}
-                >
-                  <SelectTrigger className="w-full" size="sm">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {AVAILABLE_DETECTION_MODELS.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  size="sm"
-                  className="w-full"
-                  onClick={() => {
-                    onRunDetection(selectedRunModel);
-                    setPopoverOpen(false);
-                  }}
-                >
-                  <Play className="h-3.5 w-3.5 mr-1" />
-                  Run
-                </Button>
-              </PopoverContent>
-            </Popover>
+              </DialogTrigger>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>New Detection Run</DialogTitle>
+                  <DialogDescription>
+                    Select a detection model and start a new run.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <Select
+                    value={selectedRunModel}
+                    onValueChange={setSelectedRunModel}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select a model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {AVAILABLE_DETECTION_MODELS.map((model) => (
+                        <SelectItem key={model.id} value={model.id}>
+                          {model.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedModelConfig && (
+                    <div className="rounded-md border bg-muted/30 px-3 py-3 space-y-2 text-sm">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <Info className="h-3.5 w-3.5 text-muted-foreground" />
+                        Model Info
+                      </div>
+                      <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+                        <span className="text-muted-foreground">Type</span>
+                        <span>{selectedModelConfig.type}</span>
+                        <span className="text-muted-foreground">Device</span>
+                        <span className="flex items-center gap-1">
+                          <Cpu className="h-3 w-3" />
+                          {selectedModelConfig.device}
+                        </span>
+                        {selectedModelConfig.prompt && (
+                          <>
+                            <span className="text-muted-foreground">Prompt</span>
+                            <span className="break-words font-mono text-[11px] leading-relaxed">
+                              {selectedModelConfig.prompt}
+                            </span>
+                          </>
+                        )}
+                        {selectedModelConfig.classes && (
+                          <>
+                            <span className="text-muted-foreground">Classes</span>
+                            <span>{selectedModelConfig.classes.join(", ")}</span>
+                          </>
+                        )}
+                        {selectedModelConfig.features && (
+                          <>
+                            <span className="text-muted-foreground">Features</span>
+                            <span>{selectedModelConfig.features.join(", ")}</span>
+                          </>
+                        )}
+                        {selectedModelConfig.estimatedTime && (
+                          <>
+                            <span className="text-muted-foreground">Est. time</span>
+                            <span className="flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              {selectedModelConfig.estimatedTime}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <DialogFooter>
+                  <DialogClose asChild>
+                    <Button variant="outline">Cancel</Button>
+                  </DialogClose>
+                  <Button
+                    disabled={!!isRunActive}
+                    onClick={() => {
+                      onRunDetection(selectedRunModel);
+                      setDialogOpen(false);
+                    }}
+                  >
+                    <Play className="h-3.5 w-3.5 mr-1" />
+                    Run
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </div>
 
           {/* Run list */}
@@ -310,9 +391,11 @@ export function VideoVruPanel({
                           </span>
                         )}
                         <span className={cn(isSelected && "font-medium")}>
-                          {AVAILABLE_DETECTION_MODELS.find(
-                            (m) => m.id === run.modelName
-                          )?.name ?? run.modelName}
+                          {(run.config?.modelDisplayName as string) ??
+                            AVAILABLE_DETECTION_MODELS.find(
+                              (m) => m.id === run.modelName
+                            )?.name ??
+                            run.modelName}
                         </span>
                       </span>
                       <span className="flex items-center gap-2">

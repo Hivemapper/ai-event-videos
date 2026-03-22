@@ -60,7 +60,20 @@ export async function POST(
     );
   }
 
-  const run = await createDetectionRun({ videoId, modelName });
+  const modelConfig = AVAILABLE_DETECTION_MODELS.find((m) => m.id === modelName);
+  const run = await createDetectionRun({
+    videoId,
+    modelName,
+    config: {
+      modelDisplayName: modelConfig?.name,
+      type: modelConfig?.type,
+      device: modelConfig?.device,
+      classes: modelConfig?.classes,
+      prompt: modelConfig?.prompt,
+      features: modelConfig?.features,
+      estimatedTime: modelConfig?.estimatedTime,
+    },
+  });
 
   if (!run) {
     const activeRun = await getActiveDetectionRun();

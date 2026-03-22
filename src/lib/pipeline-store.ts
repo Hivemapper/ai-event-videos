@@ -468,27 +468,27 @@ export async function getVideoDetectionSegments(
   return (segmentResult.rows as unknown as DbSegmentRow[]).map(mapSegment);
 }
 
-export function getVideoDetectionBoxes(videoId: string): import("@/types/pipeline").DetectionBox[] {
-  const db = getDb();
-  const rows = db
-    .prepare(
-      `SELECT id, video_id, timestamp_ms, label, confidence, x1, y1, x2, y2, pipeline_version
-       FROM video_detection_boxes
-       WHERE video_id = ?
-       ORDER BY timestamp_ms ASC, id ASC`
-    )
-    .all(videoId) as Array<{
-      id: number;
-      video_id: string;
-      timestamp_ms: number;
-      label: string;
-      confidence: number;
-      x1: number;
-      y1: number;
-      x2: number;
-      y2: number;
-      pipeline_version: string;
-    }>;
+export async function getVideoDetectionBoxes(videoId: string): Promise<import("@/types/pipeline").DetectionBox[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT id, video_id, timestamp_ms, label, confidence, x1, y1, x2, y2, pipeline_version
+     FROM video_detection_boxes
+     WHERE video_id = ?
+     ORDER BY timestamp_ms ASC, id ASC`,
+    [videoId]
+  );
+  const rows = result.rows as Array<{
+    id: number;
+    video_id: string;
+    timestamp_ms: number;
+    label: string;
+    confidence: number;
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    pipeline_version: string;
+  }>;
   return rows.map((row) => ({
     id: row.id,
     videoId: row.video_id,

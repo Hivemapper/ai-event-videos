@@ -8,6 +8,7 @@ updates the run status throughout.
 
 Supported models:
   - gdino-base-clip  (Grounding DINO base + OpenCLIP verification)
+  - mm-gdino         (MM-Grounding-DINO large, V3Det-trained)
   - yolo-world       (YOLO-World v2 open vocabulary)
   - yolo11x          (YOLO11x standard COCO-80)
   - yolo26x          (YOLO26x standard COCO-80)
@@ -600,9 +601,10 @@ def run_gdino_pass(
     frames: list[tuple[int, Any, int]],
     conn,
     run_id: str,
+    batch_size: int = 8,
 ) -> list[dict]:
     """
-    Load GDINO-base, run on all frames, unload.
+    Load GDINO-base, run on all frames in batches, unload.
     Returns a flat list of detection dicts, each with an extra 'frame_ms' key.
     """
     from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
@@ -628,64 +630,81 @@ def run_gdino_pass(
             print(f"  [!] MPS failed ({exc}), falling back to CPU")
             model = model.to("cpu")
             device = "cpu"
-    print(f"  Running on {device.upper()}")
+    print(f"  Running on {device.upper()} (batch_size={batch_size})")
 
     all_detections: list[dict] = []
     nms_suppressed_total = 0
+    frames_processed = 0
     t0 = time.time()
 
-    for i, (frame_ms, frame_bgr, frame_idx) in enumerate(frames):
-        pil = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
-        h, w = frame_bgr.shape[:2]
-        inputs = processor(images=pil, text=GDINO_TEXT_PROMPT, return_tensors="pt")
+    for batch_start in range(0, len(frames), batch_size):
+        batch_frames = frames[batch_start:batch_start + batch_size]
+        pil_images = [Image.fromarray(cv2.cvtColor(f[1], cv2.COLOR_BGR2RGB)) for f in batch_frames]
+
+        # Process batch — all images use the same text prompt
+        inputs = processor(
+            images=pil_images,
+            text=[GDINO_TEXT_PROMPT] * len(pil_images),
+            return_tensors="pt",
+        )
         inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+
         with torch.no_grad():
             outputs = model(**inputs)
+
+        # Post-process each image in the batch
+        target_sizes = [(f[1].shape[0], f[1].shape[1]) for f in batch_frames]
         results = processor.post_process_grounded_object_detection(
             outputs,
             inputs["input_ids"],
             threshold=GDINO_BOX_THRESHOLD,
             text_threshold=GDINO_TEXT_THRESHOLD,
-            target_sizes=[(h, w)],
+            target_sizes=target_sizes,
         )
-        frame_detections: list[dict] = []
-        if results:
-            r = results[0]
-            labels = r.get("text_labels", r.get("labels", []))
-            scores = r.get("scores", torch.tensor([]))
-            boxes = r.get("boxes", torch.tensor([]))
-            for label, score, box in zip(labels, scores, boxes):
-                conf = float(score.item()) if hasattr(score, "item") else float(score)
-                coords = box.cpu().tolist()
-                # Normalize the label — drop BPE garbage and compound labels
-                raw_label = label.strip()
-                canonical = normalize_gdino_label(raw_label)
-                if canonical is None:
-                    continue  # garbage label, skip
 
-                frame_detections.append({
-                    "frame_ms": frame_ms,
-                    "label": canonical,
-                    "confidence": conf,
-                    "x_min": coords[0],
-                    "y_min": coords[1],
-                    "x_max": coords[2],
-                    "y_max": coords[3],
-                    "frame_width": w,
-                    "frame_height": h,
-                })
+        # Extract detections for each frame in the batch
+        for j, (frame_ms, frame_bgr, frame_idx) in enumerate(batch_frames):
+            h, w = frame_bgr.shape[:2]
+            frame_detections: list[dict] = []
 
-        # Apply class-agnostic NMS per frame to remove duplicate/overlapping boxes
-        before_nms = len(frame_detections)
-        frame_detections = apply_nms(frame_detections, iou_threshold=0.5)
-        nms_suppressed_total += before_nms - len(frame_detections)
-        all_detections.extend(frame_detections)
+            if results and j < len(results):
+                r = results[j]
+                labels = r.get("text_labels", r.get("labels", []))
+                scores = r.get("scores", torch.tensor([]))
+                boxes = r.get("boxes", torch.tensor([]))
+                for label, score, box in zip(labels, scores, boxes):
+                    conf = float(score.item()) if hasattr(score, "item") else float(score)
+                    coords = box.cpu().tolist()
+                    # Normalize the label — drop BPE garbage and compound labels
+                    raw_label = label.strip()
+                    canonical = normalize_gdino_label(raw_label)
+                    if canonical is None:
+                        continue  # garbage label, skip
 
-        if (i + 1) % 10 == 0 or i == len(frames) - 1:
-            elapsed = time.time() - t0
-            print(f"    Frame {i + 1}/{len(frames)} -- {len(all_detections)} detections so far ({elapsed:.1f}s)")
-            # Heartbeat every 10 frames
-            update_heartbeat(conn, run_id)
+                    frame_detections.append({
+                        "frame_ms": frame_ms,
+                        "label": canonical,
+                        "confidence": conf,
+                        "x_min": coords[0],
+                        "y_min": coords[1],
+                        "x_max": coords[2],
+                        "y_max": coords[3],
+                        "frame_width": w,
+                        "frame_height": h,
+                    })
+
+            # Apply class-agnostic NMS per frame to remove duplicate/overlapping boxes
+            before_nms = len(frame_detections)
+            frame_detections = apply_nms(frame_detections, iou_threshold=0.5)
+            nms_suppressed_total += before_nms - len(frame_detections)
+            all_detections.extend(frame_detections)
+
+            frames_processed += 1
+            if frames_processed % 10 == 0 or frames_processed == len(frames):
+                elapsed = time.time() - t0
+                print(f"    Frame {frames_processed}/{len(frames)} -- {len(all_detections)} detections so far ({elapsed:.1f}s)")
+                # Heartbeat every 10 frames
+                update_heartbeat(conn, run_id)
 
     # Unload
     del model, processor
@@ -932,8 +951,9 @@ def run_gdino_clip(
     if "clipMinSimilarity" in config:
         CLIP_MIN_SIMILARITY = float(config["clipMinSimilarity"])
 
-    # Pass 1: GDINO
-    gdino_detections = run_gdino_pass(frames, conn, run_id)
+    # Pass 1: GDINO (with configurable batch size)
+    batch_size = int(config.get("batchSize", 8))
+    gdino_detections = run_gdino_pass(frames, conn, run_id, batch_size=batch_size)
 
     # Build frames lookup for CLIP pass
     frames_by_ms = {frame_ms: frame_bgr for frame_ms, frame_bgr, _ in frames}
@@ -958,6 +978,186 @@ def run_gdino_clip(
           f"dropped={clip_stats.get('dropped', 0)})")
 
     return verified_detections
+
+
+# ---------------------------------------------------------------------------
+# Model dispatch: MM-Grounding-DINO
+# ---------------------------------------------------------------------------
+
+# MM-GDINO uses list-of-lists text format (trained on V3Det with 13,204 categories)
+MM_GDINO_TEXT_LABELS = [
+    "person", "bicycle", "motorcycle", "car", "truck", "bus",
+    "electric scooter", "wheelchair", "stroller", "skateboard",
+    "dog", "cat", "traffic cone", "construction worker",
+]
+
+MM_GDINO_BOX_THRESHOLD = 0.30
+MM_GDINO_TEXT_THRESHOLD = 0.25
+
+
+def run_mm_gdino(
+    frames: list[tuple[int, Any, int]],
+    conn,
+    run_id: str,
+    config: dict,
+) -> list[dict]:
+    """Run MM-Grounding-DINO large (V3Det-trained) detection.
+
+    MM-GDINO is trained on V3Det (13,204 categories) so it has strong
+    recognition for common classes without needing CLIP verification.
+    Uses list-of-lists text format instead of period-separated strings.
+    """
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+
+    # Override thresholds from config if provided
+    box_threshold = float(config.get("boxThreshold", MM_GDINO_BOX_THRESHOLD))
+    text_threshold = float(config.get("textThreshold", MM_GDINO_TEXT_THRESHOLD))
+    batch_size = int(config.get("batchSize", 1))  # batch=1 is faster (no padding overhead)
+
+    # Use MPS if available (2.5x faster than CPU), fall back to CPU
+    forced_device = config.get("device", None)
+
+    # Support base and large variants (tiny has broken bbox output)
+    variant = config.get("variant", "base")  # "base" or "large"
+    model_ids = {
+        "base": "openmmlab-community/mm_grounding_dino_base_all",
+        "large": "openmmlab-community/mm_grounding_dino_large_all",
+    }
+    model_id = model_ids.get(variant, model_ids["base"])
+    print(f"\n  --- MM-Grounding-DINO ({variant}) pass ---")
+    print(f"  Loading {model_id}...")
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
+    model.eval()
+
+    device = forced_device or get_device()
+    if device == "mps":
+        try:
+            model = model.to("mps")
+            # Smoke test
+            dummy = processor(
+                images=Image.new("RGB", (64, 64)),
+                text=[["test"]],
+                return_tensors="pt",
+            )
+            dummy = {k: v.to("mps") if hasattr(v, "to") else v for k, v in dummy.items()}
+            with torch.no_grad():
+                model(**dummy)
+        except Exception as exc:
+            print(f"  [!] MPS failed ({exc}), falling back to CPU")
+            model = model.to("cpu")
+            device = "cpu"
+    else:
+        model = model.to(device)
+    print(f"  Running on {device.upper()} (batch_size={batch_size})")
+    print(f"  Config: box_threshold={box_threshold}, text_threshold={text_threshold}")
+
+    # Build the text labels in list-of-lists format (one list per image in batch)
+    text_labels_single = [MM_GDINO_TEXT_LABELS]
+
+    all_detections: list[dict] = []
+    nms_suppressed_total = 0
+    frames_processed = 0
+    t0 = time.time()
+
+    for batch_start in range(0, len(frames), batch_size):
+        batch_frames = frames[batch_start:batch_start + batch_size]
+        t_batch = time.time()
+
+        # Preprocessing: convert BGR to PIL
+        t_pre = time.time()
+        pil_images = [Image.fromarray(cv2.cvtColor(f[1], cv2.COLOR_BGR2RGB)) for f in batch_frames]
+        t_pre_done = time.time()
+
+        # Tokenize
+        t_tok = time.time()
+        text_input = [MM_GDINO_TEXT_LABELS] * len(pil_images)
+        inputs = processor(
+            images=pil_images,
+            text=text_input,
+            return_tensors="pt",
+        )
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        t_tok_done = time.time()
+
+        # Inference
+        t_inf = time.time()
+        with torch.no_grad():
+            outputs = model(**inputs)
+        t_inf_done = time.time()
+
+        # Post-process
+        t_post = time.time()
+        target_sizes = [(f[1].shape[0], f[1].shape[1]) for f in batch_frames]
+        results = processor.post_process_grounded_object_detection(
+            outputs,
+            inputs["input_ids"],
+            threshold=box_threshold,
+            text_threshold=text_threshold,
+            target_sizes=target_sizes,
+        )
+        t_post_done = time.time()
+
+        # Extract detections for each frame in the batch
+        for j, (frame_ms, frame_bgr, frame_idx) in enumerate(batch_frames):
+            h, w = frame_bgr.shape[:2]
+            frame_detections: list[dict] = []
+
+            if results and j < len(results):
+                r = results[j]
+                labels = r.get("text_labels", r.get("labels", []))
+                scores = r.get("scores", torch.tensor([]))
+                boxes = r.get("boxes", torch.tensor([]))
+                for label, score, box in zip(labels, scores, boxes):
+                    conf = float(score.item()) if hasattr(score, "item") else float(score)
+                    coords = box.cpu().tolist()
+                    cls_name = label.strip().lower()
+                    if not cls_name:
+                        continue
+
+                    frame_detections.append({
+                        "frame_ms": frame_ms,
+                        "label": cls_name,
+                        "confidence": conf,
+                        "x_min": coords[0],
+                        "y_min": coords[1],
+                        "x_max": coords[2],
+                        "y_max": coords[3],
+                        "frame_width": w,
+                        "frame_height": h,
+                    })
+
+            # Apply class-agnostic NMS per frame
+            before_nms = len(frame_detections)
+            frame_detections = apply_nms(frame_detections, iou_threshold=0.5)
+            nms_suppressed_total += before_nms - len(frame_detections)
+            all_detections.extend(frame_detections)
+            frames_processed += 1
+
+        # Per-batch timing
+        t_batch_done = time.time()
+        batch_num = batch_start // batch_size + 1
+        total_batches = (len(frames) + batch_size - 1) // batch_size
+        elapsed = time.time() - t0
+        avg_per_frame = elapsed / frames_processed if frames_processed else 0
+        eta = avg_per_frame * (len(frames) - frames_processed)
+        print(
+            f"    Batch {batch_num}/{total_batches} ({len(batch_frames)} frames) -- "
+            f"{len(all_detections)} detections -- "
+            f"preprocess={((t_pre_done - t_pre) * 1000):.0f}ms "
+            f"tokenize={((t_tok_done - t_tok) * 1000):.0f}ms "
+            f"inference={((t_inf_done - t_inf) * 1000):.0f}ms "
+            f"postprocess={((t_post_done - t_post) * 1000):.0f}ms "
+            f"total={((t_batch_done - t_batch) * 1000):.0f}ms "
+            f"({elapsed:.0f}s elapsed, ~{eta:.0f}s remaining)"
+        )
+        update_heartbeat(conn, run_id)
+
+    # Unload
+    del model, processor
+    free_gpu()
+    print(f"  MM-GDINO done: {len(all_detections)} detections ({nms_suppressed_total} suppressed by NMS). Model unloaded.")
+    return all_detections
 
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1504,8 @@ def main() -> int:
 
         if model_name == "gdino-base-clip":
             detections = run_gdino_clip(frames, conn, run_id, config)
+        elif model_name == "mm-gdino":
+            detections = run_mm_gdino(frames, conn, run_id, config)
         elif model_name == "yolo-world":
             detections = run_yolo_world(frames, conn, run_id, config)
         elif model_name == "yolo11x":

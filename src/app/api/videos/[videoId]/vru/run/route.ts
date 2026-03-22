@@ -28,7 +28,7 @@ export async function POST(
   }
 
   // Check if already running for this video
-  const existing = getVideoPipelineState(videoId);
+  const existing = await getVideoPipelineState(videoId);
   if (existing?.status === "running" || existing?.status === "queued") {
     return NextResponse.json(
       { error: "This video is already being processed" },
@@ -38,7 +38,7 @@ export async function POST(
 
   const day = body.day ?? new Date().toISOString().slice(0, 10);
 
-  const run = createPipelineRun({
+  const run = await createPipelineRun({
     day,
     batchSize: 1,
     beeMapsKey: body.beeMapsApiKey,
@@ -57,12 +57,12 @@ export async function POST(
 
     if (pid) {
       const { setPipelineRunWorkerPid } = await import("@/lib/pipeline-store");
-      setPipelineRunWorkerPid(run.id, pid);
+      await setPipelineRunWorkerPid(run.id, pid);
     }
 
-    return NextResponse.json({ run: getPipelineRun(run.id), videoId });
+    return NextResponse.json({ run: await getPipelineRun(run.id), videoId });
   } catch (err) {
-    updatePipelineRunStatus(run.id, "failed");
+    await updatePipelineRunStatus(run.id, "failed");
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to start worker" },
       { status: 500 }
@@ -75,7 +75,7 @@ export async function DELETE(
   { params }: { params: Promise<{ videoId: string }> }
 ) {
   const { videoId } = await params;
-  const state = getVideoPipelineState(videoId);
+  const state = await getVideoPipelineState(videoId);
 
   if (!state || (state.status !== "running" && state.status !== "queued")) {
     return NextResponse.json(
@@ -86,25 +86,25 @@ export async function DELETE(
 
   // Find the active run and cancel it
   const { getDb } = await import("@/lib/db");
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT id FROM pipeline_runs
-       WHERE status IN ('queued', 'running')
-       ORDER BY created_at DESC LIMIT 1`
-    )
-    .get() as { id: string } | undefined;
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT id FROM pipeline_runs
+     WHERE status IN ('queued', 'running')
+     ORDER BY created_at DESC LIMIT 1`
+  );
+  const row = result.rows[0] as { id: string } | undefined;
 
   if (row) {
-    updatePipelineRunStatus(row.id, "cancelled");
+    await updatePipelineRunStatus(row.id, "cancelled");
   }
 
   // Mark the video as failed/cancelled
-  db.prepare(
+  await db.run(
     `UPDATE video_pipeline_state
      SET status = 'failed', last_error = 'Cancelled by user', completed_at = datetime('now')
-     WHERE video_id = ?`
-  ).run(videoId);
+     WHERE video_id = ?`,
+    [videoId]
+  );
 
   return NextResponse.json({ cancelled: true, videoId });
 }
