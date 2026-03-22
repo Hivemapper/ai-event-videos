@@ -9,7 +9,6 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { GnssDataPoint, ImuDataPoint } from "@/types/events";
 import { getApiKey } from "@/lib/api";
 
@@ -24,7 +23,7 @@ interface PositioningSectionProps {
 }
 
 export function PositioningSection({ eventId, gnssData }: PositioningSectionProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(true);
   const [imuData, setImuData] = useState<ImuDataPoint[] | null>(null);
   const [isLoadingImu, setIsLoadingImu] = useState(false);
   const [imuError, setImuError] = useState<string | null>(null);
@@ -93,30 +92,28 @@ export function PositioningSection({ eventId, gnssData }: PositioningSectionProp
   };
 
   return (
-    <Card>
-      <CardHeader
-        className="cursor-pointer select-none"
+    <div className="space-y-3 rounded-lg border bg-card px-4 py-3">
+      <div
+        className="cursor-pointer select-none flex items-center justify-between"
         onClick={handleExpand}
       >
-        <CardTitle className="text-lg flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            Positioning
-            {gnssData && (
-              <Badge variant="secondary" className="text-xs">
-                {gnssData.length} GNSS points
-              </Badge>
-            )}
-          </div>
-          {isExpanded ? (
-            <ChevronUp className="w-5 h-5 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="w-5 h-5 text-muted-foreground" />
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-semibold">Positioning</h3>
+          {gnssData && (
+            <Badge variant="secondary" className="text-xs">
+              {gnssData.length} GNSS points
+            </Badge>
           )}
-        </CardTitle>
-      </CardHeader>
+        </div>
+        {isExpanded ? (
+          <ChevronUp className="w-5 h-5 text-muted-foreground" />
+        ) : (
+          <ChevronDown className="w-5 h-5 text-muted-foreground" />
+        )}
+      </div>
 
       {isExpanded && (
-        <CardContent className="space-y-4">
+        <div className="space-y-4">
           {/* Tab buttons */}
           <div className="flex items-center gap-2">
             <Button
@@ -282,8 +279,8 @@ export function PositioningSection({ eventId, gnssData }: PositioningSectionProp
               )}
             </div>
           )}
-        </CardContent>
+        </div>
       )}
-    </Card>
+    </div>
   );
 }

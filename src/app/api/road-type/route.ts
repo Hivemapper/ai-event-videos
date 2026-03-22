@@ -42,6 +42,7 @@ const ROAD_CLASS_RANK: Record<string, number> = {
 export interface RoadTypeResponse {
   class: string | null;
   classLabel: string | null;
+  name: string | null;
   structure: string | null;
   toll: boolean;
 }
@@ -50,18 +51,19 @@ async function queryRoadAt(
   lon: number,
   lat: number,
   token: string
-): Promise<{ class: string | null; structure: string | null; toll: boolean }> {
+): Promise<{ class: string | null; name: string | null; structure: string | null; toll: boolean }> {
   const url = `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${lon},${lat}.json?layers=road&radius=10&limit=1&access_token=${token}`;
   const response = await fetch(url);
-  if (!response.ok) return { class: null, structure: null, toll: false };
+  if (!response.ok) return { class: null, name: null, structure: null, toll: false };
 
   const data = await response.json();
   const feature = data.features?.[0];
-  if (!feature) return { class: null, structure: null, toll: false };
+  if (!feature) return { class: null, name: null, structure: null, toll: false };
 
   const props = feature.properties || {};
   return {
     class: props.class || null,
+    name: props.name || props.ref || null,
     structure: props.structure || null,
     toll: props.toll === true,
   };
@@ -136,9 +138,15 @@ export async function GET(request: NextRequest) {
       ? ROAD_CLASS_LABELS[roadClass] || roadClass
       : null;
 
+    // Collect the most common road name across samples
+    const roadName = results
+      .map((r) => r.name)
+      .filter((n): n is string => n !== null)[0] ?? null;
+
     return NextResponse.json({
       class: roadClass,
       classLabel,
+      name: roadName,
       structure: bestResult.structure,
       toll: bestResult.toll,
     } as RoadTypeResponse, {

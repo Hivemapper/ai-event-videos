@@ -78,7 +78,7 @@ export function EventInfo({
             <div>
               <p className="text-muted-foreground">Timestamp</p>
               <p className="font-medium flex items-center gap-2">
-                {formatDateTime(event.timestamp)}
+                {formatDateTime(event.timestamp, event.location.lon)}
                 {(() => {
                   const sunInfo = getTimeOfDay(
                     event.timestamp,
