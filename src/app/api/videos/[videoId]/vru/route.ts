@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getVideoDetectionSegments,
+  getVideoDetectionBoxes,
   getVideoPipelineState,
 } from "@/lib/pipeline-store";
 
@@ -12,5 +13,6 @@ export async function GET(
   return NextResponse.json({
     state: getVideoPipelineState(videoId),
     segments: getVideoDetectionSegments(videoId),
+    boxes: getVideoDetectionBoxes(videoId),
   });
 }

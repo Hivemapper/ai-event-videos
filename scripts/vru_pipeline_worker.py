@@ -19,11 +19,21 @@ import requests
 
 try:
     import cv2
+    import numpy as np
     import torch
     from ultralytics import YOLO
 except Exception as exc:  # pragma: no cover - runtime dependency guard
     print(f"Missing runtime dependency: {exc}", file=sys.stderr)
     raise
+
+# Grounding DINO is optional — only imported when selected
+_groundingdino_available = False
+try:
+    from groundingdino.util.inference import load_model as gd_load_model, predict as gd_predict
+    from groundingdino.util.inference import load_image as gd_load_image
+    _groundingdino_available = True
+except ImportError:
+    pass
 
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
@@ -50,6 +60,40 @@ LABEL_MAP: dict[str, tuple[str, str]] = {
     "zebra": ("animal", "supported"),
     "giraffe": ("animal", "supported"),
 }
+
+# Grounding DINO text prompt → VRU label mapping
+GDINO_TEXT_PROMPT = "person . bicycle . motorcycle . wheelchair . scooter . cat . dog . horse . cow . bird"
+GDINO_PHRASE_MAP: dict[str, tuple[str, str]] = {
+    "person": ("pedestrian", "supported"),
+    "bicycle": ("bicycle", "supported"),
+    "motorcycle": ("motorcycle", "supported"),
+    "wheelchair": ("wheelchair", "supported"),
+    "scooter": ("scooter", "supported"),
+    "cat": ("animal", "supported"),
+    "dog": ("animal", "supported"),
+    "horse": ("animal", "supported"),
+    "cow": ("animal", "supported"),
+    "bird": ("animal", "supported"),
+}
+
+def _gdino_config_path(config_filename: str) -> str:
+    """Resolve GroundingDINO config from the installed package."""
+    import groundingdino
+    return os.path.join(os.path.dirname(groundingdino.__file__), "config", config_filename)
+
+GDINO_MODEL_CONFIGS: dict[str, dict[str, str]] = {
+    "grounding-dino-tiny": {
+        "config_filename": "GroundingDINO_SwinT_OGC.py",
+        "weights": "weights/groundingdino_swint_ogc.pth",
+    },
+    "grounding-dino-base": {
+        "config_filename": "GroundingDINO_SwinB_cfg.py",
+        "weights": "weights/groundingdino_swinb_cogcoor.pth",
+    },
+}
+
+def is_grounding_dino_model(model_name: str) -> bool:
+    return model_name.startswith("grounding-dino")
 
 
 def utc_now() -> str:
@@ -85,6 +129,18 @@ class Segment:
     end_ms: int
     max_confidence: float
     frame_count: int
+
+
+@dataclass
+class DetectionBox:
+    """A single bounding box detection at a specific frame timestamp."""
+    timestamp_ms: int
+    label: str
+    confidence: float
+    x1: float  # normalized 0-1
+    y1: float
+    x2: float
+    y2: float
 
 
 class PipelineDb:
@@ -238,6 +294,7 @@ class PipelineDb:
         video_id: str,
         segments: list[Segment],
     ) -> list[str]:
+        source = "grounding-dino" if is_grounding_dino_model(self.model_name) else "yolo"
         labels_applied = sorted({segment.label for segment in segments})
         self.conn.execute(
             "DELETE FROM video_detection_segments WHERE video_id = ?",
@@ -249,7 +306,7 @@ class PipelineDb:
                 INSERT INTO video_detection_segments (
                   video_id, label, start_ms, end_ms, max_confidence,
                   support_level, pipeline_version, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'yolo')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     video_id,
@@ -259,10 +316,55 @@ class PipelineDb:
                     segment.max_confidence,
                     segment.support_level,
                     self.pipeline_version,
+                    source,
                 ),
             )
         self.conn.commit()
         return labels_applied
+
+    def replace_detection_boxes(
+        self,
+        video_id: str,
+        boxes: list[DetectionBox],
+    ) -> None:
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS video_detection_boxes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                x1 REAL NOT NULL,
+                y1 REAL NOT NULL,
+                x2 REAL NOT NULL,
+                y2 REAL NOT NULL,
+                pipeline_version TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"""
+        )
+        self.conn.execute(
+            "DELETE FROM video_detection_boxes WHERE video_id = ?",
+            (video_id,),
+        )
+        for box in boxes:
+            self.conn.execute(
+                """INSERT INTO video_detection_boxes (
+                    video_id, timestamp_ms, label, confidence,
+                    x1, y1, x2, y2, pipeline_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    video_id,
+                    box.timestamp_ms,
+                    box.label,
+                    box.confidence,
+                    box.x1,
+                    box.y1,
+                    box.x2,
+                    box.y2,
+                    self.pipeline_version,
+                ),
+            )
+        self.conn.commit()
 
 
 class PipelineWorker:
@@ -287,8 +389,28 @@ class PipelineWorker:
         self.pipeline_version = pipeline_version
         self.model_name = model_name
         self.device = get_device()
-        self.model = YOLO(model_name)
-        self.model.to(self.device)
+        self.use_gdino = is_grounding_dino_model(model_name)
+
+        if self.use_gdino:
+            if not _groundingdino_available:
+                raise RuntimeError(
+                    "groundingdino package is not installed. "
+                    "Install with: pip install groundingdino-py"
+                )
+            cfg = GDINO_MODEL_CONFIGS.get(model_name)
+            if cfg is None:
+                raise RuntimeError(f"Unknown Grounding DINO model: {model_name}")
+            config_path = _gdino_config_path(cfg["config_filename"])
+            weights_path = os.path.join(os.getcwd(), cfg["weights"])
+            if not os.path.exists(weights_path):
+                raise RuntimeError(f"Grounding DINO weights not found: {weights_path}")
+            self.gdino_model = gd_load_model(config_path, weights_path, device=self.device)
+            self.model = None
+        else:
+            self.model = YOLO(model_name)
+            self.model.to(self.device)
+            self.gdino_model = None
+
         self.auth_header = auth_header(bee_maps_key)
         self.cache_dir = Path.cwd() / "data" / "pipeline-video-cache"
         ensure_dir(self.cache_dir)
@@ -400,7 +522,94 @@ class PipelineWorker:
             total_size -= entry.stat().st_size
             entry.unlink(missing_ok=True)
 
-    def process_video(self, event: dict[str, Any]) -> list[Segment]:
+    def _detect_yolo(self, frame: Any, timestamp_ms: int = 0) -> tuple[dict[str, tuple[float, str]], list[DetectionBox]]:
+        results = self.model.predict(
+            frame,
+            verbose=False,
+            conf=FRAME_CONFIDENCE_THRESHOLD,
+            device=self.device,
+            imgsz=960,
+        )
+        best_labels: dict[str, tuple[float, str]] = {}
+        boxes: list[DetectionBox] = []
+        if results and results[0].boxes is not None:
+            result = results[0]
+            names = result.names
+            img_h, img_w = frame.shape[:2]
+            for box in result.boxes:
+                class_index = int(box.cls[0].item())
+                class_name = names.get(class_index, str(class_index))
+                mapped = LABEL_MAP.get(class_name)
+                if mapped is None:
+                    continue
+                label, support_level = mapped
+                confidence = float(box.conf[0].item())
+                current = best_labels.get(label)
+                if current is None or confidence > current[0]:
+                    best_labels[label] = (confidence, support_level)
+                # Store normalized bounding box
+                coords = box.xyxy[0].tolist()
+                boxes.append(DetectionBox(
+                    timestamp_ms=timestamp_ms,
+                    label=label,
+                    confidence=confidence,
+                    x1=coords[0] / img_w,
+                    y1=coords[1] / img_h,
+                    x2=coords[2] / img_w,
+                    y2=coords[3] / img_h,
+                ))
+        return best_labels, boxes
+
+    def _detect_gdino(self, frame: Any, timestamp_ms: int = 0) -> tuple[dict[str, tuple[float, str]], list[DetectionBox]]:
+        import tempfile
+        # Grounding DINO expects a file path; write frame to a temp file
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        try:
+            cv2.imwrite(tmp.name, frame)
+            image_source, image_tensor = gd_load_image(tmp.name)
+        finally:
+            os.unlink(tmp.name)
+
+        gdino_boxes, logits, phrases = gd_predict(
+            model=self.gdino_model,
+            image=image_tensor,
+            caption=GDINO_TEXT_PROMPT,
+            box_threshold=FRAME_CONFIDENCE_THRESHOLD,
+            text_threshold=FRAME_CONFIDENCE_THRESHOLD,
+            device=self.device,
+        )
+
+        best_labels: dict[str, tuple[float, str]] = {}
+        det_boxes: list[DetectionBox] = []
+        for box_coords, confidence_val, phrase in zip(gdino_boxes, logits, phrases):
+            confidence = float(confidence_val.item())
+            phrase_clean = phrase.strip().lower()
+            mapped = GDINO_PHRASE_MAP.get(phrase_clean)
+            if mapped is None:
+                for key, val in GDINO_PHRASE_MAP.items():
+                    if key in phrase_clean:
+                        mapped = val
+                        break
+            if mapped is None:
+                continue
+            label, support_level = mapped
+            current = best_labels.get(label)
+            if current is None or confidence > current[0]:
+                best_labels[label] = (confidence, support_level)
+            # Grounding DINO returns cx, cy, w, h normalized
+            cx, cy, w, h = box_coords.tolist()
+            det_boxes.append(DetectionBox(
+                timestamp_ms=timestamp_ms,
+                label=label,
+                confidence=confidence,
+                x1=cx - w / 2,
+                y1=cy - h / 2,
+                x2=cx + w / 2,
+                y2=cy + h / 2,
+            ))
+        return best_labels, det_boxes
+
+    def process_video(self, event: dict[str, Any]) -> tuple[list[Segment], list[DetectionBox]]:
         video_path = self.download_video(event["videoUrl"])
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
@@ -412,6 +621,7 @@ class PipelineWorker:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         sample_stride = max(1, int(round(fps / TARGET_ANALYSIS_FPS)))
         hits: dict[str, list[tuple[int, float, str]]] = {}
+        all_boxes: list[DetectionBox] = []
 
         frame_index = 0
         sampled_frames = 0
@@ -424,28 +634,13 @@ class PipelineWorker:
                 continue
 
             timestamp_ms = int((frame_index / fps) * 1000)
-            results = self.model.predict(
-                frame,
-                verbose=False,
-                conf=FRAME_CONFIDENCE_THRESHOLD,
-                device=self.device,
-                imgsz=960,
-            )
-            best_labels: dict[str, tuple[float, str]] = {}
-            if results and results[0].boxes is not None:
-                result = results[0]
-                names = result.names
-                for box in result.boxes:
-                    class_index = int(box.cls[0].item())
-                    class_name = names.get(class_index, str(class_index))
-                    mapped = LABEL_MAP.get(class_name)
-                    if mapped is None:
-                        continue
-                    label, support_level = mapped
-                    confidence = float(box.conf[0].item())
-                    current = best_labels.get(label)
-                    if current is None or confidence > current[0]:
-                        best_labels[label] = (confidence, support_level)
+
+            if self.use_gdino:
+                best_labels, frame_boxes = self._detect_gdino(frame, timestamp_ms)
+            else:
+                best_labels, frame_boxes = self._detect_yolo(frame, timestamp_ms)
+
+            all_boxes.extend(frame_boxes)
 
             for label, (confidence, support_level) in best_labels.items():
                 hits.setdefault(label, []).append((timestamp_ms, confidence, support_level))
@@ -465,7 +660,7 @@ class PipelineWorker:
         if frame_count == 0:
             raise RuntimeError("Video contained no frames")
 
-        return self.merge_hits(hits)
+        return self.merge_hits(hits), all_boxes
 
     def merge_hits(self, hits: dict[str, list[tuple[int, float, str]]]) -> list[Segment]:
         segments: list[Segment] = []
@@ -537,8 +732,9 @@ class PipelineWorker:
         self.db.update_run(self.run_id, totals=self.totals)
 
         try:
-            segments = self.process_video(event)
+            segments, boxes = self.process_video(event)
             labels_applied = self.db.replace_segments(video_id, segments)
+            self.db.replace_detection_boxes(video_id, boxes)
             self.db.upsert_video_state(
                 video_id,
                 self.day,
@@ -607,6 +803,62 @@ class PipelineWorker:
             if processed_in_page == 0 and len(events) < self.batch_size:
                 return "exhausted"
 
+    def run_single_video(self, video_id: str, video_url: str) -> int:
+        """Process a single video directly, bypassing pagination/batch logic."""
+        try:
+            self.db.update_run(self.run_id, status="running", totals=self.totals)
+            self.db.upsert_video_state(video_id, self.day, "queued")
+            self.db.upsert_video_state(video_id, self.day, "running", started=True)
+            self.totals["totalDiscovered"] = 1
+            self.totals["currentVideoId"] = video_id
+            self.totals["currentVideoIndex"] = 1
+            self.db.update_run(self.run_id, totals=self.totals)
+
+            event = {"id": video_id, "videoUrl": video_url}
+            segments, boxes = self.process_video(event)
+            labels_applied = self.db.replace_segments(video_id, segments)
+            self.db.replace_detection_boxes(video_id, boxes)
+            self.db.upsert_video_state(
+                video_id,
+                self.day,
+                "processed",
+                labels_applied=labels_applied,
+                completed=True,
+            )
+            self.totals["totalProcessed"] = 1
+            self.totals["remaining"] = 0
+            self.totals["currentVideoId"] = None
+            self.db.update_run(
+                self.run_id,
+                status="completed",
+                totals=self.totals,
+                completed=True,
+                error=None,
+            )
+            return 0
+        except Exception as exc:
+            self.db.upsert_video_state(
+                video_id,
+                self.day,
+                "failed",
+                labels_applied=[],
+                error=str(exc),
+                completed=True,
+            )
+            self.totals["totalFailed"] = 1
+            self.totals["remaining"] = 0
+            self.db.update_run(
+                self.run_id,
+                status="failed",
+                totals=self.totals,
+                error=str(exc),
+                completed=True,
+            )
+            print(f"Single-video pipeline failed: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            self.db.close()
+
     def run(self) -> int:
         try:
             primary_status = self.process_pass(reconciliation=False)
@@ -653,19 +905,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--pipeline-version", required=True)
     parser.add_argument("--model-name", required=True)
+    parser.add_argument("--video-id", help="Process a single video instead of a full day")
+    parser.add_argument("--video-url", help="Video URL for single-video mode")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    worker = PipelineWorker(
-        run_id=args.run_id,
-        day=args.day,
-        batch_size=args.batch_size,
-        db_path=args.db_path,
-        pipeline_version=args.pipeline_version,
-        model_name=args.model_name,
-    )
+    try:
+        worker = PipelineWorker(
+            run_id=args.run_id,
+            day=args.day,
+            batch_size=args.batch_size,
+            db_path=args.db_path,
+            pipeline_version=args.pipeline_version,
+            model_name=args.model_name,
+        )
+    except Exception as exc:
+        # Write failure to DB so the UI can show the error
+        print(f"Worker init failed: {exc}", file=sys.stderr)
+        db = PipelineDb(args.db_path, args.pipeline_version, args.model_name)
+        db.update_run(args.run_id, status="failed", error=str(exc), completed=True)
+        if args.video_id:
+            db.upsert_video_state(
+                args.video_id, args.day, "failed",
+                labels_applied=[], error=str(exc), completed=True,
+            )
+        db.close()
+        return 1
+
+    if args.video_id and args.video_url:
+        return worker.run_single_video(args.video_id, args.video_url)
+
     return worker.run()
 
 

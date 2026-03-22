@@ -10,6 +10,48 @@ export const DEFAULT_PIPELINE_BATCH_SIZE = 50;
 export const DEFAULT_PIPELINE_VIDEO_CACHE_HOURS = 24;
 export const DEFAULT_DETECTION_CONFIDENCE = 0.7;
 
+export type ModelBackend = "yolo" | "grounding-dino";
+
+export interface PipelineModelOption {
+  id: string;
+  label: string;
+  backend: ModelBackend;
+  description: string;
+}
+
+export const PIPELINE_MODEL_OPTIONS: PipelineModelOption[] = [
+  {
+    id: "yolov8n",
+    label: "YOLOv8 Nano",
+    backend: "yolo",
+    description: "Fast, lightweight — best for high throughput",
+  },
+  {
+    id: "yolo11n",
+    label: "YOLO11 Nano",
+    backend: "yolo",
+    description: "Newer architecture, similar speed to v8",
+  },
+  {
+    id: "yolo11s",
+    label: "YOLO11 Small",
+    backend: "yolo",
+    description: "Better accuracy, moderate speed",
+  },
+  {
+    id: "grounding-dino-tiny",
+    label: "Grounding DINO Tiny",
+    backend: "grounding-dino",
+    description: "Open-vocabulary detection — detects by text prompt",
+  },
+  {
+    id: "grounding-dino-base",
+    label: "Grounding DINO Base",
+    backend: "grounding-dino",
+    description: "Higher accuracy open-vocabulary, slower",
+  },
+];
+
 export interface SystemVruLabelConfig {
   key: VruLabelKey;
   supportLevel: VruSupportLevel;
@@ -50,14 +92,14 @@ export const SYSTEM_VRU_LABELS: SystemVruLabelConfig[] = [
   },
   {
     key: "wheelchair",
-    supportLevel: "experimental",
-    detectorAliases: [],
+    supportLevel: "supported",
+    detectorAliases: ["wheelchair"],
     color: "#4338ca",
   },
   {
     key: "scooter",
-    supportLevel: "experimental",
-    detectorAliases: [],
+    supportLevel: "supported",
+    detectorAliases: ["scooter"],
     color: "#be123c",
   },
   {

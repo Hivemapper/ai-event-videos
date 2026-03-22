@@ -75,9 +75,10 @@ interface FrameLabelingProps {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   currentTime?: number;
   duration?: number;
+  embedded?: boolean;
 }
 
-export function FrameLabeling({ event, videoRef, currentTime: externalTime, duration: externalDuration }: FrameLabelingProps) {
+export function FrameLabeling({ event, videoRef, currentTime: externalTime, duration: externalDuration, embedded = false }: FrameLabelingProps) {
   const [timestamp, setTimestamp] = useState(0);
   const [videoDuration, setVideoDuration] = useState(externalDuration || 10);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -197,15 +198,8 @@ export function FrameLabeling({ event, videoRef, currentTime: externalTime, dura
     frameLink.click();
   };
 
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-lg flex items-center gap-2">
-          <Camera className="w-5 h-5" />
-          Frame Labeling
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
+  const inner = (
+    <div className="space-y-4">
         {/* Timestamp slider */}
         <div className="space-y-2">
           <div className="flex items-center justify-between text-sm">
@@ -316,7 +310,20 @@ export function FrameLabeling({ event, videoRef, currentTime: externalTime, dura
             </Button>
           </div>
         )}
-      </CardContent>
+    </div>
+  );
+
+  if (embedded) return inner;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-lg flex items-center gap-2">
+          <Camera className="w-5 h-5" />
+          Frame Labeling
+        </CardTitle>
+      </CardHeader>
+      <CardContent>{inner}</CardContent>
     </Card>
   );
 }

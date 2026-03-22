@@ -351,6 +351,41 @@ export function getVideoDetectionSegments(videoId: string): VideoDetectionSegmen
   return rows.map(mapSegment);
 }
 
+export function getVideoDetectionBoxes(videoId: string): import("@/types/pipeline").DetectionBox[] {
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `SELECT id, video_id, timestamp_ms, label, confidence, x1, y1, x2, y2, pipeline_version
+       FROM video_detection_boxes
+       WHERE video_id = ?
+       ORDER BY timestamp_ms ASC, id ASC`
+    )
+    .all(videoId) as Array<{
+      id: number;
+      video_id: string;
+      timestamp_ms: number;
+      label: string;
+      confidence: number;
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      pipeline_version: string;
+    }>;
+  return rows.map((row) => ({
+    id: row.id,
+    videoId: row.video_id,
+    timestampMs: row.timestamp_ms,
+    label: row.label,
+    confidence: row.confidence,
+    x1: row.x1,
+    y1: row.y1,
+    x2: row.x2,
+    y2: row.y2,
+    pipelineVersion: row.pipeline_version,
+  }));
+}
+
 export function summarizeVideoStates(states: VideoPipelineState[]) {
   return states.reduce(
     (summary, state) => {

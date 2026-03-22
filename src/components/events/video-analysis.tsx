@@ -492,9 +492,10 @@ function ChatSection({
 
 interface VideoAnalysisCardProps {
   eventId: string;
+  embedded?: boolean;
 }
 
-export function VideoAnalysisCard({ eventId }: VideoAnalysisCardProps) {
+export function VideoAnalysisCard({ eventId, embedded = false }: VideoAnalysisCardProps) {
   const {
     analysis,
     analyzedAt,
@@ -513,63 +514,68 @@ export function VideoAnalysisCard({ eventId }: VideoAnalysisCardProps) {
     });
   };
 
+  const inner = (
+    <div className="space-y-4">
+      {analyzedAt && (
+        <div className="text-sm text-muted-foreground text-right">
+          {new Date(analyzedAt).toLocaleString()}
+        </div>
+      )}
+
+      {!analysis && !isLoading && !error && (
+        <div className="text-center py-4">
+          <p className="text-sm text-muted-foreground mb-3">
+            Analyze the scene — road type, lanes, signage, objects, and visibility.
+          </p>
+          <Button onClick={analyze}>
+            <Brain className="w-4 h-4 mr-2" />
+            Analyze Video
+          </Button>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="flex flex-col items-center py-6 gap-3">
+          <Loader2 className="w-8 h-8 animate-spin text-primary" />
+          <div className="text-center">
+            <p className="text-sm font-medium">Analyzing video...</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Extracting frames, analyzing video (~15-20s)
+            </p>
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div className="space-y-3">
+          <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">
+            {error === "NO_API_KEY"
+              ? "Anthropic API key required. Add it in Settings."
+              : error}
+          </div>
+          <Button onClick={analyze} variant="outline" size="sm">
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {analysis && <AnalysisResults analysis={analysis} frameTimestamps={frameTimestamps} />}
+
+      {analysis && (
+        <ChatSection
+          chatHistory={chatHistory}
+          onSend={handleChatSend}
+          isLoading={isChatLoading}
+        />
+      )}
+    </div>
+  );
+
+  if (embedded) return inner;
+
   return (
     <Card>
-      {analyzedAt && (
-        <CardHeader>
-          <CardTitle className="text-sm text-muted-foreground text-right">
-            {new Date(analyzedAt).toLocaleString()}
-          </CardTitle>
-        </CardHeader>
-      )}
-      <CardContent className="space-y-4">
-        {!analysis && !isLoading && !error && (
-          <div className="text-center py-4">
-            <p className="text-sm text-muted-foreground mb-3">
-              Analyze the scene — road type, lanes, signage, objects, and visibility.
-            </p>
-            <Button onClick={analyze}>
-              <Brain className="w-4 h-4 mr-2" />
-              Analyze Video
-            </Button>
-          </div>
-        )}
-
-        {isLoading && (
-          <div className="flex flex-col items-center py-6 gap-3">
-            <Loader2 className="w-8 h-8 animate-spin text-primary" />
-            <div className="text-center">
-              <p className="text-sm font-medium">Analyzing video...</p>
-              <p className="text-xs text-muted-foreground mt-1">
-                Extracting frames, analyzing video (~15-20s)
-              </p>
-            </div>
-          </div>
-        )}
-
-        {error && (
-          <div className="space-y-3">
-            <div className="text-sm text-red-600 bg-red-50 p-3 rounded-lg">
-              {error === "NO_API_KEY"
-                ? "Anthropic API key required. Add it in Settings."
-                : error}
-            </div>
-            <Button onClick={analyze} variant="outline" size="sm">
-              Retry
-            </Button>
-          </div>
-        )}
-
-        {analysis && <AnalysisResults analysis={analysis} frameTimestamps={frameTimestamps} />}
-
-        {analysis && (
-          <ChatSection
-            chatHistory={chatHistory}
-            onSend={handleChatSend}
-            isLoading={isChatLoading}
-          />
-        )}
-      </CardContent>
+      <CardContent className="pt-4">{inner}</CardContent>
     </Card>
   );
 }

@@ -21,8 +21,9 @@ interface SpeedProfileChartProps {
   onSeek: (time: number) => void;
 }
 
-const PADDING = { top: 12, right: 12, bottom: 24, left: 44 };
-const HEIGHT = 200;
+const PADDING = { top: 16, right: 16, bottom: 28, left: 48 };
+const SVG_WIDTH = 600;
+const SVG_HEIGHT = 220;
 
 function speedMsToDisplay(speedMs: number, unit: SpeedUnit): number {
   return unit === "mph" ? speedMs * 2.237 : speedMs * 3.6;
@@ -30,7 +31,7 @@ function speedMsToDisplay(speedMs: number, unit: SpeedUnit): number {
 
 function speedLimitToMs(limit: number, limitUnit: string): number {
   if (limitUnit === "km/h" || limitUnit === "kph") return limit / 3.6;
-  return limit / 2.237; // mph
+  return limit / 2.237;
 }
 
 function pointsToPath(points: { x: number; y: number }[]): string {
@@ -90,18 +91,6 @@ export function SpeedProfileChart({
 
   const { speedPoints, accelPoints, maxSpeed } = profile;
 
-  // Memoize SVG path computations so they only recompute when speedPoints/accelPoints change
-  const speedScreenPoints = useMemo(
-    () =>
-      speedPoints.map((p) => ({
-        t: p.t,
-        speed: p.speed,
-        x: PADDING.left + p.t * (400 - PADDING.left - PADDING.right),
-      })),
-    [speedPoints]
-  );
-
-  // Determine Y-axis max in display units
   const maxDisplaySpeed = speedMsToDisplay(maxSpeed, unit);
   const speedLimitMs = speedLimit
     ? speedLimitToMs(speedLimit.limit, speedLimit.unit)
@@ -111,29 +100,25 @@ export function SpeedProfileChart({
     : null;
 
   const yMax = niceAxisMax(
-    Math.max(
-      maxDisplaySpeed,
-      speedLimitDisplay ?? 0,
-      10
-    )
+    Math.max(maxDisplaySpeed, speedLimitDisplay ?? 0, 10)
   );
 
+  const plotWidth = SVG_WIDTH - PADDING.left - PADDING.right;
+  const plotHeight = SVG_HEIGHT - PADDING.top - PADDING.bottom;
+  const baseline = PADDING.top + plotHeight;
+
   const getChartX = useCallback(
-    (t: number, width: number) => {
-      const plotWidth = width - PADDING.left - PADDING.right;
-      return PADDING.left + t * plotWidth;
-    },
-    []
+    (t: number) => PADDING.left + t * plotWidth,
+    [plotWidth]
   );
 
   const getSpeedY = useCallback(
     (speedMs: number) => {
-      const plotHeight = HEIGHT - PADDING.top - PADDING.bottom;
       const displaySpeed = speedMsToDisplay(speedMs, unit);
       const ratio = Math.min(displaySpeed / yMax, 1);
       return PADDING.top + plotHeight * (1 - ratio);
     },
-    [unit, yMax]
+    [unit, yMax, plotHeight]
   );
 
   const handleMouseMove = useCallback(
@@ -143,20 +128,17 @@ export function SpeedProfileChart({
       const rect = svg.getBoundingClientRect();
       const svgWidth = rect.width;
       const mouseX = e.clientX - rect.left;
-      const plotWidth = svgWidth - PADDING.left - PADDING.right;
       const t = Math.min(
-        Math.max((mouseX - PADDING.left) / plotWidth, 0),
+        Math.max((mouseX - (PADDING.left / SVG_WIDTH) * svgWidth) / ((plotWidth / SVG_WIDTH) * svgWidth), 0),
         1
       );
       const time = t * duration;
 
-      // Find nearest speed point
       let speed: number | null = null;
       if (speedPoints.length > 0) {
         speed = interpolateAt(speedPoints, t, "speed");
       }
 
-      // Find nearest accel point
       let accel: number | null = null;
       if (accelPoints.length > 0) {
         accel = interpolateAt(accelPoints, t, "accel");
@@ -164,7 +146,7 @@ export function SpeedProfileChart({
 
       setHoverInfo({ x: mouseX, y: e.clientY - rect.top, svgWidth, time, speed, accel });
     },
-    [duration, speedPoints, accelPoints]
+    [duration, speedPoints, accelPoints, plotWidth]
   );
 
   const handleMouseLeave = useCallback(() => setHoverInfo(null), []);
@@ -174,14 +156,15 @@ export function SpeedProfileChart({
       const svg = svgRef.current;
       if (!svg || duration <= 0) return;
       const rect = svg.getBoundingClientRect();
-      const plotWidth = rect.width - PADDING.left - PADDING.right;
+      const svgWidth = rect.width;
+      const mouseX = e.clientX - rect.left;
       const t = Math.min(
-        Math.max((e.clientX - rect.left - PADDING.left) / plotWidth, 0),
+        Math.max((mouseX - (PADDING.left / SVG_WIDTH) * svgWidth) / ((plotWidth / SVG_WIDTH) * svgWidth), 0),
         1
       );
       onSeek(t * duration);
     },
-    [duration, onSeek]
+    [duration, onSeek, plotWidth]
   );
 
   if (speedPoints.length === 0 && accelPoints.length === 0) {
@@ -192,15 +175,15 @@ export function SpeedProfileChart({
     );
   }
 
-  // Generate Y-axis ticks
-  const tickCount = 4;
+  // Y-axis ticks
+  const tickCount = 5;
   const yTicks: number[] = [];
   for (let i = 0; i <= tickCount; i++) {
     yTicks.push((yMax / tickCount) * i);
   }
 
   // X-axis time labels
-  const xLabelCount = duration >= 10 ? 5 : Math.max(2, Math.ceil(duration));
+  const xLabelCount = duration >= 10 ? 6 : Math.max(2, Math.ceil(duration));
   const xLabels: { t: number; label: string }[] = [];
   for (let i = 0; i <= xLabelCount; i++) {
     const frac = i / xLabelCount;
@@ -216,56 +199,53 @@ export function SpeedProfileChart({
       <svg
         ref={svgRef}
         width="100%"
-        height={HEIGHT}
         className="cursor-crosshair select-none"
-        viewBox={`0 0 400 ${HEIGHT}`}
-        preserveAspectRatio="none"
+        viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
       >
-        {/* Gradient definition */}
+        {/* Gradient definitions */}
         <defs>
-          <linearGradient id="speedGradient" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="rgb(59, 130, 246)" stopOpacity={0.25} />
-            <stop offset="100%" stopColor="rgb(59, 130, 246)" stopOpacity={0} />
+          <linearGradient id="speedFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(59, 130, 246)" stopOpacity={0.2} />
+            <stop offset="100%" stopColor="rgb(59, 130, 246)" stopOpacity={0.02} />
+          </linearGradient>
+          <linearGradient id="accelFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgb(249, 115, 22)" stopOpacity={0.12} />
+            <stop offset="100%" stopColor="rgb(249, 115, 22)" stopOpacity={0.02} />
           </linearGradient>
         </defs>
 
         {/* Grid lines */}
         {yTicks.map((tick) => {
-          const y =
-            PADDING.top +
-            (HEIGHT - PADDING.top - PADDING.bottom) * (1 - tick / yMax);
+          const y = PADDING.top + plotHeight * (1 - tick / yMax);
           return (
             <line
               key={tick}
               x1={PADDING.left}
               y1={y}
-              x2={400 - PADDING.right}
+              x2={SVG_WIDTH - PADDING.right}
               y2={y}
               stroke="currentColor"
-              className="text-muted-foreground/10"
+              className="text-border"
               strokeWidth={0.5}
-              strokeDasharray="2 4"
             />
           );
         })}
 
         {/* Y-axis labels */}
         {yTicks.map((tick) => {
-          const y =
-            PADDING.top +
-            (HEIGHT - PADDING.top - PADDING.bottom) * (1 - tick / yMax);
+          const y = PADDING.top + plotHeight * (1 - tick / yMax);
           return (
             <text
               key={`label-${tick}`}
-              x={PADDING.left - 4}
-              y={y + 3}
+              x={PADDING.left - 8}
+              y={y + 3.5}
               textAnchor="end"
               className="fill-muted-foreground"
-              fontSize={9}
-              fontFamily="monospace"
+              fontSize={10}
+              fontFamily="ui-monospace, monospace"
             >
               {Math.round(tick)}
             </text>
@@ -276,38 +256,34 @@ export function SpeedProfileChart({
         {xLabels.map(({ t, label }) => (
           <text
             key={t}
-            x={getChartX(t, 400)}
-            y={HEIGHT - 4}
+            x={getChartX(t)}
+            y={SVG_HEIGHT - 6}
             textAnchor="middle"
             className="fill-muted-foreground"
-            fontSize={9}
-            fontFamily="monospace"
+            fontSize={10}
+            fontFamily="ui-monospace, monospace"
           >
             {label}
           </text>
         ))}
 
-        {/* Acceleration area (behind speed line) */}
+        {/* Acceleration area */}
         {accelPoints.length > 0 && (() => {
-          // Scale accel to fit in chart area — use a separate visual scale
           const maxAccelDisplay = Math.max(
             ...accelPoints.map((p) => p.accel),
             1
           );
-          const plotHeight = HEIGHT - PADDING.top - PADDING.bottom;
-          const baseline = PADDING.top + plotHeight;
           const accelScreenPoints = accelPoints.map((p) => ({
-            x: getChartX(p.t, 400),
-            y: baseline - (p.accel / maxAccelDisplay) * plotHeight * 0.5,
+            x: getChartX(p.t),
+            y: baseline - (p.accel / maxAccelDisplay) * plotHeight * 0.4,
           }));
           return (
             <path
               d={pointsToAreaPath(accelScreenPoints, baseline)}
-              fill="rgb(249, 115, 22)"
-              fillOpacity={0.15}
+              fill="url(#accelFill)"
               stroke="rgb(249, 115, 22)"
-              strokeWidth={0.5}
-              strokeOpacity={0.4}
+              strokeWidth={1}
+              strokeOpacity={0.3}
             />
           );
         })()}
@@ -319,12 +295,12 @@ export function SpeedProfileChart({
             <line
               x1={PADDING.left}
               y1={y}
-              x2={400 - PADDING.right}
+              x2={SVG_WIDTH - PADDING.right}
               y2={y}
               stroke="rgb(239, 68, 68)"
               strokeWidth={1}
-              strokeDasharray="4 3"
-              strokeOpacity={0.7}
+              strokeDasharray="6 4"
+              strokeOpacity={0.6}
             />
           );
         })()}
@@ -334,12 +310,12 @@ export function SpeedProfileChart({
           <path
             d={pointsToAreaPath(
               speedPoints.map((p) => ({
-                x: getChartX(p.t, 400),
+                x: getChartX(p.t),
                 y: getSpeedY(p.speed),
               })),
-              HEIGHT - PADDING.bottom
+              baseline
             )}
-            fill="url(#speedGradient)"
+            fill="url(#speedFill)"
             stroke="none"
           />
         )}
@@ -349,45 +325,53 @@ export function SpeedProfileChart({
           <path
             d={pointsToPath(
               speedPoints.map((p) => ({
-                x: getChartX(p.t, 400),
+                x: getChartX(p.t),
                 y: getSpeedY(p.speed),
               }))
             )}
             fill="none"
             stroke="rgb(59, 130, 246)"
-            strokeWidth={1.5}
+            strokeWidth={2}
             strokeLinejoin="round"
             strokeLinecap="round"
-            vectorEffect="non-scaling-stroke"
           />
         )}
 
         {/* Playback cursor */}
         {duration > 0 && (
-          <line
-            x1={getChartX(progress, 400)}
-            y1={PADDING.top}
-            x2={getChartX(progress, 400)}
-            y2={HEIGHT - PADDING.bottom}
-            stroke="currentColor"
-            className="text-foreground"
-            strokeWidth={1}
-            strokeOpacity={0.5}
-            vectorEffect="non-scaling-stroke"
-          />
+          <>
+            <line
+              x1={getChartX(progress)}
+              y1={PADDING.top}
+              x2={getChartX(progress)}
+              y2={baseline}
+              stroke="currentColor"
+              className="text-foreground"
+              strokeWidth={1.5}
+              strokeOpacity={0.4}
+            />
+            <circle
+              cx={getChartX(progress)}
+              cy={PADDING.top}
+              r={3}
+              fill="currentColor"
+              className="text-foreground"
+              fillOpacity={0.5}
+            />
+          </>
         )}
 
         {/* Hover cursor */}
         {hoverInfo && (
           <line
-            x1={hoverInfo.x * (400 / (hoverInfo.svgWidth || 400))}
+            x1={hoverInfo.x * (SVG_WIDTH / (hoverInfo.svgWidth || SVG_WIDTH))}
             y1={PADDING.top}
-            x2={hoverInfo.x * (400 / (hoverInfo.svgWidth || 400))}
-            y2={HEIGHT - PADDING.bottom}
+            x2={hoverInfo.x * (SVG_WIDTH / (hoverInfo.svgWidth || SVG_WIDTH))}
+            y2={baseline}
             stroke="currentColor"
             className="text-foreground/30"
             strokeWidth={0.5}
-            strokeDasharray="2 2"
+            strokeDasharray="3 3"
           />
         )}
       </svg>
@@ -395,17 +379,17 @@ export function SpeedProfileChart({
       {/* Hover tooltip */}
       {hoverInfo && (
         <div
-          className="absolute pointer-events-none bg-popover border shadow-md rounded-md px-2 py-1 text-xs z-10"
+          className="absolute pointer-events-none bg-popover/95 backdrop-blur-sm border shadow-lg rounded-lg px-2.5 py-1.5 text-xs z-10"
           style={{
-            left: Math.min(hoverInfo.x + 8, (hoverInfo.svgWidth || 400) - 120),
-            top: 4,
+            left: Math.min(hoverInfo.x + 12, (hoverInfo.svgWidth || SVG_WIDTH) - 130),
+            top: 8,
           }}
         >
           <div className="font-mono text-muted-foreground">
             {hoverInfo.time.toFixed(1)}s
           </div>
           {hoverInfo.speed !== null && (
-            <div className="text-blue-500 font-medium">
+            <div className="text-blue-500 font-semibold">
               {speedMsToDisplay(hoverInfo.speed, unit).toFixed(1)} {displayUnit}
             </div>
           )}
@@ -418,23 +402,23 @@ export function SpeedProfileChart({
       )}
 
       {/* Legend */}
-      <div className="flex items-center gap-3 mt-1.5 text-xs text-muted-foreground justify-end">
+      <div className="flex items-center gap-4 mt-2 text-xs text-muted-foreground justify-end">
         {speedPoints.length > 0 && (
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1.5">
             <span className="w-3 h-0.5 bg-blue-500 inline-block rounded" />
             Speed ({displayUnit})
           </span>
         )}
         {accelPoints.length > 0 && (
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-2 bg-orange-500/20 border border-orange-500/40 inline-block rounded-sm" />
-            Accel
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-2 bg-orange-500/15 border border-orange-500/30 inline-block rounded-sm" />
+            Acceleration
           </span>
         )}
         {speedLimitMs && (
-          <span className="flex items-center gap-1">
-            <span className="w-3 h-0 border-t border-dashed border-red-500 inline-block" />
-            Limit
+          <span className="flex items-center gap-1.5">
+            <span className="w-3 h-0 border-t border-dashed border-red-500/60 inline-block" />
+            Speed Limit
           </span>
         )}
       </div>
@@ -442,7 +426,6 @@ export function SpeedProfileChart({
   );
 }
 
-/** Linear interpolation at normalized time t within a sorted points array */
 function interpolateAt<T extends { t: number }>(
   points: T[],
   t: number,
@@ -454,7 +437,6 @@ function interpolateAt<T extends { t: number }>(
   if (t >= points[points.length - 1].t)
     return points[points.length - 1][key] as number;
 
-  // Binary search for bracket
   let lo = 0;
   let hi = points.length - 1;
   while (hi - lo > 1) {
