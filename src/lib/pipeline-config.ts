@@ -4,6 +4,9 @@ import {
   VruSupportLevel,
 } from "@/types/pipeline";
 
+/** Tolerance in ms when snapping video time to the nearest detection frame. */
+export const DETECTION_FRAME_TOLERANCE_MS = 200;
+
 export const CURRENT_PIPELINE_VERSION = "vru-yolo-v1";
 export const DEFAULT_PIPELINE_MODEL_NAME = "yolov8n";
 export const DEFAULT_PIPELINE_BATCH_SIZE = 50;
@@ -110,9 +113,41 @@ export const SYSTEM_VRU_LABELS: SystemVruLabelConfig[] = [
   },
 ];
 
-export const VRU_LABEL_COLOR_MAP = Object.fromEntries(
-  SYSTEM_VRU_LABELS.map((label) => [label.key, label.color])
-) as Record<string, string>;
+export const VRU_LABEL_COLOR_MAP: Record<string, string> = {
+  // System VRU labels
+  ...Object.fromEntries(SYSTEM_VRU_LABELS.map((l) => [l.key, l.color])),
+  // GDINO / open-vocab detection labels
+  person: "#0f766e",
+  car: "#0369a1",
+  truck: "#6d28d9",
+  bus: "#b45309",
+  motorcycle: "#b91c1c",
+  cyclist: "#2563eb",
+  crosswalk: "#d97706",
+  "construction worker": "#ea580c",
+  "traffic cone": "#e11d48",
+  stroller: "#7c3aed",
+  dog: "#a16207",
+  skateboard: "#0891b2",
+  skateboarder: "#0891b2",
+  scooter: "#be185d",
+  wheelchair: "#4338ca",
+  pedestrian: "#0f766e",
+  motorcyclist: "#dc2626",
+  child: "#9333ea",
+};
+
+export interface DetectionModelConfig {
+  id: string;
+  name: string;
+}
+
+export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
+  { id: "gdino-base-clip", name: "GDINO Base + CLIP" },
+  { id: "yolo-world", name: "YOLO-World v2" },
+  { id: "yolo26x", name: "YOLO26x (COCO-80)" },
+  { id: "yolo11x", name: "YOLO11x (COCO-80)" },
+];
 
 export function createEmptyPipelineTotals(): PipelineRunTotals {
   return {

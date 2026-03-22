@@ -8,7 +8,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const run = getPipelineRun(id);
+  const run = await getPipelineRun(id);
 
   if (!run) {
     return NextResponse.json({ error: "Run not found" }, { status: 404 });

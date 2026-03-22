@@ -1,110 +1,173 @@
 "use client";
 
-import { useMemo } from "react";
-import { DetectionBox } from "@/types/pipeline";
-const OVERLAY_COLORS: Record<string, string> = {
-  pedestrian: "#e040fb", // vivid pink-purple
-  bicycle: "#00e5ff",    // electric cyan
-  motorcycle: "#ff4081", // hot pink
-  animal: "#ffab00",     // vivid amber
-  kids: "#d500f9",       // bright purple
-  wheelchair: "#651fff", // deep violet
-  scooter: "#f50057",    // neon rose
-  "work-zone-person": "#ff6d00", // vivid orange
-};
+import { useCallback, useEffect, useRef } from "react";
+import type { FrameDetection } from "@/types/pipeline";
+import {
+  DETECTION_FRAME_TOLERANCE_MS,
+  VRU_LABEL_COLOR_MAP,
+} from "@/lib/pipeline-config";
 
 interface DetectionOverlayProps {
-  boxes: DetectionBox[];
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  isPlaying: boolean;
   currentTime: number;
-  /** How far (in ms) to look around currentTime to find matching boxes */
-  toleranceMs?: number;
+  timestamps: number[];
+  detectionsByFrame: Map<number, FrameDetection[]>;
+  minConfidence?: number;
 }
 
-/**
- * SVG overlay that renders bounding boxes on the video
- * for detected VRU classes at the current playback time.
- */
 export function DetectionOverlay({
-  boxes,
+  videoRef,
+  isPlaying,
   currentTime,
-  toleranceMs = 150,
+  timestamps,
+  detectionsByFrame,
+  minConfidence = 0,
 }: DetectionOverlayProps) {
-  const currentMs = currentTime * 1000;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Find boxes near the current timestamp
-  const visibleBoxes = useMemo(() => {
-    if (!boxes.length) return [];
-
-    // Binary search for the approximate start position
-    let lo = 0;
-    let hi = boxes.length - 1;
-    const target = currentMs - toleranceMs;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (boxes[mid].timestampMs < target) lo = mid + 1;
-      else hi = mid;
+  // Sync canvas to the parent container (not the video element, which may
+  // include browser-native controls that skew clientHeight).
+  const syncCanvasSize = useCallback(() => {
+    const canvas = canvasRef.current;
+    const container = canvas?.parentElement;
+    if (!canvas || !container) return;
+    const { clientWidth, clientHeight } = container;
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.round(clientWidth * dpr);
+    const targetH = Math.round(clientHeight * dpr);
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+      canvas.style.width = clientWidth + "px";
+      canvas.style.height = clientHeight + "px";
     }
+  }, []);
 
-    const result: DetectionBox[] = [];
-    for (let i = lo; i < boxes.length; i++) {
-      const box = boxes[i];
-      if (box.timestampMs > currentMs + toleranceMs) break;
-      if (box.timestampMs >= currentMs - toleranceMs) {
-        result.push(box);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = canvas?.parentElement;
+    if (!container) return;
+    const observer = new ResizeObserver(() => {
+      syncCanvasSize();
+    });
+    observer.observe(container);
+    syncCanvasSize();
+    return () => observer.disconnect();
+  }, [syncCanvasSize]);
+
+  // Draw detections on the canvas (synchronous — all data comes from props)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // Always clear
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Don't draw while playing
+    if (isPlaying) return;
+    if (timestamps.length === 0) return;
+
+    // Find nearest timestamp
+    const currentMs = currentTime * 1000;
+    let nearestMs = timestamps[0];
+    let nearestDist = Math.abs(currentMs - nearestMs);
+    for (const ts of timestamps) {
+      const dist = Math.abs(currentMs - ts);
+      if (dist < nearestDist) {
+        nearestMs = ts;
+        nearestDist = dist;
       }
     }
-    return result;
-  }, [boxes, currentMs, toleranceMs]);
 
-  if (!visibleBoxes.length) return null;
+    if (nearestDist > DETECTION_FRAME_TOLERANCE_MS) return;
+
+    const frameDetections = detectionsByFrame.get(nearestMs);
+    if (!frameDetections || frameDetections.length === 0) return;
+
+    syncCanvasSize();
+
+    const video = videoRef.current;
+    const container = canvas.parentElement;
+    if (!video || !container) return;
+
+    // Use the parent container dimensions for positioning (the canvas is
+    // absolutely positioned relative to it). The video element's clientHeight
+    // may include browser-native controls that shift the rendered area.
+    const containerW = container.clientWidth;
+    const containerH = container.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.save();
+    ctx.scale(dpr, dpr);
+
+    // Calculate the actual rendered video area within the container
+    // to account for letterboxing (black bars) when aspect ratios don't match.
+    // Uses video.videoWidth/videoHeight for the natural aspect ratio.
+    const videoNaturalW = video.videoWidth || 1280;
+    const videoNaturalH = video.videoHeight || 720;
+    const containerAspect = containerW / containerH;
+    const videoAspect = videoNaturalW / videoNaturalH;
+
+    let renderW: number, renderH: number, offsetX: number, offsetY: number;
+    if (containerAspect > videoAspect) {
+      // Black bars on sides (wider container than video)
+      renderH = containerH;
+      renderW = containerH * videoAspect;
+      offsetX = (containerW - renderW) / 2;
+      offsetY = 0;
+    } else {
+      // Black bars on top/bottom (taller container than video)
+      renderW = containerW;
+      renderH = containerW / videoAspect;
+      offsetX = 0;
+      offsetY = (containerH - renderH) / 2;
+    }
+
+    for (const det of frameDetections.filter(
+      (d) => d.confidence >= minConfidence,
+    )) {
+      const scaleX = renderW / det.frameWidth;
+      const scaleY = renderH / det.frameHeight;
+      const x = det.xMin * scaleX + offsetX;
+      const y = det.yMin * scaleY + offsetY;
+      const w = (det.xMax - det.xMin) * scaleX;
+      const h = (det.yMax - det.yMin) * scaleY;
+
+      const color = VRU_LABEL_COLOR_MAP[det.label] ?? "#334155";
+
+      // Draw bounding box
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, w, h);
+
+      // Draw label tag above the box
+      const labelText = `${det.label} ${Math.round(det.confidence * 100)}%`;
+      ctx.font = "bold 12px sans-serif";
+      const textMetrics = ctx.measureText(labelText);
+      const tagPadX = 4;
+      const tagPadY = 2;
+      const tagW = textMetrics.width + tagPadX * 2;
+      const tagH = 16 + tagPadY * 2;
+      const tagX = x;
+      const tagY = Math.max(0, y - tagH);
+
+      ctx.fillStyle = color;
+      ctx.fillRect(tagX, tagY, tagW, tagH);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.textBaseline = "top";
+      ctx.fillText(labelText, tagX + tagPadX, tagY + tagPadY);
+    }
+
+    ctx.restore();
+  }, [isPlaying, currentTime, timestamps, detectionsByFrame, syncCanvasSize, videoRef, minConfidence]);
 
   return (
-    <svg
-      className="absolute inset-0 w-full h-full pointer-events-none"
-      viewBox="0 0 1 1"
-      preserveAspectRatio="none"
-    >
-      {visibleBoxes.map((box) => {
-        const color = OVERLAY_COLORS[box.label] ?? "#e040fb";
-        const x = Math.max(0, box.x1);
-        const y = Math.max(0, box.y1);
-        const w = Math.min(1, box.x2) - x;
-        const h = Math.min(1, box.y2) - y;
-        return (
-          <g key={`${box.id}-${box.timestampMs}`}>
-            <rect
-              x={x}
-              y={y}
-              width={w}
-              height={h}
-              fill="none"
-              stroke={color}
-              strokeWidth={0.003}
-              rx={0.002}
-            />
-            {/* Label background */}
-            <rect
-              x={x}
-              y={Math.max(0, y - 0.028)}
-              width={Math.max(w, 0.08)}
-              height={0.026}
-              fill={color}
-              rx={0.002}
-            />
-            {/* Label text */}
-            <text
-              x={x + 0.004}
-              y={Math.max(0.018, y - 0.008)}
-              fill="white"
-              fontSize={0.016}
-              fontFamily="system-ui, sans-serif"
-              fontWeight="600"
-            >
-              {box.label} {Math.round(box.confidence * 100)}%
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+    <canvas
+      ref={canvasRef}
+      className="absolute top-0 left-0 pointer-events-none"
+    />
   );
 }

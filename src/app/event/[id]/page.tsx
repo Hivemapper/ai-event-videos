@@ -8,23 +8,14 @@ import {
   Check,
   Download,
   Loader2,
+  Maximize2,
+  X,
   ChevronRight,
-  Gauge,
-  Zap,
-  Clock,
-  CircleAlert,
-  MapPin,
-  Activity,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
-
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Skeleton } from "@/components/ui/skeleton";
 import dynamic from "next/dynamic";
 
@@ -36,39 +27,38 @@ const EventMap = dynamic(
   }
 );
 import { EVENT_TYPE_CONFIG } from "@/lib/constants";
-import {
-  getCameraIntrinsics,
-  BEE_HFOV,
-  DevicesResponse,
-  getSpeedUnit,
-  SpeedUnit,
-} from "@/lib/api";
+import { getCameraIntrinsics, BEE_HFOV, DevicesResponse, getSpeedUnit, SpeedUnit } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
-import {
-  useEventDetail,
-  useCountryName,
-  useNearestSpeedLimit,
-} from "@/hooks/use-event-detail";
-import { useVideoVru } from "@/hooks/use-video-vru";
+import { useActorDetection } from "@/hooks/use-actor-detection";
+import { useActorTracking } from "@/hooks/use-actor-tracking";
+import { useDetectionRuns } from "@/hooks/use-detection-runs";
+import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
+import { useRunLogs } from "@/hooks/use-run-logs";
+import { useEventDetail, useCountryName, useNearestSpeedLimit } from "@/hooks/use-event-detail";
+const VideoAnalysisCard = dynamic(
+  () => import("@/components/events/video-analysis").then((m) => m.VideoAnalysisCard),
+  { loading: () => <Skeleton className="h-32" /> }
+);
 import { SpeedProfileChart } from "@/components/events/speed-profile-chart";
 import { MetadataTable } from "@/components/events/metadata-table";
+const FrameLabeling = dynamic(
+  () => import("@/components/events/frame-labeling").then((m) => m.FrameLabeling),
+  { loading: () => <Skeleton className="h-32" /> }
+);
 const PositioningSection = dynamic(
-  () =>
-    import("@/components/events/positioning-section").then(
-      (m) => m.PositioningSection
-    ),
+  () => import("@/components/events/positioning-section").then((m) => m.PositioningSection),
   { loading: () => <Skeleton className="h-32" /> }
 );
 const VideoVruPanel = dynamic(
-  () =>
-    import("@/components/events/video-vru-panel").then((m) => m.VideoVruPanel),
+  () => import("@/components/events/video-vru-panel").then((m) => m.VideoVruPanel),
   { loading: () => <Skeleton className="h-16" /> }
 );
-import { ClipSummary } from "@/components/events/clip-summary";
-import { SpeedOverlay } from "@/components/events/speed-overlay";
 import { DetectionOverlay } from "@/components/events/detection-overlay";
+import { SpeedOverlay } from "@/components/events/speed-overlay";
+import { ActorControls } from "@/components/events/actor-controls";
+import { calculateBearing } from "@/lib/geo-projection";
 import {
   SpeedDataPoint,
   formatDateTime,
@@ -147,64 +137,11 @@ function CollapsibleSection({
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger className="flex items-center gap-2 w-full py-2 text-sm font-medium hover:text-foreground transition-colors text-muted-foreground">
-        <ChevronRight
-          className={cn(
-            "w-4 h-4 transition-transform",
-            open && "rotate-90"
-          )}
-        />
+        <ChevronRight className={cn("w-4 h-4 transition-transform", open && "rotate-90")} />
         {title}
       </CollapsibleTrigger>
       <CollapsibleContent>{children}</CollapsibleContent>
     </Collapsible>
-  );
-}
-
-/* ── Stat Card ── */
-
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  tint,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string | number;
-  tint?: "red" | "amber" | "emerald";
-}) {
-  const tintStyles = {
-    red: "border-red-500/20 bg-red-500/[0.03]",
-    amber: "border-amber-500/20 bg-amber-500/[0.03]",
-    emerald: "border-emerald-500/20 bg-emerald-500/[0.03]",
-  };
-  const tintText = {
-    red: "text-red-600 dark:text-red-400",
-    amber: "text-amber-600 dark:text-amber-400",
-    emerald: "text-emerald-600 dark:text-emerald-400",
-  };
-  return (
-    <Card className={cn("border-border/60", tint && tintStyles[tint])}>
-      <CardContent className="pt-3 pb-3 px-3">
-        <div
-          className={cn(
-            "flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider mb-1",
-            tint ? tintText[tint] : "text-muted-foreground"
-          )}
-        >
-          <Icon className="w-3.5 h-3.5" />
-          {label}
-        </div>
-        <div
-          className={cn(
-            "text-xl font-bold tabular-nums",
-            tint ? tintText[tint] : ""
-          )}
-        >
-          {value}
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -224,17 +161,15 @@ export default function EventDetailPage({
     event?.location.lat ?? null,
     event?.location.lon ?? null
   );
-  const { data: vruData } = useVideoVru(id);
   const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
-  const [videoContainerHeight, setVideoContainerHeight] = useState<
-    number | null
-  >(null);
-  const [cameraIntrinsics, setCameraIntrinsics] =
-    useState<DevicesResponse | null>(null);
+  const [videoContainerHeight, setVideoContainerHeight] = useState<number | null>(null);
+  const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
 
@@ -253,6 +188,20 @@ export default function EventDetailPage({
     return () => observer.disconnect();
   }, []);
 
+  // Fullscreen: escape key + body scroll lock
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFullscreen(false);
+    };
+    document.addEventListener("keydown", handler);
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handler);
+      document.body.style.overflow = "";
+    };
+  }, [isFullscreen]);
+
   // Track video playback time
   useEffect(() => {
     const video = videoRef.current;
@@ -261,7 +210,7 @@ export default function EventDetailPage({
     let lastUpdate = 0;
     const handleTimeUpdate = () => {
       const now = performance.now();
-      if (now - lastUpdate < 200) return;
+      if (now - lastUpdate < 200) return; // Throttle to ~5Hz
       lastUpdate = now;
       setVideoCurrentTime(video.currentTime);
     };
@@ -270,9 +219,15 @@ export default function EventDetailPage({
       setVideoDuration(video.duration || 0);
     };
 
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
+
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
+    video.addEventListener("play", handlePlay);
+    video.addEventListener("pause", handlePause);
 
+    // Set initial duration if already loaded
     if (video.duration) {
       setVideoDuration(video.duration);
     }
@@ -280,8 +235,10 @@ export default function EventDetailPage({
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      video.removeEventListener("play", handlePlay);
+      video.removeEventListener("pause", handlePause);
     };
-  }, [event]);
+  }, [event]); // Re-run when event loads (video element gets src)
 
   // Load camera intrinsics from localStorage
   useEffect(() => {
@@ -289,12 +246,159 @@ export default function EventDetailPage({
     setCameraIntrinsics(intrinsics);
   }, []);
 
-  // Fetch road type
-  const { roadType } = useRoadType(
+  // Fetch road type from Mapbox (samples multiple GNSS points for accuracy)
+  const { roadType, isLoading: roadTypeLoading } = useRoadType(
     event?.location.lat ?? null,
     event?.location.lon ?? null,
     event?.gnssData
   );
+
+  // Actor detection
+  const { actors: detectedActors, isDetecting, error: actorError, detect: detectActors, clear: clearActors } = useActorDetection();
+
+  // Actor tracking
+  const { trackingResult, isTracking, progress: trackingProgress, error: trackingError, track: trackActors, clear: clearTracking } = useActorTracking();
+
+  // Detection runs
+  const {
+    runs: detectionRuns,
+    activeRun: activeDetectionRun,
+    mutate: mutateRuns,
+  } = useDetectionRuns(id);
+
+  // Detection timestamps for frame stepping and overlay
+  const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
+  const [minConfidence, setMinConfidence] = useState(0.1);
+  const { timestamps: detectionTimestamps, detectionsByFrame, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedRunId);
+
+  // Log streaming for active or selected in-progress run
+  const logRunId = activeDetectionRun?.id ?? null;
+  const { logs } = useRunLogs(logRunId, id);
+
+  // Auto-select the latest completed run when runs become available
+  useEffect(() => {
+    if (detectionRuns.length > 0 && selectedRunId === undefined) {
+      const completedRun = detectionRuns.find((r) => r.status === "completed");
+      if (completedRun) {
+        setSelectedRunId(completedRun.id);
+      }
+    }
+  }, [detectionRuns, selectedRunId]);
+
+  const handleRunDetection = useCallback(
+    async (modelName: string) => {
+      await fetch(`/api/videos/${id}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ modelName }),
+      });
+      mutateRuns();
+    },
+    [id, mutateRuns]
+  );
+
+  const handleCancelRun = useCallback(
+    async (runId: string) => {
+      await fetch(`/api/videos/${id}/runs/${runId}/cancel`, { method: "POST" });
+      mutateRuns();
+    },
+    [id, mutateRuns]
+  );
+
+  // Auto-refresh detections when a detection run completes
+  const prevActiveRunRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const prevId = prevActiveRunRef.current;
+    const currentId = activeDetectionRun?.id ?? null;
+
+    if (prevId && !currentId) {
+      // A run just completed — switch to it and refresh detections
+      setSelectedRunId(prevId);
+      mutateDetections();
+    }
+
+    prevActiveRunRef.current = currentId;
+  }, [activeDetectionRun?.id, mutateDetections]);
+
+  // Reusable camera state interpolation from GNSS path
+  const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
+    if (!event?.gnssData || event.gnssData.length < 2 || !videoDuration || videoDuration <= 0) {
+      return { lat: event?.location.lat ?? 0, lon: event?.location.lon ?? 0, bearing: 0 };
+    }
+    const gnss = event.gnssData;
+
+    // Map video time (seconds) to GNSS time domain (milliseconds)
+    const gnssStart = gnss[0].timestamp;
+    const gnssEnd = gnss[gnss.length - 1].timestamp;
+    const progress = Math.max(0, Math.min(1, timestamp / videoDuration));
+    const gnssTime = gnssStart + progress * (gnssEnd - gnssStart);
+
+    // Find bracketing GNSS points by actual timestamp
+    let lowerIndex = 0;
+    for (let i = 0; i < gnss.length - 1; i++) {
+      if (gnss[i + 1].timestamp >= gnssTime) {
+        lowerIndex = i;
+        break;
+      }
+      lowerIndex = i;
+    }
+    const upperIndex = Math.min(lowerIndex + 1, gnss.length - 1);
+
+    // Interpolate based on actual timestamps, not array index
+    const segmentDuration = gnss[upperIndex].timestamp - gnss[lowerIndex].timestamp;
+    const t = segmentDuration > 0 ? (gnssTime - gnss[lowerIndex].timestamp) / segmentDuration : 0;
+
+    const p1 = gnss[lowerIndex];
+    const p2 = gnss[upperIndex];
+    const lat = p1.lat + (p2.lat - p1.lat) * t;
+    const lon = p1.lon + (p2.lon - p1.lon) * t;
+
+    const lookAhead = 3;
+    const endIndex = Math.min(lowerIndex + lookAhead, gnss.length - 1);
+    const bearing = endIndex > lowerIndex
+      ? calculateBearing(gnss[lowerIndex].lat, gnss[lowerIndex].lon, gnss[endIndex].lat, gnss[endIndex].lon)
+      : calculateBearing(gnss[Math.max(0, lowerIndex - 1)].lat, gnss[Math.max(0, lowerIndex - 1)].lon, gnss[lowerIndex].lat, gnss[lowerIndex].lon);
+
+    return { lat, lon, bearing };
+  }, [event, videoDuration]);
+
+  const handleDetectActors = useCallback(() => {
+    if (!event?.videoUrl) return;
+
+    const camera = getCameraState(videoCurrentTime);
+    const fovDegrees = cameraIntrinsics?.bee ? BEE_HFOV : 120;
+
+    detectActors({
+      eventId: id,
+      videoUrl: event.videoUrl,
+      timestamp: videoCurrentTime,
+      cameraLat: camera.lat,
+      cameraLon: camera.lon,
+      cameraBearing: camera.bearing,
+      fovDegrees,
+      cameraIntrinsics: cameraIntrinsics?.bee
+        ? { focal: cameraIntrinsics.bee.focal, k1: cameraIntrinsics.bee.k1, k2: cameraIntrinsics.bee.k2 }
+        : undefined,
+    });
+  }, [event, videoCurrentTime, getCameraState, cameraIntrinsics, id, detectActors]);
+
+  const handleTrackActors = useCallback(() => {
+    if (!event?.videoUrl || !videoDuration) return;
+
+    const fovDegrees = cameraIntrinsics?.bee ? BEE_HFOV : 120;
+
+    trackActors({
+      eventId: id,
+      videoUrl: event.videoUrl,
+      videoDuration,
+      fovDegrees,
+      cameraIntrinsics: cameraIntrinsics?.bee
+        ? { focal: cameraIntrinsics.bee.focal, k1: cameraIntrinsics.bee.k1, k2: cameraIntrinsics.bee.k2 }
+        : undefined,
+      getCameraState,
+    });
+  }, [event, videoDuration, cameraIntrinsics, id, trackActors, getCameraState]);
 
   const copyCoordinates = async () => {
     if (!event) return;
@@ -317,18 +421,12 @@ export default function EventDetailPage({
       link.click();
       URL.revokeObjectURL(url);
     } catch {
+      // Fallback: open in new tab
       window.open(getProxyVideoUrl(event.videoUrl), "_blank");
     } finally {
       setIsDownloading(false);
     }
   };
-
-  const seekTo = useCallback(
-    (time: number) => {
-      if (videoRef.current) videoRef.current.currentTime = time;
-    },
-    []
-  );
 
   if (isLoading) {
     return <EventDetailSkeleton />;
@@ -358,35 +456,15 @@ export default function EventDetailPage({
   }
 
   const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
-  const TypeIcon = config.icon;
 
-  const speedData = event.metadata?.SPEED_ARRAY as
-    | SpeedDataPoint[]
-    | undefined;
-  const overlaySpeedData =
-    speedData && speedData.length > 0
-      ? speedData
-      : event.gnssData
-        ? deriveSpeedFromGnss(event.gnssData)
-        : [];
-  const maxSpeedMs = speedData
+  const speedData = event.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
+  const overlaySpeedData = speedData && speedData.length > 0
+    ? speedData
+    : event.gnssData ? deriveSpeedFromGnss(event.gnssData) : [];
+  const maxSpeed = speedData
     ? Math.max(...speedData.map((s) => s.AVG_SPEED_MS))
     : null;
-  const minSpeedMs = speedData
-    ? Math.min(...speedData.map((s) => s.AVG_SPEED_MS))
-    : null;
   const acceleration = event.metadata?.ACCELERATION_MS2 as number | undefined;
-  const sunInfo = getTimeOfDay(
-    event.timestamp,
-    event.location.lat,
-    event.location.lon
-  );
-  const todStyle = getTimeOfDayStyle(sunInfo.timeOfDay);
-
-  const exceedsSpeedLimit =
-    nearestSpeedLimit && maxSpeedMs
-      ? maxSpeedMs * 2.237 > nearestSpeedLimit.limit
-      : false;
 
   return (
     <div className="min-h-screen bg-background">
@@ -399,61 +477,162 @@ export default function EventDetailPage({
         </Link>
       </Header>
 
-      <main className="container mx-auto px-4 py-6 space-y-5">
-        {/* ── Zone A: Hero ── */}
-
-        {/* Event Header Bar */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
-            <div
-              className={cn(
-                "w-10 h-10 rounded-xl flex items-center justify-center border",
-                config.bgColor,
-                config.borderColor
-              )}
-            >
-              <TypeIcon className={cn("w-5 h-5", config.color)} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-semibold">{config.label}</h1>
-                {roadType?.classLabel && (
-                  <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
-                    {roadType.classLabel}
-                  </span>
+      {/* Main content */}
+      <main className="container mx-auto px-4 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {/* Left column - Video */}
+          <div className="space-y-4">
+            {/* Video player */}
+            <div ref={videoContainerRef} className={cn("overflow-hidden rounded-xl", isFullscreen && "fixed inset-0 z-50 bg-black flex items-center justify-center rounded-none")}>
+              <div className={cn("relative aspect-video bg-black", isFullscreen && "w-full h-full aspect-auto")}>
+                {isFullscreen && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute top-4 right-4 z-10 text-white/70 hover:text-white hover:bg-white/20"
+                    onClick={() => setIsFullscreen(false)}
+                  >
+                    <X className="w-5 h-5" />
+                  </Button>
                 )}
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    "text-xs",
-                    todStyle.bgColor,
-                    todStyle.color
-                  )}
-                >
-                  {sunInfo.timeOfDay}
-                </Badge>
+                {event.videoUrl ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      src={getProxyVideoUrl(event.videoUrl)}
+                      controls
+                      autoPlay
+                      className="w-full h-full"
+                      controlsList="nodownload"
+                    >
+                      Your browser does not support the video tag.
+                    </video>
+                    <DetectionOverlay
+                      videoRef={videoRef}
+                      isPlaying={isPlaying}
+                      currentTime={videoCurrentTime}
+                      timestamps={detectionTimestamps ?? []}
+                      detectionsByFrame={detectionsByFrame ?? new Map()}
+                      minConfidence={minConfidence}
+                    />
+                  </>
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-muted-foreground">
+                    No video available
+                  </div>
+                )}
+                {overlaySpeedData.length > 0 && (
+                  <SpeedOverlay
+                    speedData={overlaySpeedData}
+                    currentTime={videoCurrentTime}
+                    duration={videoDuration}
+                    unit={speedUnit}
+                    speedLimit={nearestSpeedLimit}
+                  />
+                )}
               </div>
-              <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground mt-0.5">
+              {event.videoUrl && (
+                <div className={cn(
+                  "flex justify-end gap-1 px-3 py-1.5 bg-black/80",
+                  isFullscreen && "absolute bottom-12 right-4 z-10 rounded-lg bg-black/60 backdrop-blur-sm"
+                )}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={() => setIsFullscreen((f) => !f)}
+                  >
+                    <Maximize2 className="w-4 h-4 mr-2" />
+                    Fullscreen
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={downloadVideo}
+                    disabled={isDownloading}
+                  >
+                    {isDownloading ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <Download className="w-4 h-4 mr-2" />
+                    )}
+                    {isDownloading ? "Downloading..." : "Download"}
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {/* Metadata bar */}
+            <div className="space-y-2 px-1">
+              {/* Badges row */}
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  className={cn(
+                    config.bgColor,
+                    config.color,
+                    config.borderColor,
+                    "border"
+                  )}
+                  variant="outline"
+                >
+                  {config.label}
+                </Badge>
+                {roadType?.classLabel && (
+                  <Badge variant="outline">
+                    {roadType.classLabel}
+                  </Badge>
+                )}
+                {(() => {
+                  const sunInfo = getTimeOfDay(
+                    event.timestamp,
+                    event.location.lat,
+                    event.location.lon
+                  );
+                  const style = getTimeOfDayStyle(sunInfo.timeOfDay);
+                  return (
+                    <Badge variant="outline" className={cn(style.bgColor, style.color)}>
+                      {sunInfo.timeOfDay}
+                    </Badge>
+                  );
+                })()}
+              </div>
+              {/* Details row */}
+              <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
                 <span>{formatDateTime(event.timestamp)}</span>
-                <span className="text-border">|</span>
+                <span>·</span>
                 <button
                   onClick={copyCoordinates}
                   className="font-mono hover:text-foreground transition-colors"
                   title="Copy coordinates"
                 >
                   {formatCoordinates(event.location.lat, event.location.lon)}
-                  {copied && (
-                    <Check className="w-3 h-3 text-green-500 inline ml-1" />
-                  )}
+                  {copied && <Check className="w-3 h-3 text-green-500 inline ml-1" />}
                 </button>
+                {maxSpeed !== null && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Max <span className="text-foreground font-mono">{formatSpeed(maxSpeed)}</span>
+                    </span>
+                  </>
+                )}
+                {acceleration !== undefined && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      Accel <span className="text-foreground font-mono">{acceleration.toFixed(2)} m/s²</span>
+                    </span>
+                  </>
+                )}
                 {countryName && (
                   <>
-                    <span className="text-border">|</span>
+                    <span>·</span>
                     <a
                       href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="hover:text-primary transition-colors"
+                      className="text-foreground hover:text-primary transition-colors"
                     >
                       {countryFlag(countryName)} {countryName}
                     </a>
@@ -461,7 +640,7 @@ export default function EventDetailPage({
                 )}
                 {!countryName && (
                   <>
-                    <span className="text-border">|</span>
+                    <span>·</span>
                     <a
                       href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
                       target="_blank"
@@ -474,208 +653,163 @@ export default function EventDetailPage({
                 )}
               </div>
             </div>
-          </div>
-          {event.videoUrl && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={downloadVideo}
-              disabled={isDownloading}
-              className="gap-2 shrink-0"
-            >
-              {isDownloading ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Download className="w-4 h-4" />
-              )}
-              {isDownloading ? "Downloading..." : "Download"}
-            </Button>
-          )}
-        </div>
 
-        {/* Video + Map */}
-        <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4">
-          {/* Video */}
-          <div ref={videoContainerRef} className="overflow-hidden rounded-xl border border-border/60">
-            <div className="relative aspect-video bg-black">
-              {event.videoUrl ? (
-                <video
-                  ref={videoRef}
-                  src={getProxyVideoUrl(event.videoUrl)}
-                  controls
-                  autoPlay
-                  className="w-full h-full"
-                  controlsList="nodownload"
-                >
-                  Your browser does not support the video tag.
-                </video>
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-muted-foreground">
-                  No video available
-                </div>
-              )}
-              {overlaySpeedData.length > 0 && (
-                <SpeedOverlay
-                  speedData={overlaySpeedData}
-                  currentTime={videoCurrentTime}
-                  duration={videoDuration}
-                  unit={speedUnit}
-                  speedLimit={nearestSpeedLimit}
-                />
-              )}
-              {vruData?.boxes && vruData.boxes.length > 0 && (
-                <DetectionOverlay
-                  boxes={vruData.boxes}
-                  currentTime={videoCurrentTime}
-                />
-              )}
-            </div>
-          </div>
-
-          {/* Map */}
-          <Card
-            className="overflow-hidden py-0 flex flex-col border-border/60"
-            style={
-              videoContainerHeight
-                ? { height: videoContainerHeight }
-                : undefined
-            }
-          >
-            <CardContent className="p-0 flex-1 min-h-0">
-              <div className="overflow-hidden h-full">
-                <EventMap
-                  location={event.location}
-                  path={event.gnssData}
-                  currentTime={videoCurrentTime}
-                  videoDuration={videoDuration}
-                  className={
-                    videoContainerHeight ? "h-full" : "aspect-video"
-                  }
-                  onSeek={seekTo}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Clip Summary */}
-        <div className="max-w-4xl">
-          <ClipSummary
-            videoId={id}
-            event={event}
-            countryName={countryName ?? null}
-            roadType={roadType?.classLabel ?? null}
-            timeOfDay={sunInfo.timeOfDay}
-            duration={videoDuration}
-            vruLabels={vruData?.state?.labelsApplied}
-            speedLimit={nearestSpeedLimit}
-            exceedsSpeedLimit={exceedsSpeedLimit}
-          />
-        </div>
-
-        {/* VRU Detection */}
-        <div className="max-w-4xl">
-          <VideoVruPanel
-            videoId={id}
-            videoUrl={event?.videoUrl ?? ""}
-            currentTime={videoCurrentTime}
-            duration={videoDuration}
-            onSeek={seekTo}
-          />
-        </div>
-
-        {/* Speed Profile */}
-        <Card className="max-w-4xl">
-          <CardHeader>
-            <CardTitle className="text-lg flex items-center gap-2">
-              Speed Profile
-              {nearestSpeedLimit && (
-                <Badge variant="secondary" className="text-xs">
-                  Limit: {nearestSpeedLimit.limit} {nearestSpeedLimit.unit}
-                </Badge>
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SpeedProfileChart
-              speedArray={speedData}
-              gnssData={event.gnssData}
-              imuData={event.imuData}
+            <VideoVruPanel
+              videoId={id}
               currentTime={videoCurrentTime}
               duration={videoDuration}
-              speedLimit={nearestSpeedLimit}
-              unit={speedUnit}
-              onSeek={seekTo}
+              isPlaying={isPlaying}
+              detectionTimestamps={detectionTimestamps}
+              detectionsByFrame={detectionsByFrame}
+              minConfidence={minConfidence}
+              onMinConfidenceChange={setMinConfidence}
+              activeDetectionRun={activeDetectionRun}
+              detectionRuns={detectionRuns}
+              onRunDetection={handleRunDetection}
+              selectedRunId={selectedRunId}
+              onSelectRun={setSelectedRunId}
+              onCancelRun={handleCancelRun}
+              logs={logs}
+              onSeek={(time) => {
+                if (videoRef.current) {
+                  videoRef.current.currentTime = time;
+                }
+              }}
             />
-          </CardContent>
-        </Card>
 
-        {/* ── Zone C: Raw Data ── */}
-        <PositioningSection eventId={id} gnssData={event.gnssData} />
+            {/* Speed Profile */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  Speed Profile
+                  {nearestSpeedLimit && (
+                    <Badge variant="outline" className="text-xs">
+                      Limit: {nearestSpeedLimit.limit} {nearestSpeedLimit.unit}
+                    </Badge>
+                  )}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <SpeedProfileChart
+                  speedArray={speedData}
+                  gnssData={event.gnssData}
+                  imuData={event.imuData}
+                  currentTime={videoCurrentTime}
+                  duration={videoDuration}
+                  speedLimit={nearestSpeedLimit}
+                  unit={speedUnit}
+                  onSeek={(time) => {
+                    if (videoRef.current) videoRef.current.currentTime = time;
+                  }}
+                />
+              </CardContent>
+            </Card>
 
-        {/* Metadata */}
-        {event.metadata && Object.keys(event.metadata).length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                Metadata
-                <Badge variant="secondary" className="text-xs font-mono">
-                  {event.id}
-                </Badge>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <MetadataTable metadata={event.metadata} />
-            </CardContent>
-          </Card>
-        )}
+            {/* Camera Info */}
+            {cameraIntrinsics?.bee && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">
+                    Bee Camera
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-muted-foreground">Horizontal FOV</p>
+                      <p className="font-medium font-mono">
+                        {BEE_HFOV}°
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Focal Length</p>
+                      <p className="font-medium font-mono">
+                        {cameraIntrinsics.bee.focal.toFixed(4)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Radial Distortion (k1)</p>
+                      <p className="font-medium font-mono">
+                        {cameraIntrinsics.bee.k1.toFixed(4)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Radial Distortion (k2)</p>
+                      <p className="font-medium font-mono">
+                        {cameraIntrinsics.bee.k2.toFixed(4)}
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
 
-        {/* Camera Info */}
-        {cameraIntrinsics?.bee && (
-          <Card className="border-border/60">
-            <CardHeader>
-              <CardTitle className="text-sm font-semibold">
-                Bee Camera
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Horizontal FOV
-                  </p>
-                  <p className="font-medium font-mono mt-0.5">
-                    {BEE_HFOV}°
-                  </p>
+          {/* Right column - Map and metadata */}
+          <div className="space-y-4">
+            {/* Map */}
+            <Card
+              className="overflow-hidden py-0 flex flex-col"
+              style={videoContainerHeight ? { height: videoContainerHeight } : undefined}
+            >
+              <CardContent className="p-0 flex-1 min-h-0">
+                <div className="rounded-lg shadow-inner overflow-hidden h-full">
+                  <EventMap
+                    location={event.location}
+                    path={event.gnssData}
+                    currentTime={videoCurrentTime}
+                    videoDuration={videoDuration}
+                    className={videoContainerHeight ? "h-full" : "aspect-video"}
+                    detectedActors={trackingResult ? undefined : (detectedActors ?? undefined)}
+                    actorTracks={trackingResult?.tracks}
+                    onSeek={(time) => {
+                      if (videoRef.current) videoRef.current.currentTime = time;
+                    }}
+                  />
                 </div>
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Focal Length
-                  </p>
-                  <p className="font-medium font-mono mt-0.5">
-                    {cameraIntrinsics.bee.focal.toFixed(4)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Distortion (k1)
-                  </p>
-                  <p className="font-medium font-mono mt-0.5">
-                    {cameraIntrinsics.bee.k1.toFixed(4)}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                    Distortion (k2)
-                  </p>
-                  <p className="font-medium font-mono mt-0.5">
-                    {cameraIntrinsics.bee.k2.toFixed(4)}
-                  </p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+              </CardContent>
+              {event.videoUrl && (
+                <ActorControls
+                  detectedActors={detectedActors}
+                  isDetecting={isDetecting}
+                  actorError={actorError}
+                  onDetect={handleDetectActors}
+                  onClearActors={clearActors}
+                  trackingResult={trackingResult}
+                  isTracking={isTracking}
+                  trackingProgress={trackingProgress}
+                  trackingError={trackingError}
+                  onTrack={handleTrackActors}
+                  onClearTracking={clearTracking}
+                />
+              )}
+            </Card>
+
+            {/* Scene Analysis */}
+            {event.videoUrl && (
+              <CollapsibleSection title="Scene Analysis">
+                <VideoAnalysisCard eventId={id} />
+              </CollapsibleSection>
+            )}
+
+            {/* Positioning section */}
+            <PositioningSection eventId={id} gnssData={event.gnssData} />
+
+            {/* Metadata table */}
+            {event.metadata && Object.keys(event.metadata).length > 0 && (
+              <CollapsibleSection title="Metadata">
+                <MetadataTable metadata={event.metadata} />
+              </CollapsibleSection>
+            )}
+
+            {/* Frame Labeling */}
+            {event.videoUrl && (
+              <CollapsibleSection title="Frame Labeling">
+                <FrameLabeling event={event} videoRef={videoRef} currentTime={videoCurrentTime} duration={videoDuration} />
+              </CollapsibleSection>
+            )}
+          </div>
+        </div>
       </main>
     </div>
   );
@@ -684,28 +818,24 @@ export default function EventDetailPage({
 function EventDetailSkeleton() {
   return (
     <div className="min-h-screen bg-background">
+      {/* Subtle loading indicator */}
       <div className="fixed top-0 left-0 right-0 z-[60] h-0.5 bg-muted overflow-hidden">
         <div className="h-full w-1/3 bg-primary/50 animate-[loading_1s_ease-in-out_infinite]" />
       </div>
       <Header>
         <Skeleton className="h-8 w-32" />
       </Header>
-      <main className="container mx-auto px-4 py-6 space-y-5">
-        {/* Header */}
-        <Skeleton className="h-14 w-full rounded-lg" />
-        {/* Video + Map */}
-        <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-4">
-          <Skeleton className="aspect-video rounded-xl" />
-          <Skeleton className="aspect-video rounded-xl" />
+      <main className="container mx-auto px-4 py-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="space-y-4">
+            <Skeleton className="aspect-video rounded-xl" />
+            <Skeleton className="h-48 rounded-lg" />
+          </div>
+          <div className="space-y-4">
+            <Skeleton className="h-[400px] rounded-lg" />
+            <Skeleton className="h-32 rounded-lg" />
+          </div>
         </div>
-        {/* Stat cards */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <Skeleton key={i} className="h-[72px] rounded-lg" />
-          ))}
-        </div>
-        {/* Tabs */}
-        <Skeleton className="h-[320px] rounded-lg" />
       </main>
     </div>
   );
