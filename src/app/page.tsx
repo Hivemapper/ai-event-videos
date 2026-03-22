@@ -29,17 +29,11 @@ const EventsMap = dynamic(
   }
 );
 import { Coordinates } from "@/components/events/filter-bar";
-import { AnalysisFiltersBar } from "@/components/events/analysis-filters";
 import { useEvents } from "@/hooks/use-events";
 import { useEventIndex } from "@/hooks/use-event-index";
 import { AIEvent, AIEventType } from "@/types/events";
 import { TimeOfDay } from "@/lib/sun";
 import { getApiKey } from "@/lib/api";
-import {
-  getAllCachedAnalyses,
-  matchesAnalysisFilters,
-  AnalysisFilters,
-} from "@/lib/analysis-store";
 
 // Default to last 7 days
 function getDefaultDates() {
@@ -94,14 +88,6 @@ function GalleryView() {
     (searchParams.get("view") as "list" | "map") || "list"
   );
 
-  // Batch analysis state
-  const [analysisFilters, setAnalysisFilters] = useState<AnalysisFilters>({});
-  const [cachedAnalyses, setCachedAnalyses] = useState<Record<string, unknown>>({});
-
-  // Load cached analyses on mount
-  useEffect(() => {
-    setCachedAnalyses(getAllCachedAnalyses());
-  }, []);
 
   // Background event index for country + road type discovery
   const { index: eventIndex, countries: indexCountries, roadTypes: indexRoadTypes, progress: indexProgress } = useEventIndex(startDate, endDate);
@@ -175,19 +161,6 @@ function GalleryView() {
     }
   }, [indexCountries, countriesInitialized, selectedCountries.length, prevIndexCountriesRef]);
 
-  // Apply analysis filters client-side
-  const sceneFilteredEvents = useMemo(() => {
-    const hasActiveFilters = Object.values(analysisFilters).some(
-      (v) => v !== undefined && v !== false && (!Array.isArray(v) || v.length > 0)
-    );
-    if (!hasActiveFilters) return filteredEvents;
-
-    return filteredEvents.filter((event) => {
-      const analysis = cachedAnalyses[event.id];
-      if (!analysis) return false;
-      return matchesAnalysisFilters(analysis as import("@/types/analysis").VideoAnalysis, analysisFilters);
-    });
-  }, [filteredEvents, analysisFilters, cachedAnalyses]);
 
   // Auto-load all events when map view is active
   useEffect(() => {
@@ -195,11 +168,6 @@ function GalleryView() {
       loadMore();
     }
   }, [view, hasMore, isLoading, loadMore]);
-
-  const analyzedCount = useMemo(
-    () => filteredEvents.filter((e) => e.id in cachedAnalyses).length,
-    [filteredEvents, cachedAnalyses]
-  );
 
 
   const handleEventClick = useCallback(
@@ -273,17 +241,9 @@ function GalleryView() {
         {/* Results count */}
         {!error && !isLoading && filteredEvents.length > 0 && (
           <p className="text-sm text-muted-foreground">
-            Showing {sceneFilteredEvents.length.toLocaleString()} of {totalCount.toLocaleString()} events
+            Showing {filteredEvents.length.toLocaleString()} of {totalCount.toLocaleString()} events
           </p>
         )}
-
-        {/* Scene analysis filters */}
-        <AnalysisFiltersBar
-          filters={analysisFilters}
-          onChange={setAnalysisFilters}
-          analyzedCount={analyzedCount}
-          totalCount={filteredEvents.length}
-        />
 
         {/* New events link */}
         <NewEventsBanner count={newEventsCount} onClick={showNewEvents} />
@@ -291,7 +251,7 @@ function GalleryView() {
         {/* Event grid or map */}
         {view === "list" ? (
           <EventGrid
-            events={sceneFilteredEvents}
+            events={filteredEvents}
             isLoading={isLoading}
             hasMore={hasMore}
             onLoadMore={loadMore}
@@ -300,13 +260,13 @@ function GalleryView() {
         ) : (
           <>
             <EventsMap
-              events={sceneFilteredEvents}
+              events={filteredEvents}
               onEventClick={handleEventClick}
               className="h-[calc(100vh-200px)] rounded-xl"
             />
             {hasMore && (
               <p className="text-sm text-muted-foreground text-center py-2">
-                Loading all events for map... ({sceneFilteredEvents.length.toLocaleString()} loaded)
+                Loading all events for map... ({filteredEvents.length.toLocaleString()} loaded)
               </p>
             )}
           </>

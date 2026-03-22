@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
+import { ArrowUpDown, ArrowUp, ArrowDown, Copy, Check } from "lucide-react";
 
 interface SpeedDataPoint {
   AVG_SPEED_MS: number;
@@ -23,10 +23,12 @@ type SortColumn = "speed" | "timestamp" | null;
 
 interface MetadataTableProps {
   metadata: Record<string, unknown>;
+  eventId?: string;
 }
 
-export function MetadataTable({ metadata }: MetadataTableProps) {
+export function MetadataTable({ metadata, eventId }: MetadataTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>(null);
+  const [copiedId, setCopiedId] = useState(false);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
 
   const speedData = metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
@@ -88,6 +90,29 @@ export function MetadataTable({ metadata }: MetadataTableProps) {
               </tr>
             </thead>
             <tbody>
+              {eventId && (
+                <tr className="border-t">
+                  <td className="px-4 py-2 font-mono text-muted-foreground">
+                    EVENT_ID
+                  </td>
+                  <td className="px-4 py-2">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-mono text-xs">{eventId}</span>
+                      <button
+                        onClick={async () => {
+                          await navigator.clipboard.writeText(eventId);
+                          setCopiedId(true);
+                          setTimeout(() => setCopiedId(false), 2000);
+                        }}
+                        className="inline-flex items-center justify-center h-5 w-5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
+                        title="Copy Event ID"
+                      >
+                        {copiedId ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
+                      </button>
+                    </span>
+                  </td>
+                </tr>
+              )}
               {otherFields.map(([key, value]) => (
                 <tr key={key} className="border-t">
                   <td className="px-4 py-2 font-mono text-muted-foreground">

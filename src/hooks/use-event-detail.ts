@@ -40,12 +40,16 @@ async function fetchCountryName([, lon, lat]: [string, number, number]): Promise
   if (!token) return null;
 
   const response = await fetch(
-    `https://api.mapbox.com/geocoding/v5/mapbox.places/${lon},${lat}.json?types=country&access_token=${token}`
+    `https://api.mapbox.com/geocoding/v5/mapbox.places/${lon},${lat}.json?types=place,country&access_token=${token}`
   );
   if (!response.ok) return null;
 
   const data = await response.json();
-  return data.features?.[0]?.text ?? null;
+  const features = data.features ?? [];
+  const city = features.find((f: { place_type: string[] }) => f.place_type?.includes("place"))?.text;
+  const country = features.find((f: { place_type: string[] }) => f.place_type?.includes("country"))?.text;
+  if (city && country) return `${city}, ${country}`;
+  return country ?? city ?? null;
 }
 
 export function useCountryName(lat: number | null, lon: number | null) {

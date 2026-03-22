@@ -4,6 +4,7 @@ import { getMapboxToken } from "@/lib/api";
 export interface RoadTypeData {
   class: string | null;
   classLabel: string | null;
+  name: string | null;
   structure: string | null;
   toll: boolean;
 }

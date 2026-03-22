@@ -16,8 +16,19 @@ export interface LabeledFeature {
   unit?: string;
 }
 
-export function formatDateTime(timestamp: string): string {
+/**
+ * Format a UTC timestamp as a local date/time string at the event location.
+ * Uses longitude to estimate the UTC offset (~15° per hour).
+ */
+export function formatDateTime(timestamp: string, lon?: number): string {
   const date = new Date(timestamp);
+  if (lon !== undefined) {
+    // Estimate UTC offset from longitude: 15° = 1 hour
+    const offsetHours = Math.round(lon / 15);
+    const local = new Date(date.getTime() + offsetHours * 60 * 60 * 1000);
+    const sign = offsetHours >= 0 ? "+" : "";
+    return `${local.toLocaleString("en-US", { timeZone: "UTC" })} (UTC${sign}${offsetHours})`;
+  }
   return date.toLocaleString();
 }
 
