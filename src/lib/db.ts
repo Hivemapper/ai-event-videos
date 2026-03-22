@@ -98,6 +98,26 @@ const SCHEMA_SQL = `
     FOREIGN KEY (run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS video_detection_boxes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    x1 REAL NOT NULL,
+    y1 REAL NOT NULL,
+    x2 REAL NOT NULL,
+    y2 REAL NOT NULL,
+    pipeline_version TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS clip_summaries (
+    video_id TEXT PRIMARY KEY,
+    summary TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS frame_detections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id TEXT NOT NULL,

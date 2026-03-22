@@ -28,6 +28,7 @@ export const pipelineRunCreateSchema = z.object({
   day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "day must be YYYY-MM-DD"),
   batchSize: z.number().int().positive().max(500),
   beeMapsApiKey: z.string().min(1, "Bee Maps API key is required"),
+  modelName: z.string().min(1).optional(),
 });
 
 export const visionScanSchema = z.object({

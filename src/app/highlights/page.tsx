@@ -1087,16 +1087,22 @@ function SectionTable({
 
 type TabId = "trending" | "braking" | "speed" | "gforce" | "acceleration" | "swerving" | "international" | "impaired";
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: "trending", label: "Trending" },
-  { id: "braking", label: "Extreme Braking" },
-  { id: "speed", label: "High Speed" },
-  { id: "gforce", label: "G-Force" },
-  { id: "acceleration", label: "Acceleration" },
-  { id: "swerving", label: "Swerving" },
-  { id: "international", label: "International" },
-  { id: "impaired", label: "Impaired" },
+export const TABS: { id: TabId; label: string; slug: string }[] = [
+  { id: "trending", slug: "trending", label: "Trending" },
+  { id: "braking", slug: "extreme-braking", label: "Extreme Braking" },
+  { id: "speed", slug: "high-speed", label: "High Speed" },
+  { id: "gforce", slug: "g-force", label: "G-Force" },
+  { id: "acceleration", slug: "acceleration", label: "Acceleration" },
+  { id: "swerving", slug: "swerving", label: "Swerving" },
+  { id: "international", slug: "international", label: "International" },
+  { id: "impaired", slug: "impaired", label: "Impaired" },
 ];
+
+export const SLUG_TO_TAB: Record<string, TabId> = Object.fromEntries(
+  TABS.map((t) => [t.slug, t.id])
+) as Record<string, TabId>;
+
+export const DEFAULT_SLUG = "extreme-braking";
 
 /** Maps tab id to the index in highlightSections (international is dynamic, not static) */
 const TAB_TO_SECTION_INDEX: Partial<Record<TabId, number>> = {
@@ -1107,10 +1113,10 @@ const TAB_TO_SECTION_INDEX: Partial<Record<TabId, number>> = {
   swerving: 4,
 };
 
-function HighlightsContent() {
+export function HighlightsContent({ initialTab }: { initialTab?: TabId }) {
   const [viewMode, setViewMode] = useState<"list" | "video">("list");
   const [unit, setUnit] = useState<SpeedUnit>("mph");
-  const [activeTab, setActiveTab] = useState<TabId>("braking");
+  const activeTab = initialTab || "braking";
 
   useEffect(() => {
     setUnit(getSpeedUnit());
@@ -1154,9 +1160,9 @@ function HighlightsContent() {
         {/* Horizontal tabs */}
         <div className="flex gap-1 overflow-x-auto pb-1 -mb-1 scrollbar-none">
           {TABS.map((tab) => (
-            <button
+            <Link
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              href={`/highlights/${tab.slug}`}
               className={cn(
                 "px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors",
                 activeTab === tab.id
@@ -1165,7 +1171,7 @@ function HighlightsContent() {
               )}
             >
               {tab.label}
-            </button>
+            </Link>
           ))}
         </div>
 
@@ -1195,7 +1201,7 @@ function HighlightsContent() {
   );
 }
 
-function HighlightsSkeleton() {
+export function HighlightsSkeleton() {
   return (
     <div className="min-h-screen bg-background">
       <div className="sticky top-0 z-50 w-full border-b bg-background/95 h-14" />
@@ -1213,9 +1219,10 @@ function HighlightsSkeleton() {
 }
 
 export default function HighlightsPage() {
+  // Redirect to the default highlights tab
   return (
     <Suspense fallback={<HighlightsSkeleton />}>
-      <HighlightsContent />
+      <HighlightsContent initialTab="braking" />
     </Suspense>
   );
 }

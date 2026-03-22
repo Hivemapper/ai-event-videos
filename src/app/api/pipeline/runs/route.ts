@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
     day: parsed.data.day,
     batchSize: parsed.data.batchSize,
     beeMapsKey: parsed.data.beeMapsApiKey,
+    modelName: parsed.data.modelName,
   });
 
   try {

@@ -98,6 +98,19 @@ export interface PipelineRunRecord {
   createdAt: string;
 }
 
+export interface DetectionBox {
+  id: number;
+  videoId: string;
+  timestampMs: number;
+  label: string;
+  confidence: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  pipelineVersion: string;
+}
+
 export interface PipelineVideoRow {
   videoId: string;
   timestamp: string;

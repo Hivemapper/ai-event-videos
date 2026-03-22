@@ -1,5 +1,6 @@
 import useSWR from "swr";
 import {
+  DetectionBox,
   PipelineRunRecord,
   PipelineVideoRow,
   VideoDetectionSegment,
@@ -11,6 +12,7 @@ const fetcher = (url: string) => fetch(url).then((res) => res.json());
 export interface VideoVruResponse {
   state: VideoPipelineState | null;
   segments: VideoDetectionSegment[];
+  boxes: DetectionBox[];
 }
 
 export function useVideoVru(videoId: string) {
