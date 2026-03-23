@@ -261,11 +261,10 @@ export default function EventDetailPage({
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
   const [minConfidence, setMinConfidence] = useState(0.4);
 
-  // Auto-select the latest completed run if none is selected
+  // Auto-select the latest completed run (switch when a new one finishes)
   useEffect(() => {
-    if (selectedRunId) return;
     const latestCompleted = detectionRuns?.find((r) => r.status === "completed");
-    if (latestCompleted) {
+    if (latestCompleted && latestCompleted.id !== selectedRunId) {
       setSelectedRunId(latestCompleted.id);
     }
   }, [detectionRuns, selectedRunId]);
@@ -591,21 +590,6 @@ export default function EventDetailPage({
                         {Math.round(sceneAttributes.intersection.confidence * 100)}%
                       </span>
                     )}
-                  </Badge>
-                )}
-                {sceneAttributes?.near_miss && sceneAttributes.near_miss.confidence !== null && sceneAttributes.near_miss.confidence > 0.1 && (
-                  <Badge
-                    variant="outline"
-                    className={cn(
-                      sceneAttributes.near_miss.confidence >= 0.5
-                        ? "bg-red-50 text-red-700 border-red-200"
-                        : "bg-orange-50 text-orange-700 border-orange-200"
-                    )}
-                  >
-                    Near-Miss
-                    <span className="ml-1 opacity-60">
-                      {Math.round(sceneAttributes.near_miss.confidence * 100)}%
-                    </span>
                   </Badge>
                 )}
               </div>
