@@ -60,21 +60,24 @@ function formatTimeContext(timeOfDay: string, timestamp?: string, lon?: number):
   return timeOfDayLabel(timeOfDay) || "";
 }
 
-/** Compute braking duration from speed array timestamps */
-function computeBrakingDurationSec(speedData: SpeedDataPoint[]): number | null {
+/** Find the braking window: speed at start of clip → lowest speed reached */
+function findBrakingWindow(speedData: SpeedDataPoint[]): {
+  fromMph: number; toMph: number; durationSec: number;
+} | null {
   if (speedData.length < 2) return null;
-  // Find the peak speed point and the min speed point after it
-  let peakIdx = 0;
+  const startSpeed = speedData[0].AVG_SPEED_MS;
+  let minIdx = 0;
   for (let i = 1; i < speedData.length; i++) {
-    if (speedData[i].AVG_SPEED_MS > speedData[peakIdx].AVG_SPEED_MS) peakIdx = i;
-  }
-  let minIdx = peakIdx;
-  for (let i = peakIdx + 1; i < speedData.length; i++) {
     if (speedData[i].AVG_SPEED_MS < speedData[minIdx].AVG_SPEED_MS) minIdx = i;
   }
-  if (minIdx <= peakIdx) return null;
-  const deltaMs = speedData[minIdx].TIMESTAMP - speedData[peakIdx].TIMESTAMP;
-  return deltaMs > 0 ? deltaMs / 1000 : null;
+  if (minIdx === 0) return null;
+  const deltaMs = speedData[minIdx].TIMESTAMP - speedData[0].TIMESTAMP;
+  if (deltaMs <= 0) return null;
+  return {
+    fromMph: speedMsToMph(startSpeed),
+    toMph: speedMsToMph(speedData[minIdx].AVG_SPEED_MS),
+    durationSec: deltaMs / 1000,
+  };
 }
 
 const WEATHER_PHRASES: Record<string, string> = {
@@ -144,10 +147,10 @@ function generateDefaultSummary({
 
   switch (event.type) {
     case "HARSH_BRAKING": {
-      const brakingDur = speedData ? computeBrakingDurationSec(speedData) : null;
-      const durPhrase = brakingDur !== null ? ` over ${brakingDur.toFixed(1)}s` : "";
-      const speedPhrase = (maxMph !== null && minMph !== null)
-        ? ` causing speed to drop from ${maxMph} to ${minMph} mph${durPhrase}`
+      const braking = speedData ? findBrakingWindow(speedData) : null;
+      const durPhrase = braking ? ` over ${braking.durationSec.toFixed(1)}s` : "";
+      const speedPhrase = braking
+        ? ` causing speed to drop from ${braking.fromMph} to ${braking.toMph} mph${durPhrase}`
         : "";
 
       parts.push(

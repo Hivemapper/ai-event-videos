@@ -736,6 +736,24 @@ export async function listDetectionRuns(
   return (result.rows as unknown as DbDetectionRunRow[]).map(mapDetectionRun);
 }
 
+export async function listCompletedDetectionRuns(
+  limit = 50,
+  offset = 0
+): Promise<{ runs: DetectionRun[]; total: number }> {
+  const db = await getDb();
+  const countResult = await db.query(
+    "SELECT COUNT(*) as count FROM detection_runs WHERE status = 'completed'"
+  );
+  const total = (countResult.rows[0] as unknown as { count: number }).count;
+  const result = await db.query(
+    `SELECT * FROM detection_runs WHERE status = 'completed'
+     ORDER BY completed_at DESC LIMIT ? OFFSET ?`,
+    [limit, offset]
+  );
+  const runs = (result.rows as unknown as DbDetectionRunRow[]).map(mapDetectionRun);
+  return { runs, total };
+}
+
 export async function getActiveDetectionRun(): Promise<DetectionRun | null> {
   const db = await getDb();
   const result = await db.query(

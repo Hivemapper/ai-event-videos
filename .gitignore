@@ -65,3 +65,5 @@ next-env.d.ts
 weights/
 api-keys.txt
 .env.local
+.venv
+data/
