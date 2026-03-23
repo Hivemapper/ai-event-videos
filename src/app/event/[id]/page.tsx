@@ -259,8 +259,17 @@ export default function EventDetailPage({
 
   // Detection timestamps for frame stepping and overlay
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>(undefined);
-  const [minConfidence, setMinConfidence] = useState(0.1);
-  const { timestamps: detectionTimestamps, detectionsByFrame, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedRunId);
+  const [minConfidence, setMinConfidence] = useState(0.4);
+
+  // Auto-select the latest completed run if none is selected
+  useEffect(() => {
+    if (selectedRunId) return;
+    const latestCompleted = detectionRuns?.find((r) => r.status === "completed");
+    if (latestCompleted) {
+      setSelectedRunId(latestCompleted.id);
+    }
+  }, [detectionRuns, selectedRunId]);
+  const { timestamps: detectionTimestamps, detectionsByFrame, segments: detectionSegments, sceneAttributes, timeline, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedRunId);
 
   // Summarize detections for clip summary
   const detectionSummary = useMemo(() => {
@@ -566,6 +575,39 @@ export default function EventDetailPage({
                     </Badge>
                   );
                 })()}
+                {sceneAttributes?.weather && (
+                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
+                    {sceneAttributes.weather.value}
+                    {sceneAttributes.weather.confidence !== null && (
+                      <span className="ml-1 opacity-60">{Math.round(sceneAttributes.weather.confidence * 100)}%</span>
+                    )}
+                  </Badge>
+                )}
+                {sceneAttributes?.intersection && (
+                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
+                    Intersection
+                    {sceneAttributes.intersection.confidence !== null && (
+                      <span className="ml-1 opacity-60">
+                        {Math.round(sceneAttributes.intersection.confidence * 100)}%
+                      </span>
+                    )}
+                  </Badge>
+                )}
+                {sceneAttributes?.near_miss && sceneAttributes.near_miss.confidence !== null && sceneAttributes.near_miss.confidence > 0.1 && (
+                  <Badge
+                    variant="outline"
+                    className={cn(
+                      sceneAttributes.near_miss.confidence >= 0.5
+                        ? "bg-red-50 text-red-700 border-red-200"
+                        : "bg-orange-50 text-orange-700 border-orange-200"
+                    )}
+                  >
+                    Near-Miss
+                    <span className="ml-1 opacity-60">
+                      {Math.round(sceneAttributes.near_miss.confidence * 100)}%
+                    </span>
+                  </Badge>
+                )}
               </div>
               {/* Details row */}
               <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
@@ -635,6 +677,8 @@ export default function EventDetailPage({
               detections={detectionSummary}
               speedLimit={nearestSpeedLimit}
               exceedsSpeedLimit={exceedsSpeedLimit}
+              weather={sceneAttributes?.weather?.value ?? null}
+              timeline={timeline}
             />
 
             <VideoVruPanel
@@ -652,6 +696,8 @@ export default function EventDetailPage({
               selectedRunId={selectedRunId}
               onSelectRun={setSelectedRunId}
               onCancelRun={handleCancelRun}
+              segments={detectionSegments}
+              sceneAttributes={sceneAttributes}
               logs={logs}
               onSeek={(time) => {
                 if (videoRef.current) {

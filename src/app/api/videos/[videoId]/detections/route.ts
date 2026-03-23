@@ -3,6 +3,9 @@ import {
   getFrameDetections,
   getFrameDetectionModels,
   getFrameDetectionTimestamps,
+  getDetectionSegmentsByRunId,
+  getSceneAttributesByRunId,
+  getTimelineByRunId,
 } from "@/lib/pipeline-store";
 
 export async function GET(
@@ -23,11 +26,14 @@ export async function GET(
   const modelName = searchParams.get("model") ?? undefined;
   const runId = searchParams.get("runId") ?? undefined;
 
-  const [detections, timestamps, models] = await Promise.all([
+  const [detections, timestamps, models, segments, sceneAttributes, timeline] = await Promise.all([
     getFrameDetections(videoId, frameMs, modelName, runId),
     getFrameDetectionTimestamps(videoId, modelName, runId),
     getFrameDetectionModels(videoId),
+    runId ? getDetectionSegmentsByRunId(videoId, runId) : Promise.resolve([]),
+    runId ? getSceneAttributesByRunId(videoId, runId) : Promise.resolve({}),
+    runId ? getTimelineByRunId(videoId, runId) : Promise.resolve(null),
   ]);
 
-  return NextResponse.json({ detections, timestamps, models });
+  return NextResponse.json({ detections, timestamps, models, segments, sceneAttributes, timeline });
 }

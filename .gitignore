@@ -64,3 +64,4 @@ scripts/__pycache__/
 next-env.d.ts
 weights/
 api-keys.txt
+.env.local

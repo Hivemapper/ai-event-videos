@@ -28,7 +28,7 @@ import {
   VRU_LABEL_COLOR_MAP,
 } from "@/lib/pipeline-config";
 import { cn } from "@/lib/utils";
-import type { DetectionRun, FrameDetection } from "@/types/pipeline";
+import type { DetectionRun, FrameDetection, VideoDetectionSegment } from "@/types/pipeline";
 
 interface VideoVruPanelProps {
   videoId: string;
@@ -45,6 +45,8 @@ interface VideoVruPanelProps {
   selectedRunId?: string | null;
   onSelectRun?: (runId: string) => void;
   onCancelRun?: (runId: string) => void;
+  segments?: VideoDetectionSegment[];
+  sceneAttributes?: Record<string, { value: string; confidence: number | null }>;
   logs?: string;
   onSeek: (time: number) => void;
 }
@@ -97,6 +99,8 @@ export function VideoVruPanel({
   selectedRunId,
   onSelectRun,
   onCancelRun,
+  segments,
+  sceneAttributes,
   logs,
   onSeek,
 }: VideoVruPanelProps) {
@@ -449,6 +453,69 @@ export function VideoVruPanel({
                   ))}
                 </div>
               )}
+              {segments && segments.length > 0 && (() => {
+                const threshold = minConfidence ?? 0;
+                const filtered = segments.filter(s => s.maxConfidence >= threshold);
+                const byLabel = new Map<string, VideoDetectionSegment[]>();
+                for (const seg of filtered) {
+                  const arr = byLabel.get(seg.label) ?? [];
+                  arr.push(seg);
+                  byLabel.set(seg.label, arr);
+                }
+                const fmtTime = (ms: number) => {
+                  const s = Math.floor(ms / 1000);
+                  const m = Math.floor(s / 60);
+                  const sec = s % 60;
+                  return m > 0 ? `${m}:${sec.toString().padStart(2, "0")}` : `${sec}s`;
+                };
+                if (filtered.length === 0) return null;
+                return (
+                  <div className="space-y-1.5 mt-2">
+                    <p className="text-xs font-medium text-muted-foreground">Time segments</p>
+                    {[...byLabel.entries()].map(([label, segs]) => (
+                      <div key={label} className="flex items-center gap-1.5 flex-wrap">
+                        <Badge
+                          className="text-xs text-white border-transparent shrink-0"
+                          style={{ backgroundColor: VRU_LABEL_COLOR_MAP[label] ?? "#334155" }}
+                        >
+                          {label}
+                        </Badge>
+                        {segs.map((seg) => (
+                          <button
+                            key={`${seg.startMs}-${seg.endMs}`}
+                            type="button"
+                            className="text-xs px-1.5 py-0.5 rounded bg-muted hover:bg-accent transition-colors tabular-nums"
+                            onClick={() => onSeek(seg.startMs / 1000)}
+                            title={`Confidence: ${Math.round(seg.maxConfidence * 100)}%`}
+                          >
+                            {fmtTime(seg.startMs)}-{fmtTime(seg.endMs)}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {selectedRunCompleted && sceneAttributes && Object.keys(sceneAttributes).length > 0 && (
+            <div className="space-y-1.5 rounded-md border bg-muted/30 px-3 py-2.5">
+              <p className="text-xs font-medium text-muted-foreground">Scene</p>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(sceneAttributes).map(([attr, data]) => (
+                  <span
+                    key={attr}
+                    className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground"
+                    title={`${attr.replace(/_/g, " ")}: ${data.confidence !== null ? `${Math.round(data.confidence * 100)}% confidence` : "no confidence"}`}
+                  >
+                    <span className="opacity-60">{attr.replace(/_/g, " ")}:</span>{" "}{data.value}
+                    {data.confidence !== null && (
+                      <span className="ml-1 opacity-60">{Math.round(data.confidence * 100)}%</span>
+                    )}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
 

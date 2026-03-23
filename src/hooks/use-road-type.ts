@@ -20,7 +20,7 @@ interface UseRoadTypeResult {
   error: string | null;
 }
 
-const SAMPLE_COUNT = 5;
+const SAMPLE_COUNT = 20;
 
 /** Pick up to SAMPLE_COUNT evenly-spaced points from the path. */
 function samplePath(path: PathPoint[]): [number, number][] {
@@ -54,6 +54,8 @@ export function useRoadType(
       return;
     }
 
+    let cancelled = false;
+
     const fetchRoadType = async () => {
       setIsLoading(true);
       setError(null);
@@ -73,6 +75,7 @@ export function useRoadType(
         }
 
         const response = await fetch(url);
+        if (cancelled) return;
 
         if (!response.ok) {
           const data = await response.json();
@@ -80,16 +83,26 @@ export function useRoadType(
         }
 
         const data: RoadTypeData = await response.json();
-        setRoadType(data);
+        if (!cancelled) {
+          setRoadType(data);
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch road type");
-        setRoadType(null);
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Failed to fetch road type");
+          setRoadType(null);
+        }
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchRoadType();
+
+    return () => {
+      cancelled = true;
+    };
   }, [lat, lon, pathKey]);
 
   return { roadType, isLoading, error };

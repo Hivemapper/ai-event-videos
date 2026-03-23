@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import useSWR from "swr";
-import type { FrameDetection } from "@/types/pipeline";
+import type { FrameDetection, VideoDetectionSegment } from "@/types/pipeline";
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
@@ -8,6 +8,9 @@ export interface DetectionTimestampsResponse {
   detections: FrameDetection[];
   timestamps: number[];
   models: string[];
+  segments: VideoDetectionSegment[];
+  sceneAttributes: Record<string, { value: string; confidence: number | null }>;
+  timeline: Array<{ startSec: number; endSec: number; event: string; details: string }> | null;
 }
 
 export function useDetectionTimestamps(videoId: string | null, runId?: string) {
@@ -37,6 +40,9 @@ export function useDetectionTimestamps(videoId: string | null, runId?: string) {
   return {
     timestamps: data?.timestamps ?? [],
     models: data?.models ?? [],
+    segments: data?.segments ?? [],
+    sceneAttributes: data?.sceneAttributes ?? {},
+    timeline: data?.timeline ?? null,
     detectionsByFrame,
     isLoading,
     error,
