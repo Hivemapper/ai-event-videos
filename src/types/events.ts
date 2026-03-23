@@ -36,6 +36,26 @@ export interface ImuDataPoint {
   };
 }
 
+export interface EventEnrichment {
+  intersection: { score: number; connectors?: number; features?: string[] } | null;
+  nearMiss: { score: number; label?: string; distanceM?: number; approaching?: boolean } | null;
+  vruDetections: Array<{
+    label: string;
+    segments: Array<{ startMs: number; endMs: number; maxConfidence: number }>;
+  }>;
+  weather: { value: string; confidence: number } | null;
+  road: {
+    type: string | null;
+    label: string | null;
+    name: string | null;
+    speedLimit: { value: number; unit: string } | null;
+  };
+  summary: string | null;
+  timeOfDay: string | null;
+  location: { city: string | null; country: string | null } | null;
+  timeline: Array<{ startSec: number; endSec: number; event: string; details: string }> | null;
+}
+
 export interface AIEvent {
   id: string;
   type: AIEventType;
@@ -45,6 +65,7 @@ export interface AIEvent {
   videoUrl: string;
   gnssData?: GnssDataPoint[];
   imuData?: ImuDataPoint[];
+  enrichment?: EventEnrichment;
 }
 
 export interface AIEventsResponse {

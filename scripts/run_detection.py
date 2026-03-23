@@ -52,6 +52,155 @@ PIPELINE_VERSION = "vru-yolo-v2"
 FRAMES_PER_VIDEO = 75
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
+BEEMAPS_MAP_DATA_URL = "https://beemaps.com/api/developer/map-data"
+
+# ---------------------------------------------------------------------------
+# Intersection detection — Overture connectors + BeeMaps stop signs
+# ---------------------------------------------------------------------------
+
+CONNECTOR_RADIUS_DEG = 0.0003   # ~30m at mid-latitudes
+MIN_CONNECTORS = 3
+OVERTURE_RELEASE = "2026-03-18.0"
+OVERTURE_WEIGHT = 0.35
+VISUAL_WEIGHT = 0.45
+BEEMAPS_WEIGHT = 0.20
+STOP_SIGN_RADIUS_M = 50
+
+
+def _query_overture_connectors(lat: float, lon: float) -> int:
+    """Query Overture Maps for road connector count near a GPS point.
+
+    Uses DuckDB Python package to query S3 parquet data.
+    Returns connector count (more connectors = more likely an intersection).
+    """
+    try:
+        import duckdb
+    except ImportError:
+        print("  [!] duckdb not installed, skipping Overture connector check")
+        return 0
+
+    r = CONNECTOR_RADIUS_DEG
+    min_lat, max_lat = lat - 0.001, lat + 0.001
+    min_lon, max_lon = lon - 0.001, lon + 0.001
+
+    sql = f"""
+    INSTALL spatial; LOAD spatial;
+    INSTALL httpfs; LOAD httpfs;
+    SET s3_region='us-west-2';
+
+    SELECT COUNT(*) as connectors
+    FROM read_parquet(
+        's3://overturemaps-us-west-2/release/{OVERTURE_RELEASE}/theme=transportation/type=connector/*',
+        filename=true, hive_partitioning=1
+    )
+    WHERE bbox.xmin > {min_lon} AND bbox.xmax < {max_lon}
+      AND bbox.ymin > {min_lat} AND bbox.ymax < {max_lat}
+      AND ST_X(geometry) BETWEEN {lon - r} AND {lon + r}
+      AND ST_Y(geometry) BETWEEN {lat - r} AND {lat + r};
+    """
+
+    try:
+        conn = duckdb.connect()
+        result = conn.execute(sql).fetchone()
+        conn.close()
+        count = result[0] if result else 0
+        return int(count)
+    except Exception as exc:
+        print(f"  [!] Overture query failed: {exc}")
+        return 0
+
+
+def _query_beemaps_stop_signs(lat: float, lon: float, api_key: str) -> list[dict]:
+    """Query BeeMaps map-data API for stop signs near a GPS point.
+
+    Returns list of stop sign features within STOP_SIGN_RADIUS_M.
+    """
+    import math
+
+    # Build circle polygon (~32 points)
+    radius_deg = STOP_SIGN_RADIUS_M / 111320  # rough m-to-deg
+    coords = []
+    for i in range(32):
+        angle = 2 * math.pi * i / 32
+        coords.append([
+            lon + radius_deg * math.cos(angle),
+            lat + radius_deg * math.sin(angle),
+        ])
+    coords.append(coords[0])  # close ring
+
+    try:
+        resp = requests.post(
+            BEEMAPS_MAP_DATA_URL,
+            headers={"Content-Type": "application/json", "Authorization": api_key},
+            json={
+                "type": ["mapFeatures"],
+                "geometry": {"type": "Polygon", "coordinates": [coords]},
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        features = data.get("mapFeatureResults", {}).get("data", [])
+        stop_signs = [f for f in features if f.get("class") == "stop-sign"]
+        return stop_signs
+    except Exception as exc:
+        print(f"  [!] BeeMaps stop sign query failed: {exc}")
+        return []
+
+
+def compute_intersection_score(
+    connector_count: int,
+    detections: list[dict],
+    stop_signs: list[dict],
+) -> tuple[float, dict]:
+    """Compute intersection confidence score from three signals.
+
+    Returns (score, details_dict) where score is 0.0-1.0.
+    """
+    # Overture score
+    c = connector_count
+    if c >= 5:
+        overture_score = 1.0
+    elif c >= MIN_CONNECTORS:
+        overture_score = 0.5 + 0.5 * ((c - MIN_CONNECTORS) / (5 - MIN_CONNECTORS))
+    else:
+        overture_score = c / MIN_CONNECTORS * 0.3
+
+    # Visual score — from GDINO intersection detections
+    intersection_dets = [d for d in detections if d["label"] in INTERSECTION_LABELS]
+    if intersection_dets:
+        best_per_label: dict[str, float] = {}
+        for d in intersection_dets:
+            lbl = d["label"]
+            if lbl not in best_per_label or d["confidence"] > best_per_label[lbl]:
+                best_per_label[lbl] = d["confidence"]
+        n_features = len(best_per_label)
+        avg_conf = sum(best_per_label.values()) / n_features
+        visual_score = min(1.0, avg_conf * (1 + 0.2 * (n_features - 1)))
+    else:
+        visual_score = 0.0
+
+    # BeeMaps score
+    beemaps_score = 1.0 if stop_signs else 0.0
+
+    # Combined
+    score = (
+        OVERTURE_WEIGHT * overture_score
+        + VISUAL_WEIGHT * visual_score
+        + BEEMAPS_WEIGHT * beemaps_score
+    )
+
+    details = {
+        "overture_score": round(overture_score, 3),
+        "visual_score": round(visual_score, 3),
+        "beemaps_score": round(beemaps_score, 3),
+        "connector_count": connector_count,
+        "intersection_features": list(best_per_label.keys()) if intersection_dets else [],
+        "stop_sign_count": len(stop_signs),
+    }
+
+    return round(score, 3), details
+
 
 # ---------------------------------------------------------------------------
 # GDINO configuration (copied from run_gdino_clip_pipeline.py)
@@ -61,7 +210,8 @@ GDINO_TEXT_PROMPT = (
     "person. bicycle. motorcycle. person on electric scooter. "
     "electric kick scooter. wheelchair. stroller. "
     "person wearing safety vest. skateboard. dog. traffic cone. "
-    "car. truck. bus."
+    "car. truck. bus. "
+    "stop sign. traffic light. crosswalk."
 )
 GDINO_BOX_THRESHOLD = 0.30
 GDINO_TEXT_THRESHOLD = 0.25
@@ -124,7 +274,11 @@ NON_AMBIGUOUS_CLASSES = {
     "car", "truck", "bus", "motorcycle", "person", "dog",
     "traffic cone", "skateboard", "scooter", "bicycle",
     "wheelchair", "motorcyclist",
+    "stop sign", "traffic light", "crosswalk",
 }
+
+# Labels that indicate intersection features (for intersection scoring)
+INTERSECTION_LABELS = {"stop sign", "traffic light", "crosswalk", "traffic signal", "yield sign"}
 
 # All known valid labels (non-ambiguous + ambiguous)
 ALL_KNOWN_LABELS = NON_AMBIGUOUS_CLASSES | set(AMBIGUOUS_CLASSES.keys())
@@ -531,6 +685,452 @@ def normalize_gdino_label(raw_label: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Ego-vehicle filter — remove detections of the car's own hood/dashboard/pillars
+# ---------------------------------------------------------------------------
+
+EGO_VEHICLE_LABELS = {"car", "truck", "bus"}
+EGO_BOTTOM_MARGIN = 0.08   # y_max must be within bottom 8% of frame
+EGO_MIN_WIDTH_RATIO = 0.50 # box must span at least 50% of frame width
+EGO_MIN_Y_RATIO = 0.55     # box top (y_min) must be in bottom 45% of frame
+
+
+def filter_ego_vehicle(detections: list[dict]) -> tuple[list[dict], int]:
+    """Remove detections that are likely the ego vehicle's hood/dashboard.
+
+    Two heuristics:
+    1) Wide box anchored to bottom (hood/dashboard visible at bottom of frame)
+    2) Box covers most of the frame (GDINO detects the whole scene as 'car'
+       when hood/windshield frame is visible)
+    """
+    kept = []
+    dropped = 0
+    for d in detections:
+        if d["label"] in EGO_VEHICLE_LABELS:
+            w = d["frame_width"]
+            h = d["frame_height"]
+            box_width = d["x_max"] - d["x_min"]
+            box_height = d["y_max"] - d["y_min"]
+
+            # Heuristic 1: wide box anchored to bottom
+            bottom_near_edge = d["y_max"] >= h * (1 - EGO_BOTTOM_MARGIN)
+            wide_enough = box_width >= w * EGO_MIN_WIDTH_RATIO
+            low_enough = d["y_min"] >= h * EGO_MIN_Y_RATIO
+            if bottom_near_edge and wide_enough and low_enough:
+                dropped += 1
+                continue
+
+            # Heuristic 2: box covers most of the frame (>80% width AND >80% height)
+            if box_width >= w * 0.80 and box_height >= h * 0.80:
+                dropped += 1
+                continue
+
+        kept.append(d)
+    return kept, dropped
+
+
+# ---------------------------------------------------------------------------
+# Near-collision vehicle filter — keep only vehicles involved in near-miss
+# ---------------------------------------------------------------------------
+
+import math
+
+VEHICLE_LABELS = {"car", "truck", "bus"}
+VEHICLE_HEIGHTS: dict[str, float] = {"car": 1.5, "truck": 3.0, "bus": 3.2}
+BEE_HFOV_DEG = 142.0
+VEHICLE_CLOSE_DISTANCE_M = 8.0       # Criterion A/C: close distance
+VEHICLE_VERY_CLOSE_M = 4.0           # Criterion D: extremely close
+VEHICLE_GROWTH_RATE_MIN = 1.8        # Criterion B: min bbox area growth
+VEHICLE_LARGE_AREA_FRAC = 0.04       # Criterion C: min area / frame area
+VEHICLE_CENTER_BAND = (0.30, 0.70)   # Criterion C: horizontal center range
+VEHICLE_MATCH_MAX_PX = 250           # tracking: max center distance
+DECEL_WINDOW_MS = 3000               # ±3s around peak deceleration
+
+
+def _estimate_vehicle_distance(det: dict) -> float:
+    """Estimate distance to a detected vehicle using pinhole camera model."""
+    known_height = VEHICLE_HEIGHTS.get(det["label"], 1.5)
+    half_fov_rad = math.radians(BEE_HFOV_DEG / 2)
+    focal_px = (det["frame_width"] / 2) / math.tan(half_fov_rad)
+    bbox_h = det["y_max"] - det["y_min"]
+    if bbox_h < 1:
+        return 999.0
+    distance = (known_height * focal_px) / bbox_h
+    # Barrel distortion correction for edge objects
+    center_x = det["frame_width"] / 2
+    cx = (det["x_min"] + det["x_max"]) / 2
+    offset_frac = abs(cx - center_x) / center_x if center_x > 0 else 0
+    if offset_frac > 0.75:
+        distance *= 0.77
+    return max(1.0, distance)
+
+
+def _extract_decel_window(event: dict) -> tuple[int, int] | None:
+    """Find the time window around peak deceleration from SPEED_ARRAY.
+
+    Returns (start_ms, end_ms) relative to video start, or None if no speed data.
+    """
+    speeds = event.get("metadata", {}).get("SPEED_ARRAY", [])
+    if len(speeds) < 2:
+        return None
+
+    # Find peak deceleration (largest speed drop between consecutive entries)
+    best_decel = 0.0
+    best_ts = None
+    event_start_ms = speeds[0].get("TIMESTAMP", 0)
+
+    for i in range(1, len(speeds)):
+        prev_speed = speeds[i - 1].get("AVG_SPEED_MS", 0)
+        curr_speed = speeds[i].get("AVG_SPEED_MS", 0)
+        decel = prev_speed - curr_speed  # positive = decelerating
+        if decel > best_decel:
+            best_decel = decel
+            best_ts = speeds[i].get("TIMESTAMP", 0)
+
+    if best_ts is None or best_decel <= 0:
+        return None
+
+    # Convert to video-relative ms
+    peak_ms = best_ts - event_start_ms
+    return (max(0, peak_ms - DECEL_WINDOW_MS), peak_ms + DECEL_WINDOW_MS)
+
+
+def _build_vehicle_tracks(vehicle_dets: list[dict]) -> list[list[int]]:
+    """Group vehicle detections into tracks across frames.
+
+    Returns list of tracks, each track is a list of indices into vehicle_dets.
+    """
+    # Group by frame_ms
+    frames: dict[int, list[int]] = {}
+    for i, d in enumerate(vehicle_dets):
+        frames.setdefault(d["frame_ms"], []).append(i)
+
+    sorted_timestamps = sorted(frames.keys())
+    open_tracks: list[list[int]] = []
+    all_tracks: list[list[int]] = []
+
+    for ts in sorted_timestamps:
+        frame_indices = frames[ts]
+        matched_tracks: set[int] = set()
+        matched_dets: set[int] = set()
+
+        # Build cost pairs
+        costs: list[tuple[int, int, float]] = []
+        for ti, track in enumerate(open_tracks):
+            last_d = vehicle_dets[track[-1]]
+            last_cx = (last_d["x_min"] + last_d["x_max"]) / 2
+            last_cy = (last_d["y_min"] + last_d["y_max"]) / 2
+            for di_pos, orig_idx in enumerate(frame_indices):
+                d = vehicle_dets[orig_idx]
+                if d["label"] != last_d["label"]:
+                    continue
+                cx = (d["x_min"] + d["x_max"]) / 2
+                cy = (d["y_min"] + d["y_max"]) / 2
+                dist = math.sqrt((cx - last_cx) ** 2 + (cy - last_cy) ** 2)
+                if dist <= VEHICLE_MATCH_MAX_PX:
+                    costs.append((ti, di_pos, dist))
+
+        costs.sort(key=lambda x: x[2])
+        for ti, di_pos, _ in costs:
+            if ti in matched_tracks or di_pos in matched_dets:
+                continue
+            matched_tracks.add(ti)
+            matched_dets.add(di_pos)
+            open_tracks[ti].append(frame_indices[di_pos])
+
+        # Close unmatched tracks
+        for ti in range(len(open_tracks) - 1, -1, -1):
+            if ti not in matched_tracks:
+                all_tracks.append(open_tracks.pop(ti))
+
+        # Open new tracks for unmatched detections
+        for di_pos, orig_idx in enumerate(frame_indices):
+            if di_pos not in matched_dets:
+                open_tracks.append([orig_idx])
+
+    all_tracks.extend(open_tracks)
+    return all_tracks
+
+
+def filter_non_collision_vehicles(
+    detections: list[dict], event: dict
+) -> tuple[list[dict], int]:
+    """Remove car/truck/bus detections unless they indicate a near-collision.
+
+    A vehicle detection is kept if ANY of these criteria is met:
+      A) Close (< 8m) AND within the deceleration window
+      B) Track bbox area grows 1.8x+ (vehicle approaching fast)
+      C) Close (< 8m) AND large (>= 4% of frame) AND centered
+      D) Very close (< 4m) regardless of other factors
+
+    Returns (filtered_detections, num_vehicles_removed).
+    """
+    vehicle_dets = [(i, d) for i, d in enumerate(detections) if d["label"] in VEHICLE_LABELS]
+    if not vehicle_dets:
+        return detections, 0
+
+    # Pre-compute deceleration window from speed data
+    decel_window = _extract_decel_window(event)
+
+    # Indices of original detections to keep
+    keep_vehicle_indices: set[int] = set()
+
+    # Extract just the vehicle dets for tracking
+    veh_only = [d for _, d in vehicle_dets]
+    veh_orig_indices = [i for i, _ in vehicle_dets]
+
+    # --- Single-frame criteria (A, C, D) ---
+    for vi, (orig_idx, d) in enumerate(vehicle_dets):
+        dist = _estimate_vehicle_distance(d)
+        fw, fh = d["frame_width"], d["frame_height"]
+        bbox_area = (d["x_max"] - d["x_min"]) * (d["y_max"] - d["y_min"])
+        frame_area = fw * fh
+        cx_frac = ((d["x_min"] + d["x_max"]) / 2) / fw if fw > 0 else 0.5
+
+        # D: Very close — always keep
+        if dist < VEHICLE_VERY_CLOSE_M:
+            keep_vehicle_indices.add(orig_idx)
+            continue
+
+        # A: Close + within deceleration window
+        if dist < VEHICLE_CLOSE_DISTANCE_M and decel_window is not None:
+            frame_ms = d["frame_ms"]
+            if decel_window[0] <= frame_ms <= decel_window[1]:
+                keep_vehicle_indices.add(orig_idx)
+                continue
+
+        # C: Close + large + centered
+        if (dist < VEHICLE_CLOSE_DISTANCE_M
+                and frame_area > 0
+                and bbox_area / frame_area >= VEHICLE_LARGE_AREA_FRAC
+                and VEHICLE_CENTER_BAND[0] <= cx_frac <= VEHICLE_CENTER_BAND[1]):
+            keep_vehicle_indices.add(orig_idx)
+
+    # --- Cross-frame criterion (B): rapid approach ---
+    tracks = _build_vehicle_tracks(veh_only)
+    for track_local_indices in tracks:
+        if len(track_local_indices) < 2:
+            continue
+        areas = [
+            (veh_only[li]["x_max"] - veh_only[li]["x_min"])
+            * (veh_only[li]["y_max"] - veh_only[li]["y_min"])
+            for li in track_local_indices
+        ]
+        min_area = max(min(areas), 1.0)
+        growth = max(areas) / min_area
+        if growth >= VEHICLE_GROWTH_RATE_MIN:
+            for li in track_local_indices:
+                keep_vehicle_indices.add(veh_orig_indices[li])
+
+    # Build result: non-vehicle detections + kept vehicles
+    vehicle_index_set = {i for i, _ in vehicle_dets}
+    result = []
+    for i, d in enumerate(detections):
+        if i in vehicle_index_set:
+            if i in keep_vehicle_indices:
+                result.append(d)
+        else:
+            result.append(d)
+
+    removed = len(vehicle_dets) - len(keep_vehicle_indices)
+    return result, removed
+
+
+# ---------------------------------------------------------------------------
+# VRU near-miss scoring — detect if driver almost hit a person/cyclist/etc.
+# ---------------------------------------------------------------------------
+
+VRU_LABELS_FOR_NEARMISS = {"person", "cyclist", "motorcyclist", "scooter", "bicycle", "dog"}
+VRU_KNOWN_HEIGHTS: dict[str, float] = {
+    "person": 1.7, "cyclist": 1.8, "motorcyclist": 1.6,
+    "scooter": 1.7, "bicycle": 1.2, "dog": 0.6,
+}
+VRU_TYPE_WEIGHTS: dict[str, float] = {
+    "person": 1.0, "cyclist": 0.9, "motorcyclist": 0.7,
+    "scooter": 0.8, "bicycle": 0.5, "dog": 0.6,
+}
+NEARMISS_VERY_CLOSE_M = 5.0
+NEARMISS_CLOSE_M = 10.0
+NEARMISS_MEDIUM_M = 20.0
+
+
+def _estimate_vru_distance(det: dict) -> float:
+    """Estimate distance to a VRU using pinhole camera model."""
+    label = det["label"]
+    known_height = VRU_KNOWN_HEIGHTS.get(label, 1.7)
+    half_fov_rad = math.radians(BEE_HFOV_DEG / 2)
+    focal_px = (det["frame_width"] / 2) / math.tan(half_fov_rad)
+    bbox_h = det["y_max"] - det["y_min"]
+    if bbox_h < 1:
+        return 999.0
+    distance = (known_height * focal_px) / bbox_h
+    center_x = det["frame_width"] / 2
+    cx = (det["x_min"] + det["x_max"]) / 2
+    offset_frac = abs(cx - center_x) / center_x if center_x > 0 else 0
+    if offset_frac > 0.75:
+        distance *= 0.77
+    return max(1.0, distance)
+
+
+def compute_nearmiss_score(
+    detections: list[dict], event: dict
+) -> tuple[float, dict]:
+    """Compute VRU near-miss score from detections + event speed data.
+
+    Signals:
+      - VRU proximity (pinhole distance)
+      - VRU bbox growing across frames (approaching)
+      - Coincides with deceleration window
+      - VRU centered in driver's path
+
+    Returns (score 0-1, details_dict).
+    """
+    vru_dets = [d for d in detections if d["label"] in VRU_LABELS_FOR_NEARMISS]
+    if not vru_dets:
+        return 0.0, {"reason": "no VRU detections"}
+
+    decel_window = _extract_decel_window(event)
+
+    # Extract speed info
+    speeds = event.get("metadata", {}).get("SPEED_ARRAY", [])
+    max_mph = 0.0
+    if speeds:
+        max_mph = max(s.get("AVG_SPEED_MS", 0) for s in speeds) * 2.237
+
+    # Track VRUs across frames
+    tracks = _build_vehicle_tracks(vru_dets)  # reuse existing tracker
+
+    best_score = 0.0
+    best_details: dict = {}
+
+    for track_indices in tracks:
+        if not track_indices:
+            continue
+
+        track_dets = [vru_dets[i] for i in track_indices]
+        label = track_dets[0]["label"]
+
+        # Compute min distance across track
+        distances = [_estimate_vru_distance(d) for d in track_dets]
+        min_distance = min(distances)
+
+        # Proximity score
+        if min_distance < NEARMISS_VERY_CLOSE_M:
+            proximity_mult = 2.0
+            proximity_label = "very_close"
+        elif min_distance < NEARMISS_CLOSE_M:
+            proximity_mult = 1.5
+            proximity_label = "close"
+        elif min_distance < NEARMISS_MEDIUM_M:
+            proximity_mult = 1.0
+            proximity_label = "medium"
+        else:
+            proximity_mult = 0.3
+            proximity_label = "far"
+
+        # Growth rate (approaching?)
+        areas = [
+            (d["x_max"] - d["x_min"]) * (d["y_max"] - d["y_min"])
+            for d in track_dets
+        ]
+        growth = max(areas) / max(min(areas), 1.0) if len(areas) >= 2 else 1.0
+        is_approaching = growth >= 1.5
+
+        # Centered in frame?
+        cx_fracs = [
+            ((d["x_min"] + d["x_max"]) / 2) / d["frame_width"]
+            for d in track_dets
+        ]
+        is_centered = any(0.25 <= cx <= 0.75 for cx in cx_fracs)
+
+        # During deceleration?
+        during_decel = False
+        if decel_window:
+            for d in track_dets:
+                if decel_window[0] <= d["frame_ms"] <= decel_window[1]:
+                    during_decel = True
+                    break
+
+        # Confidence
+        max_conf = max(d["confidence"] for d in track_dets)
+
+        # Composite score for this track
+        type_weight = VRU_TYPE_WEIGHTS.get(label, 0.5)
+        motion_mult = 1.5 if is_approaching else 0.7
+        decel_mult = 1.5 if during_decel else 0.8
+        center_mult = 1.3 if is_centered else 0.8
+
+        raw_score = type_weight * proximity_mult * motion_mult * decel_mult * center_mult * max_conf
+
+        # Speed factor — faster = more dangerous
+        speed_factor = min(2.0, max(0.5, max_mph / 25.0))
+        track_score = min(1.0, raw_score * speed_factor / 4.0)
+
+        if track_score > best_score:
+            best_score = track_score
+            best_details = {
+                "label": label,
+                "min_distance_m": round(min_distance, 1),
+                "proximity": proximity_label,
+                "approaching": is_approaching,
+                "growth_rate": round(growth, 2),
+                "centered": is_centered,
+                "during_decel": during_decel,
+                "max_confidence": round(max_conf, 3),
+                "speed_mph": round(max_mph, 1),
+                "track_frames": len(track_dets),
+            }
+
+    return round(best_score, 3), best_details
+
+
+# ---------------------------------------------------------------------------
+# Riderless bike/motorcycle penalty — lower confidence when no person nearby
+# ---------------------------------------------------------------------------
+
+RIDEABLE_LABELS = {"bicycle", "motorcycle", "scooter", "cyclist", "motorcyclist"}
+PERSON_LABELS = {"person", "construction worker"}
+RIDERLESS_CONFIDENCE_FACTOR = 0.3  # multiply confidence by this when no rider
+RIDER_OVERLAP_MARGIN_PX = 50       # how far apart person can be to count as rider
+
+
+def _boxes_overlap_or_near(a: dict, b: dict, margin: float) -> bool:
+    """Check if two bboxes overlap or are within margin pixels of each other."""
+    return not (
+        a["x_max"] + margin < b["x_min"]
+        or b["x_max"] + margin < a["x_min"]
+        or a["y_max"] + margin < b["y_min"]
+        or b["y_max"] + margin < a["y_min"]
+    )
+
+
+def penalize_riderless(detections: list[dict]) -> int:
+    """Reduce confidence of bicycle/motorcycle detections with no nearby person.
+
+    Mutates detections in-place. Returns count of penalized detections.
+    """
+    # Group by frame_ms
+    by_frame: dict[int, list[dict]] = defaultdict(list)
+    for d in detections:
+        by_frame[d["frame_ms"]].append(d)
+
+    penalized = 0
+    for frame_ms, frame_dets in by_frame.items():
+        persons = [d for d in frame_dets if d["label"] in PERSON_LABELS]
+        for d in frame_dets:
+            if d["label"] not in RIDEABLE_LABELS:
+                continue
+            has_rider = any(
+                _boxes_overlap_or_near(d, p, RIDER_OVERLAP_MARGIN_PX)
+                for p in persons
+            )
+            if not has_rider:
+                d["confidence"] *= RIDERLESS_CONFIDENCE_FACTOR
+                penalized += 1
+
+    return penalized
+
+
+# ---------------------------------------------------------------------------
 # Class-agnostic NMS (copied from run_gdino_clip_pipeline.py)
 # ---------------------------------------------------------------------------
 
@@ -634,6 +1234,7 @@ def run_gdino_pass(
 
     all_detections: list[dict] = []
     nms_suppressed_total = 0
+    ego_suppressed_total = 0
     frames_processed = 0
     t0 = time.time()
 
@@ -697,6 +1298,12 @@ def run_gdino_pass(
             before_nms = len(frame_detections)
             frame_detections = apply_nms(frame_detections, iou_threshold=0.5)
             nms_suppressed_total += before_nms - len(frame_detections)
+
+            # Filter out ego-vehicle (hood/dashboard/pillar) detections
+            frame_detections, ego_dropped = filter_ego_vehicle(frame_detections)
+            if ego_dropped:
+                ego_suppressed_total += ego_dropped
+
             all_detections.extend(frame_detections)
 
             frames_processed += 1
@@ -709,7 +1316,8 @@ def run_gdino_pass(
     # Unload
     del model, processor
     free_gpu()
-    print(f"  GDINO-base done: {len(all_detections)} raw detections ({nms_suppressed_total} suppressed by NMS). Model unloaded.")
+    ego_msg = f", {ego_suppressed_total} ego-vehicle filtered" if ego_suppressed_total else ""
+    print(f"  GDINO-base done: {len(all_detections)} detections ({nms_suppressed_total} NMS suppressed{ego_msg}). Model unloaded.")
     return all_detections
 
 
@@ -981,6 +1589,442 @@ def run_gdino_clip(
 
 
 # ---------------------------------------------------------------------------
+# CLIP scene classification — classify weather, road type, etc.
+# ---------------------------------------------------------------------------
+
+SCENE_ATTRIBUTES_DAY: list[str] = [
+    "clear sunny weather",
+    "overcast cloudy sky",
+    "rainy weather with wet road",
+    "snowy weather with snow on road",
+    "foggy or misty conditions",
+]
+
+# Short canonical labels for storage
+SCENE_LABEL_MAP: dict[str, str] = {
+    "clear sunny weather": "clear skies",
+    "overcast cloudy sky": "overcast",
+    "rainy weather with wet road": "rain",
+    "snowy weather with snow on road": "snow",
+    "foggy or misty conditions": "fog",
+}
+
+# Minimum margin between top-1 and top-2 cosine similarity to report weather
+SCENE_MIN_MARGIN = 0.02
+
+SCENE_PROMPT_TEMPLATES = [
+    "a dashcam photo showing {label}",
+    "a photo of {label}",
+    "{label}",
+]
+
+SCENE_NUM_SAMPLE_FRAMES = 3  # classify beginning, middle, end
+
+
+def run_scene_classification(
+    frames: list[tuple[int, Any, int]],
+    conn,
+    video_id: str,
+    run_id: str,
+    is_night: bool = False,
+) -> dict[str, dict]:
+    """Classify scene attributes using OpenCLIP on a few sampled frames.
+
+    Returns dict mapping attribute name -> {"value": str, "confidence": float}.
+    """
+    try:
+        import open_clip
+    except ImportError:
+        print("  [!] open_clip not installed, skipping scene classification")
+        return {}
+
+    if not frames:
+        return {}
+
+    # Sample frames: first, middle, last
+    n = len(frames)
+    sample_indices = [0, n // 2, n - 1] if n >= 3 else list(range(n))
+    sample_frames = [frames[i] for i in sample_indices]
+
+    print(f"\n  --- CLIP scene classification ({len(sample_frames)} frames) ---")
+
+    device = get_device()
+    try:
+        clip_model, _, preprocess = open_clip.create_model_and_transforms(
+            CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED, device=device,
+        )
+        tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
+    except Exception as exc:
+        if device == "mps":
+            print(f"  [!] MPS failed ({exc}), falling back to CPU")
+            device = "cpu"
+            clip_model, _, preprocess = open_clip.create_model_and_transforms(
+                CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED, device=device,
+            )
+            tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
+        else:
+            raise
+    clip_model.eval()
+
+    # Encode sample frames
+    frame_features_list = []
+    for frame_ms, frame_bgr, _ in sample_frames:
+        pil_img = Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
+        img_tensor = preprocess(pil_img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            feat = clip_model.encode_image(img_tensor)
+            feat = feat / feat.norm(dim=-1, keepdim=True)
+        frame_features_list.append(feat)
+
+    # Average frame features
+    avg_frame_feat = torch.mean(torch.cat(frame_features_list, dim=0), dim=0, keepdim=True)
+    avg_frame_feat = avg_frame_feat / avg_frame_feat.norm(dim=-1, keepdim=True)
+
+    results: dict[str, dict] = {}
+
+    # Skip weather classification at night — CLIP is unreliable in low-light dashcam footage
+    if is_night:
+        print("    weather          skipped (nighttime)")
+    else:
+        candidates = SCENE_ATTRIBUTES_DAY
+
+        # Classify weather
+        candidate_features = []
+        for c in candidates:
+            template_feats = []
+            for tmpl in SCENE_PROMPT_TEMPLATES:
+                prompt = tmpl.format(label=c)
+                tokens = tokenizer([prompt]).to(device)
+                with torch.no_grad():
+                    feat = clip_model.encode_text(tokens)
+                    feat = feat / feat.norm(dim=-1, keepdim=True)
+                template_feats.append(feat)
+            avg_feat = torch.mean(torch.cat(template_feats, dim=0), dim=0, keepdim=True)
+            avg_feat = avg_feat / avg_feat.norm(dim=-1, keepdim=True)
+            candidate_features.append(avg_feat)
+
+        text_feats = torch.cat(candidate_features, dim=0)
+        sims = (avg_frame_feat @ text_feats.T).squeeze(0)
+
+        # Sort by similarity descending
+        sorted_sims, sorted_indices = torch.sort(sims, descending=True)
+        best_idx = sorted_indices[0].item()
+        best_sim = float(sorted_sims[0].item())
+        second_sim = float(sorted_sims[1].item()) if len(sorted_sims) > 1 else 0.0
+        margin = best_sim - second_sim
+
+        best_candidate = candidates[best_idx]
+        canonical = SCENE_LABEL_MAP.get(best_candidate, best_candidate)
+
+        if margin >= SCENE_MIN_MARGIN:
+            results["weather"] = {"value": canonical, "confidence": round(best_sim, 3)}
+            print(f"    weather          {canonical:<12} (confidence: {best_sim:.3f}, margin: {margin:.3f})")
+        else:
+            print(f"    weather          skipped — low margin ({canonical} {best_sim:.3f} vs {margin:.3f})")
+
+    # Unload CLIP
+    del clip_model, preprocess, tokenizer
+    free_gpu()
+
+    # Clear old weather attribute for this run, then save new results
+    conn.execute("DELETE FROM scene_attributes WHERE run_id = ? AND attribute = 'weather'", (run_id,))
+    conn.commit()
+    _save_scene_attributes(conn, video_id, run_id, results)
+
+    return results
+
+
+def _save_scene_attributes(
+    conn, video_id: str, run_id: str, attributes: dict[str, dict]
+) -> None:
+    """Save scene classification results to the scene_attributes table."""
+    # Ensure table exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS scene_attributes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT NOT NULL,
+            run_id TEXT,
+            attribute TEXT NOT NULL,
+            value TEXT NOT NULL,
+            confidence REAL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_scene_attributes_video
+        ON scene_attributes (video_id)
+    """)
+    conn.commit()
+
+    # Delete only the specific attributes being written (not all for this run)
+    for attr in attributes:
+        conn.execute("DELETE FROM scene_attributes WHERE run_id = ? AND attribute = ?", (run_id, attr))
+    for attr, data in attributes.items():
+        conn.execute(
+            "INSERT INTO scene_attributes (video_id, run_id, attribute, value, confidence) VALUES (?, ?, ?, ?, ?)",
+            (video_id, run_id, attr, data["value"], data["confidence"]),
+        )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Timeline generation — hybrid: detections + Claude Vision for key frames
+# ---------------------------------------------------------------------------
+
+TIMELINE_MODEL = "claude-haiku-4-5-20251001"
+
+
+TIMELINE_KEY_FRAMES = 15
+
+
+def _select_key_frames(
+    frames: list[tuple[int, Any, int]],
+    detections: list[dict],
+    event: dict,
+) -> list[tuple[int, Any]]:
+    """Select up to TIMELINE_KEY_FRAMES frames for Claude Vision.
+
+    Strategy: evenly space frames across the clip, then add extra density
+    around the braking window and closest VRU detection.
+    Returns list of (frame_ms, frame_bgr) tuples.
+    """
+    frames_by_ms = {ms: bgr for ms, bgr, _ in frames}
+    all_ms = sorted(frames_by_ms.keys())
+    if not all_ms:
+        return []
+
+    target = min(TIMELINE_KEY_FRAMES, len(all_ms))
+    selected: dict[int, Any] = {}
+
+    # 1. Evenly-spaced baseline (~60% of budget)
+    baseline_count = max(target * 3 // 5, 3)
+    for i in range(baseline_count):
+        idx = round(i / (baseline_count - 1) * (len(all_ms) - 1))
+        ms = all_ms[idx]
+        selected[ms] = frames_by_ms[ms]
+
+    # 2. Dense frames around braking window
+    decel_window = _extract_decel_window(event)
+    if decel_window:
+        decel_start, decel_end = decel_window
+        # Sample densely from 1s before braking to 1s after
+        window_start = max(decel_start - 1000, all_ms[0])
+        window_end = min(decel_end + 1000, all_ms[-1])
+        window_frames = [ms for ms in all_ms if window_start <= ms <= window_end]
+        # Pick up to 5 evenly-spaced frames from the window
+        dense_count = min(5, len(window_frames))
+        for i in range(dense_count):
+            idx = round(i / max(dense_count - 1, 1) * (len(window_frames) - 1))
+            ms = window_frames[idx]
+            selected[ms] = frames_by_ms[ms]
+
+    # 3. Frame with closest VRU detection
+    vru_dets = [d for d in detections if d["label"] in VRU_LABELS_FOR_NEARMISS]
+    if vru_dets:
+        closest = min(vru_dets, key=lambda d: _estimate_vru_distance(d))
+        nearest_ms = min(all_ms, key=lambda ms: abs(ms - closest["frame_ms"]))
+        selected[nearest_ms] = frames_by_ms[nearest_ms]
+
+    # Trim to target if we overshot (keep evenly spaced subset)
+    if len(selected) > target:
+        sorted_ms = sorted(selected.keys())
+        step = len(sorted_ms) / target
+        keep = [sorted_ms[round(i * step)] for i in range(target)]
+        selected = {ms: selected[ms] for ms in keep}
+
+    return sorted(selected.items(), key=lambda x: x[0])
+
+
+def _frame_to_base64(frame_bgr) -> str:
+    """Convert BGR numpy array to base64 JPEG string."""
+    import base64
+    _, buffer = cv2.imencode(".jpg", frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+def generate_timeline(
+    frames: list[tuple[int, Any, int]],
+    detections: list[dict],
+    event: dict,
+    conn,
+    video_id: str,
+    run_id: str,
+    scene_attrs: dict,
+    nearmiss_score: float,
+    intersection_score: float,
+) -> list[dict] | None:
+    """Generate a narrative timeline using Claude Vision on key frames.
+
+    Returns list of timeline entries or None if unavailable.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or ""
+    # Also check .env.local
+    if not api_key:
+        env_local = PROJECT_ROOT / ".env.local"
+        if env_local.exists():
+            for line in env_local.read_text().splitlines():
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip()
+                    break
+
+    if not api_key:
+        print("  [!] ANTHROPIC_API_KEY not set, skipping timeline generation")
+        return None
+
+    key_frames = _select_key_frames(frames, detections, event)
+    if not key_frames:
+        return None
+
+    print(f"\n  --- Timeline generation ({len(key_frames)} key frames) ---")
+
+    # Build detection summary per time window
+    duration_ms = max(d["frame_ms"] for d in detections) if detections else 30000
+    duration_s = duration_ms / 1000
+
+    # Speed context
+    speeds = event.get("metadata", {}).get("SPEED_ARRAY", [])
+    max_mph = min_mph = 0.0
+    if speeds:
+        vals = [s.get("AVG_SPEED_MS", 0) * 2.237 for s in speeds]
+        max_mph, min_mph = max(vals), min(vals)
+
+    # Detection summary
+    label_counts: dict[str, int] = defaultdict(int)
+    for d in detections:
+        label_counts[d["label"]] += 1
+    det_summary = ", ".join(f"{v}x {k}" for k, v in sorted(label_counts.items(), key=lambda x: -x[1])[:6])
+
+    weather_val = scene_attrs.get("weather", {}).get("value", "unknown") if scene_attrs else "unknown"
+
+    # Build Claude Vision request
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key)
+
+    content: list[dict] = []
+
+    # System context — speed/event data + VRU timing (factual, not scene labels).
+    # We include VRU detections with timestamps so Claude can reference them,
+    # but NOT scene labels (crosswalk, traffic light) to avoid hallucination.
+    vru_timing_lines = []
+    vru_by_label: dict[str, list[dict]] = defaultdict(list)
+    for d in detections:
+        if d["label"] in VRU_LABELS_FOR_NEARMISS and d["confidence"] >= 0.35:
+            vru_by_label[d["label"]].append(d)
+    for label, dets in sorted(vru_by_label.items()):
+        times = sorted(set(d["frame_ms"] for d in dets))
+        if times:
+            start_s = times[0] / 1000
+            end_s = times[-1] / 1000
+            max_conf = max(d["confidence"] for d in dets)
+            if end_s - start_s > 0.5:
+                vru_timing_lines.append(f"- {label} detected {start_s:.1f}–{end_s:.1f}s (confidence {max_conf:.0%})")
+            else:
+                vru_timing_lines.append(f"- {label} detected at {start_s:.1f}s (confidence {max_conf:.0%})")
+
+    vru_section = ""
+    if vru_timing_lines:
+        vru_section = "\nVulnerable road users detected:\n" + "\n".join(vru_timing_lines) + "\n"
+
+    context_text = (
+        f"You are analyzing a {duration_s:.0f}-second dashcam video from a safety event.\n\n"
+        f"Event type: {event.get('type', 'UNKNOWN')}\n"
+        f"Speed: {max_mph:.0f} → {min_mph:.0f} mph\n"
+        f"Weather: {weather_val}\n"
+        f"{vru_section}\n"
+        f"Describe ONLY what you can see in the frames. Do not assume or infer things not visible.\n\n"
+        f"Here are {len(key_frames)} key frames from the clip:"
+    )
+    content.append({"type": "text", "text": context_text})
+
+    # Add frames
+    for frame_ms, frame_bgr in key_frames:
+        t_sec = frame_ms / 1000
+        # Speed at this moment
+        frame_speed = 0.0
+        if speeds:
+            event_start = speeds[0].get("TIMESTAMP", 0)
+            for s in speeds:
+                if (s["TIMESTAMP"] - event_start) <= frame_ms:
+                    frame_speed = s.get("AVG_SPEED_MS", 0) * 2.237
+
+        content.append({
+            "type": "text",
+            "text": f"\nFrame at {t_sec:.1f}s (speed: {frame_speed:.0f} mph):",
+        })
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": _frame_to_base64(frame_bgr),
+            },
+        })
+
+    content.append({
+        "type": "text",
+        "text": (
+            f"\nGenerate a timeline with 4-6 rows covering the full {duration_s:.0f}s clip.\n\n"
+            "Rules:\n"
+            "- Say 'driver' not 'dashcam vehicle'\n"
+            "- Keep event labels to 2-4 words\n"
+            "- Keep details to ONE short sentence (max 15 words)\n"
+            "- Only describe what is clearly visible in the frames\n\n"
+            "Return ONLY valid JSON — an array of objects:\n"
+            '  startSec (number), endSec (number), event (short label), details (1 short sentence)\n\n'
+            "Example:\n"
+            '[{"startSec":0,"endSec":6,"event":"Approach intersection","details":"Driver approaches lit intersection with traffic ahead."}]\n\n'
+            "Cover the full clip duration."
+        ),
+    })
+
+    try:
+        response = client.messages.create(
+            model=TIMELINE_MODEL,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        # Parse JSON from response
+        raw_text = response.content[0].text.strip()
+        # Handle markdown code blocks
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[1]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3].strip()
+
+        timeline = json.loads(raw_text)
+
+        # Save to DB
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS clip_timelines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_id TEXT NOT NULL,
+                run_id TEXT,
+                timeline_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+        conn.execute("DELETE FROM clip_timelines WHERE run_id = ?", (run_id,))
+        conn.execute(
+            "INSERT INTO clip_timelines (video_id, run_id, timeline_json) VALUES (?, ?, ?)",
+            (video_id, run_id, json.dumps(timeline)),
+        )
+        conn.commit()
+
+        print(f"  Timeline: {len(timeline)} segments generated")
+        for seg in timeline:
+            print(f"    {seg.get('startSec', '?')}-{seg.get('endSec', '?')}s: "
+                  f"{seg.get('event', '?')} — {seg.get('details', '')[:60]}")
+
+        return timeline
+
+    except Exception as exc:
+        print(f"  [!] Timeline generation failed: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Model dispatch: MM-Grounding-DINO
 # ---------------------------------------------------------------------------
 
@@ -1057,6 +2101,7 @@ def run_mm_gdino(
 
     all_detections: list[dict] = []
     nms_suppressed_total = 0
+    ego_suppressed_total = 0
     frames_processed = 0
     t0 = time.time()
 
@@ -1131,6 +2176,12 @@ def run_mm_gdino(
             before_nms = len(frame_detections)
             frame_detections = apply_nms(frame_detections, iou_threshold=0.5)
             nms_suppressed_total += before_nms - len(frame_detections)
+
+            # Filter out ego-vehicle (hood/dashboard/pillar) detections
+            frame_detections, ego_dropped = filter_ego_vehicle(frame_detections)
+            if ego_dropped:
+                ego_suppressed_total += ego_dropped
+
             all_detections.extend(frame_detections)
             frames_processed += 1
 
@@ -1214,7 +2265,10 @@ def run_yolo_world(
     del model
     free_gpu()
 
-    print(f"  YOLO-World done: {len(all_detections)} detections")
+    # Filter ego-vehicle detections
+    all_detections, ego_dropped = filter_ego_vehicle(all_detections)
+    ego_msg = f", {ego_dropped} ego-vehicle filtered" if ego_dropped else ""
+    print(f"  YOLO-World done: {len(all_detections)} detections{ego_msg}")
     return all_detections
 
 
@@ -1321,7 +2375,10 @@ def run_yolo11x(
 
     if enhanced_count > 0:
         print(f"  CLAHE enhanced {enhanced_count}/{len(frames)} dark frames")
-    print(f"  YOLO11x done: {len(all_detections)} detections")
+    # Filter ego-vehicle detections
+    all_detections, ego_dropped = filter_ego_vehicle(all_detections)
+    ego_msg = f", {ego_dropped} ego-vehicle filtered" if ego_dropped else ""
+    print(f"  YOLO11x done: {len(all_detections)} detections{ego_msg}")
     return all_detections
 
 
@@ -1409,7 +2466,10 @@ def run_yolo26x(
 
     if enhanced_count > 0:
         print(f"  CLAHE enhanced {enhanced_count}/{len(frames)} dark frames")
-    print(f"  YOLO26x done: {len(all_detections)} detections")
+    # Filter ego-vehicle detections
+    all_detections, ego_dropped = filter_ego_vehicle(all_detections)
+    ego_msg = f", {ego_dropped} ego-vehicle filtered" if ego_dropped else ""
+    print(f"  YOLO26x done: {len(all_detections)} detections{ego_msg}")
     return all_detections
 
 
@@ -1478,9 +2538,37 @@ def main() -> int:
         video_url = event.get("videoUrl")
         if not video_url:
             raise RuntimeError(f"Event {video_id} has no videoUrl")
-        day = event.get("timestamp", "")[:10] or "2026-01-01"
+        event_timestamp = event.get("timestamp", "")
+        day = event_timestamp[:10] or "2026-01-01"
+        event_lat = event.get("location", {}).get("lat")
+        event_lon = event.get("location", {}).get("lon")
+
+        # Determine if event is at night using UTC hour + longitude-based offset
+        is_night = False
+        if event_timestamp:
+            try:
+                utc_dt = datetime.fromisoformat(event_timestamp.replace("Z", "+00:00"))
+                # Rough local hour: shift UTC by longitude / 15 degrees per hour
+                tz_offset_hours = (event_lon / 15.0) if event_lon else 0
+                local_hour = (utc_dt.hour + tz_offset_hours) % 24
+                is_night = local_hour < 6 or local_hour >= 18
+                print(f"  local hour: ~{local_hour:.0f} ({'night' if is_night else 'day'})")
+            except Exception:
+                pass
         print(f"  type: {event.get('type', '?')}")
         print(f"  day:  {day}")
+        if event_lat and event_lon:
+            print(f"  loc:  {event_lat:.6f}, {event_lon:.6f}")
+
+        # Start intersection queries in parallel with video download
+        from concurrent.futures import ThreadPoolExecutor, Future
+        overture_future: Future | None = None
+        beemaps_future: Future | None = None
+        _thread_pool = ThreadPoolExecutor(max_workers=2)
+        if event_lat and event_lon:
+            print(f"\n  Starting intersection queries (parallel)...")
+            overture_future = _thread_pool.submit(_query_overture_connectors, event_lat, event_lon)
+            beemaps_future = _thread_pool.submit(_query_beemaps_stop_signs, event_lat, event_lon, api_key)
 
         # Download video
         print(f"\n[4/6] Downloading video...")
@@ -1514,6 +2602,19 @@ def main() -> int:
             detections = run_yolo26x(frames, conn, run_id, config)
         else:
             raise RuntimeError(f"Unknown model_name: {model_name}")
+
+        # Filter out irrelevant vehicle detections (parked cars, distant traffic)
+        before_vf = len(detections)
+        detections, vehicles_removed = filter_non_collision_vehicles(detections, event)
+        if vehicles_removed:
+            print(f"\n  Vehicle near-collision filter: removed {vehicles_removed} "
+                  f"irrelevant vehicle detections ({before_vf} -> {len(detections)})")
+
+        # Penalize riderless bikes/motorcycles (likely parked)
+        riderless_count = penalize_riderless(detections)
+        if riderless_count:
+            print(f"  Riderless penalty: {riderless_count} bike/motorcycle detections "
+                  f"had confidence reduced (no person nearby)")
 
         # Save all detections using parameterized batch insert
         print(f"\n  Saving {len(detections)} detections to DB...")
@@ -1555,9 +2656,149 @@ def main() -> int:
         for lbl, cnt in sorted(label_counts.items(), key=lambda x: -x[1]):
             print(f"    {lbl:<25} {cnt:>6}")
 
+        # Aggregate detections into time segments
+        if detections:
+            frame_timestamps = sorted(set(d["frame_ms"] for d in detections))
+            if len(frame_timestamps) >= 2:
+                gaps = sorted(
+                    frame_timestamps[i + 1] - frame_timestamps[i]
+                    for i in range(len(frame_timestamps) - 1)
+                )
+                median_gap = gaps[len(gaps) // 2]
+            else:
+                median_gap = 1000
+            gap_tolerance = int(median_gap * 1.5)
+            print(f"\n  Aggregating segments (median gap={median_gap}ms, tolerance={gap_tolerance}ms)...")
+
+            # Group detections by label and merge consecutive frames
+            by_label: dict[str, list[dict]] = defaultdict(list)
+            for d in detections:
+                by_label[d["label"]].append(d)
+
+            segments: list[tuple] = []
+            for label, dets in by_label.items():
+                dets.sort(key=lambda d: d["frame_ms"])
+                seg_start = dets[0]["frame_ms"]
+                seg_end = dets[0]["frame_ms"]
+                seg_max_conf = dets[0]["confidence"]
+                for i in range(1, len(dets)):
+                    if dets[i]["frame_ms"] - seg_end <= gap_tolerance:
+                        seg_end = dets[i]["frame_ms"]
+                        seg_max_conf = max(seg_max_conf, dets[i]["confidence"])
+                    else:
+                        segments.append((
+                            video_id, label, seg_start, seg_end,
+                            seg_max_conf, "supported", PIPELINE_VERSION, model_name, run_id,
+                        ))
+                        seg_start = dets[i]["frame_ms"]
+                        seg_end = dets[i]["frame_ms"]
+                        seg_max_conf = dets[i]["confidence"]
+                segments.append((
+                    video_id, label, seg_start, seg_end,
+                    seg_max_conf, "supported", PIPELINE_VERSION, model_name, run_id,
+                ))
+
+            # Ensure run_id column exists
+            seg_cols = [r[1] for r in conn.execute("PRAGMA table_info(video_detection_segments)").fetchall()]
+            if "run_id" not in seg_cols:
+                conn.execute("ALTER TABLE video_detection_segments ADD COLUMN run_id TEXT")
+                conn.commit()
+
+            conn.execute("DELETE FROM video_detection_segments WHERE run_id = ?", (run_id,))
+            seg_sql = (
+                "INSERT INTO video_detection_segments "
+                "(video_id, label, start_ms, end_ms, max_confidence, support_level, pipeline_version, source, run_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            conn.executemany(seg_sql, segments)
+            conn.commit()
+            unique_labels = set(s[1] for s in segments)
+            print(f"  Saved {len(segments)} segments for {len(unique_labels)} labels")
+            for label in sorted(unique_labels):
+                label_segs = [s for s in segments if s[1] == label]
+                for s in label_segs:
+                    start_s = s[2] / 1000
+                    end_s = s[3] / 1000
+                    print(f"    {label:<25} {start_s:.1f}s - {end_s:.1f}s  (conf: {s[4]:.2f})")
+
+        # Scene classification using CLIP
+        try:
+            scene_attrs = run_scene_classification(frames, conn, video_id, run_id, is_night=is_night)
+        except Exception as scene_exc:
+            print(f"  [!] Scene classification failed: {scene_exc}")
+            scene_attrs = {}
+
+        # Intersection detection — collect parallel query results + visual detections
+        try:
+            connector_count = overture_future.result(timeout=30) if overture_future else 0
+            stop_signs = beemaps_future.result(timeout=15) if beemaps_future else []
+        except Exception as iq_exc:
+            print(f"  [!] Intersection query failed: {iq_exc}")
+            connector_count = 0
+            stop_signs = []
+
+        intersection_score, intersection_details = compute_intersection_score(
+            connector_count, detections, stop_signs
+        )
+
+        # Classify and save
+        if intersection_score >= 0.6:
+            int_label = "yes"
+        elif intersection_score >= 0.3:
+            int_label = "possible"
+        else:
+            int_label = "no"
+
+        _save_scene_attributes(conn, video_id, run_id, {
+            "intersection": {"value": int_label, "confidence": intersection_score},
+        })
+        print(f"\n  Intersection: {int_label} (score={intersection_score:.2f})")
+        print(f"    overture={intersection_details['overture_score']:.2f} "
+              f"({connector_count} connectors), "
+              f"visual={intersection_details['visual_score']:.2f} "
+              f"({', '.join(intersection_details['intersection_features']) or 'none'}), "
+              f"beemaps={intersection_details['beemaps_score']:.2f} "
+              f"({len(stop_signs)} stop signs)")
+
+        if overture_future or beemaps_future:
+            _thread_pool.shutdown(wait=False)
+
+        # VRU near-miss scoring
+        nearmiss_score, nearmiss_details = compute_nearmiss_score(detections, event)
+        if nearmiss_score >= 0.5:
+            nm_label = "yes"
+        elif nearmiss_score >= 0.25:
+            nm_label = "possible"
+        else:
+            nm_label = "no"
+
+        _save_scene_attributes(conn, video_id, run_id, {
+            "near_miss": {"value": nm_label, "confidence": nearmiss_score},
+        })
+        if nearmiss_score > 0.1:
+            print(f"\n  Near-miss: {nm_label} (score={nearmiss_score:.2f})")
+            if nearmiss_details.get("label"):
+                print(f"    {nearmiss_details['label']} at {nearmiss_details.get('min_distance_m', '?')}m, "
+                      f"proximity={nearmiss_details.get('proximity', '?')}, "
+                      f"approaching={nearmiss_details.get('approaching', '?')}, "
+                      f"during_decel={nearmiss_details.get('during_decel', '?')}, "
+                      f"speed={nearmiss_details.get('speed_mph', '?')} mph")
+
+        # Generate narrative timeline (Claude Vision)
+        try:
+            generate_timeline(
+                frames, detections, event, conn, video_id, run_id,
+                scene_attrs, nearmiss_score, intersection_score,
+            )
+        except Exception as tl_exc:
+            print(f"  [!] Timeline generation failed: {tl_exc}")
+
         # Mark as completed
         update_run_status(conn, run_id, "completed", detection_count=total_saved)
         print(f"\n  Run completed: {total_saved} detections")
+        if scene_attrs:
+            parts = [f"{k}={d['value']} ({d['confidence']:.0%})" for k, d in scene_attrs.items()]
+            print(f"  Scene: {', '.join(parts)}")
 
     except Exception as exc:
         error_msg = f"{type(exc).__name__}: {exc}"

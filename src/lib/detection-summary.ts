@@ -1,7 +1,16 @@
 import type { FrameDetection } from "@/types/pipeline";
 
-/** Gap threshold: detections of the same label within this window are the same object */
-const TEMPORAL_GAP_MS = 500;
+/** Minimum peak confidence for VRU detections to appear in the clip summary (counts + timing) */
+const VRU_MIN_CONFIDENCE = 0.46;
+
+/** Labels excluded from clip summary (non-VRU vehicles) */
+const EXCLUDED_LABELS = new Set(["car", "truck", "bus"]);
+
+/** VRU labels that warrant timing callouts */
+const VRU_LABELS = new Set([
+  "person", "pedestrian", "child", "bicycle", "motorcycle",
+  "cat", "dog", "bird", "horse", "sheep", "cow", "bear",
+]);
 
 const PLURAL_MAP: Record<string, string> = {
   person: "people",
@@ -19,54 +28,109 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/**
- * Aggregate detections across all frames into estimated unique object counts per label.
- * Deduplicates temporally: consecutive frames with the same label (gap < 500ms) count as one object.
- */
-export function summarizeDetections(
-  detectionsByFrame: Map<number, FrameDetection[]>,
-  minConfidence: number
-): Record<string, number> {
-  // Collect all (label, frameMs) pairs above threshold
-  const labelFrames = new Map<string, number[]>();
+/** Check if two bounding boxes overlap (IoU > 0) or are within a margin */
+function bboxNear(a: FrameDetection, b: FrameDetection, margin: number): boolean {
+  return !(
+    a.xMax + margin < b.xMin ||
+    b.xMax + margin < a.xMin ||
+    a.yMax + margin < b.yMin ||
+    b.yMax + margin < a.yMin
+  );
+}
 
-  for (const [, detections] of detectionsByFrame) {
-    for (const det of detections) {
-      if (det.confidence < minConfidence) continue;
-      const frames = labelFrames.get(det.label) ?? [];
-      frames.push(det.frameMs);
-      labelFrames.set(det.label, frames);
-    }
-  }
+export interface VruTiming {
+  label: string;
+  firstSeenSec: number;
+  lastSeenSec: number;
+  peakConfidence: number;
+}
 
-  // Count distinct appearance runs per label
-  const counts: Record<string, number> = {};
-
-  for (const [label, frames] of labelFrames) {
-    frames.sort((a, b) => a - b);
-    let runs = 1;
-    for (let i = 1; i < frames.length; i++) {
-      if (frames[i] - frames[i - 1] > TEMPORAL_GAP_MS) {
-        runs++;
-      }
-    }
-    counts[label] = runs;
-  }
-
-  return counts;
+export interface DetectionSummary {
+  counts: Record<string, number>;
+  vruTimings: VruTiming[];
 }
 
 /**
- * Build a natural-language sentence from detection counts.
- * e.g. "2 pedestrians, car, and 3 trucks detected in scene."
+ * Aggregate detections across all frames into estimated unique object counts per label,
+ * plus timing info for high-confidence VRU detections.
  */
-export function formatDetectionSentence(detections: Record<string, number>): string {
-  const entries = Object.entries(detections).filter(([, count]) => count > 0);
+export function summarizeDetections(
+  detectionsByFrame: Map<number, FrameDetection[]>,
+  _minConfidence: number
+): DetectionSummary {
+  // Collect detections above threshold, excluding vehicles
+  const byLabel = new Map<string, FrameDetection[]>();
+
+  for (const [, detections] of detectionsByFrame) {
+    for (const det of detections) {
+      if (EXCLUDED_LABELS.has(det.label)) continue;
+      if (det.confidence < VRU_MIN_CONFIDENCE) continue;
+      const arr = byLabel.get(det.label) ?? [];
+      arr.push(det);
+      byLabel.set(det.label, arr);
+    }
+  }
+
+  const counts: Record<string, number> = {};
+  const vruTimings: VruTiming[] = [];
+
+  for (const [label, dets] of byLabel) {
+    // Sort by time
+    dets.sort((a, b) => a.frameMs - b.frameMs);
+
+    // Track unique objects: each "track" is the most recent detection for that object.
+    // A new detection matches an existing track if it's in a nearby frame AND overlaps spatially.
+    const tracks: { first: FrameDetection; last: FrameDetection; peakConfidence: number }[] = [];
+
+    for (const det of dets) {
+      let matched = false;
+      for (let t = 0; t < tracks.length; t++) {
+        const prev = tracks[t].last;
+        const timeDelta = det.frameMs - prev.frameMs;
+        // Allow up to 2 seconds gap (handles missed frames in sparse sampling)
+        if (timeDelta <= 2000 && bboxNear(det, prev, 80)) {
+          tracks[t].last = det;
+          tracks[t].peakConfidence = Math.max(tracks[t].peakConfidence, det.confidence);
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        tracks.push({ first: det, last: det, peakConfidence: det.confidence });
+      }
+    }
+
+    counts[label] = tracks.length;
+
+    if (VRU_LABELS.has(label)) {
+      for (const track of tracks) {
+        vruTimings.push({
+          label,
+          firstSeenSec: track.first.frameMs / 1000,
+          lastSeenSec: track.last.frameMs / 1000,
+          peakConfidence: track.peakConfidence,
+        });
+      }
+    }
+  }
+
+  // Sort VRU timings by first appearance
+  vruTimings.sort((a, b) => a.firstSeenSec - b.firstSeenSec);
+
+  return { counts, vruTimings };
+}
+
+/**
+ * Build a natural-language sentence from detection counts + VRU timings.
+ */
+export function formatDetectionSentence(summary: DetectionSummary): string {
+  const { counts, vruTimings } = summary;
+  const entries = Object.entries(counts).filter(([, count]) => count > 0);
   if (entries.length === 0) return "";
 
   const parts = entries.map(([label, count]) => {
     if (count === 1) return label;
-    return `${count} ${pluralize(label, count)}`;
+    return `multiple ${pluralize(label, count)}`;
   });
 
   let joined: string;
@@ -78,5 +142,35 @@ export function formatDetectionSentence(detections: Record<string, number>): str
     joined = `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
   }
 
-  return `${capitalize(joined)} detected in scene.`;
+  let sentence = `${capitalize(joined)} detected in scene.`;
+
+  // Add timing callouts for high-confidence VRU detections
+  if (vruTimings.length > 0) {
+    // Group by label, take the most prominent (highest confidence) per label
+    const byLabel = new Map<string, VruTiming>();
+    for (const t of vruTimings) {
+      const existing = byLabel.get(t.label);
+      if (!existing || t.peakConfidence > existing.peakConfidence) {
+        byLabel.set(t.label, t);
+      }
+    }
+
+    const timingParts: string[] = [];
+    for (const [label, t] of byLabel) {
+      const duration = t.lastSeenSec - t.firstSeenSec;
+      if (duration > 0.5) {
+        timingParts.push(
+          `${capitalize(label)} visible from ${t.firstSeenSec.toFixed(1)}–${t.lastSeenSec.toFixed(1)}s`
+        );
+      } else {
+        timingParts.push(`${capitalize(label)} at ${t.firstSeenSec.toFixed(1)}s`);
+      }
+    }
+
+    if (timingParts.length > 0) {
+      sentence += ` ${timingParts.join(". ")}.`;
+    }
+  }
+
+  return sentence;
 }

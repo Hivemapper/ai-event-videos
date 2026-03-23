@@ -35,11 +35,6 @@ const navItems: NavItem[] = [
     label: "Metrics",
     isActive: (pathname) => pathname.startsWith("/metrics"),
   },
-  {
-    href: "/pipeline",
-    label: "Pipeline",
-    isActive: (pathname) => pathname.startsWith("/pipeline"),
-  },
 ];
 
 interface HeaderProps {

@@ -47,24 +47,37 @@ export interface RoadTypeResponse {
   toll: boolean;
 }
 
+/** Road classes that vehicles don't drive on — ignore when a drivable class exists */
+const NON_DRIVABLE = new Set(["path", "pedestrian", "track"]);
+
 async function queryRoadAt(
   lon: number,
   lat: number,
   token: string
 ): Promise<{ class: string | null; name: string | null; structure: string | null; toll: boolean }> {
-  const url = `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${lon},${lat}.json?layers=road&radius=10&limit=1&access_token=${token}`;
+  // Fetch multiple nearby features so we can skip non-drivable ones (paths/sidewalks)
+  const url = `https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/${lon},${lat}.json?layers=road&radius=15&limit=5&access_token=${token}`;
   const response = await fetch(url);
   if (!response.ok) return { class: null, name: null, structure: null, toll: false };
 
   const data = await response.json();
-  const feature = data.features?.[0];
-  if (!feature) return { class: null, name: null, structure: null, toll: false };
+  const features = data.features || [];
+  if (features.length === 0) return { class: null, name: null, structure: null, toll: false };
 
-  const props = feature.properties || {};
+  // Prefer the first (closest) drivable road; fall back to first feature
+  const drivable = features.find(
+    (f: Record<string, unknown>) => {
+      const cls = ((f.properties || {}) as Record<string, unknown>).class as string | undefined;
+      return cls && !NON_DRIVABLE.has(cls);
+    }
+  );
+  const feature = drivable || features[0];
+
+  const props = (feature.properties || {}) as Record<string, unknown>;
   return {
-    class: props.class || null,
-    name: props.name || props.ref || null,
-    structure: props.structure || null,
+    class: (props.class as string) || null,
+    name: (props.name as string) || (props.ref as string) || null,
+    structure: (props.structure as string) || null,
     toll: props.toll === true,
   };
 }

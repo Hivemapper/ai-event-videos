@@ -468,6 +468,57 @@ export async function getVideoDetectionSegments(
   return (segmentResult.rows as unknown as DbSegmentRow[]).map(mapSegment);
 }
 
+export async function getSceneAttributesByRunId(
+  videoId: string,
+  runId: string
+): Promise<Record<string, { value: string; confidence: number | null }>> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT attribute, value, confidence FROM scene_attributes
+     WHERE video_id = ? AND run_id = ?`,
+    [videoId, runId]
+  );
+  const attrs: Record<string, { value: string; confidence: number | null }> = {};
+  for (const row of result.rows as Array<{ attribute: string; value: string; confidence: number | null }>) {
+    attrs[row.attribute] = { value: row.value, confidence: row.confidence };
+  }
+  return attrs;
+}
+
+export async function getTimelineByRunId(
+  videoId: string,
+  runId: string
+): Promise<Array<{ startSec: number; endSec: number; event: string; details: string }> | null> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT timeline_json FROM clip_timelines
+     WHERE video_id = ? AND run_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [videoId, runId]
+  );
+  const row = result.rows[0] as { timeline_json: string } | undefined;
+  if (!row) return null;
+  try {
+    return JSON.parse(row.timeline_json);
+  } catch {
+    return null;
+  }
+}
+
+export async function getDetectionSegmentsByRunId(
+  videoId: string,
+  runId: string
+): Promise<VideoDetectionSegment[]> {
+  const db = await getDb();
+  const result = await db.query(
+    `SELECT * FROM video_detection_segments
+     WHERE video_id = ? AND run_id = ?
+     ORDER BY label ASC, start_ms ASC`,
+    [videoId, runId]
+  );
+  return (result.rows as unknown as DbSegmentRow[]).map(mapSegment);
+}
+
 export async function getVideoDetectionBoxes(videoId: string): Promise<import("@/types/pipeline").DetectionBox[]> {
   const db = await getDb();
   const result = await db.query(

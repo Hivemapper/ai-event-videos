@@ -5,7 +5,7 @@ import { Pencil, Check, Gauge, Clock, CircleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AIEvent, AIEventType } from "@/types/events";
 import { SpeedDataPoint, deriveSpeedFromGnss } from "@/lib/event-helpers";
-import { formatDetectionSentence } from "@/lib/detection-summary";
+import { formatDetectionSentence, type DetectionSummary } from "@/lib/detection-summary";
 
 interface ClipSummaryProps {
   videoId: string;
@@ -15,9 +15,11 @@ interface ClipSummaryProps {
   roadName: string | null;
   timeOfDay: string;
   duration: number;
-  detections?: Record<string, number>;
+  detections?: DetectionSummary;
   speedLimit?: { limit: number; unit: string } | null;
   exceedsSpeedLimit?: boolean;
+  weather?: string | null;
+  timeline?: Array<{ startSec: number; endSec: number; event: string; details: string }> | null;
 }
 
 function speedMsToMph(speedMs: number): number {
@@ -75,6 +77,13 @@ function computeBrakingDurationSec(speedData: SpeedDataPoint[]): number | null {
   return deltaMs > 0 ? deltaMs / 1000 : null;
 }
 
+const WEATHER_PHRASES: Record<string, string> = {
+  rain: "in rainy conditions",
+  snow: "in snowy conditions",
+  fog: "in foggy conditions",
+  overcast: "under overcast skies",
+};
+
 function generateDefaultSummary({
   event,
   countryName,
@@ -85,6 +94,7 @@ function generateDefaultSummary({
   detections,
   speedLimit,
   exceedsSpeedLimit,
+  weather,
 }: Omit<ClipSummaryProps, "videoId">): string {
   const rawSpeedData = event.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
   const speedData = (rawSpeedData && rawSpeedData.length > 0)
@@ -115,7 +125,7 @@ function generateDefaultSummary({
   const minMph = minSpeedMs !== null ? speedMsToMph(minSpeedMs) : null;
 
   const detectionNote =
-    detections && Object.keys(detections).length > 0
+    detections && Object.keys(detections.counts).length > 0
       ? ` ${formatDetectionSentence(detections)}`
       : "";
 
@@ -270,6 +280,15 @@ function generateDefaultSummary({
     parts.push(detectionNote);
   }
 
+  // Add weather context (skip "clear skies" — that's the uninteresting default)
+  const weatherPhrase = weather ? WEATHER_PHRASES[weather] : null;
+  if (weatherPhrase) {
+    // Append to the first sentence (before the period)
+    if (parts.length > 0) {
+      parts[0] = parts[0].replace(/\.\s*$/, ` ${weatherPhrase}.`);
+    }
+  }
+
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
@@ -284,6 +303,8 @@ export function ClipSummary({
   detections,
   speedLimit,
   exceedsSpeedLimit,
+  weather,
+  timeline,
 }: ClipSummaryProps) {
   const [summary, setSummary] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -302,6 +323,7 @@ export function ClipSummary({
     detections,
     speedLimit,
     exceedsSpeedLimit,
+    weather,
   });
 
   // Load saved summary
@@ -440,7 +462,7 @@ export function ClipSummary({
 
         {/* Summary text */}
         <div className="rounded-lg bg-muted/40 px-4 py-3">
-          <p className="text-sm leading-relaxed" style={{ fontFamily: '"Monaspace Neon", monospace' }}>{displaySummary}</p>
+          <p className="text-sm leading-relaxed">{displaySummary}</p>
         </div>
 
         {/* Actions */}
@@ -453,6 +475,32 @@ export function ClipSummary({
             Edit
           </button>
         </div>
+
+        {/* Timeline */}
+        {timeline && timeline.length > 0 && (
+          <div className="mt-3 border-t pt-3">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-muted-foreground">
+                  <th className="pb-2 pr-4 font-medium w-24">Time (s)</th>
+                  <th className="pb-2 pr-4 font-medium w-44">Event</th>
+                  <th className="pb-2 font-medium">Details</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {timeline.map((seg, i) => (
+                  <tr key={i} className="align-top">
+                    <td className="py-2.5 pr-4 tabular-nums text-muted-foreground">
+                      {seg.startSec}&ndash;{seg.endSec}
+                    </td>
+                    <td className="py-2.5 pr-4 font-medium">{seg.event}</td>
+                    <td className="py-2.5 text-muted-foreground">{seg.details}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
     </div>
   );
 }

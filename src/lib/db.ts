@@ -69,8 +69,12 @@ const SCHEMA_SQL = `
     support_level TEXT NOT NULL,
     pipeline_version TEXT NOT NULL,
     source TEXT NOT NULL DEFAULT 'yolo',
+    run_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE INDEX IF NOT EXISTS idx_video_detection_segments_run_id
+    ON video_detection_segments (run_id);
 
   CREATE TABLE IF NOT EXISTS pipeline_runs (
     id TEXT PRIMARY KEY,
@@ -159,6 +163,27 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_detection_runs_video
     ON detection_runs (video_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS scene_attributes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    run_id TEXT,
+    attribute TEXT NOT NULL,
+    value TEXT NOT NULL,
+    confidence REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_scene_attributes_video
+    ON scene_attributes (video_id);
+
+  CREATE TABLE IF NOT EXISTS clip_timelines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id TEXT NOT NULL,
+    run_id TEXT,
+    timeline_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 
   CREATE INDEX IF NOT EXISTS idx_video_pipeline_state_day
     ON video_pipeline_state (day);
@@ -345,6 +370,7 @@ export function getDb(): Promise<DbClient> {
     );
     await ensureColumn(client, "labels", "enabled", "INTEGER NOT NULL DEFAULT 1");
     await ensureColumn(client, "labels", "detector_aliases", "TEXT");
+    await ensureColumn(client, "video_detection_segments", "run_id", "TEXT");
 
     // Seed defaults
     await seedDefaults(client);
