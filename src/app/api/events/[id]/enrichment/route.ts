@@ -6,7 +6,6 @@ export const runtime = "nodejs";
 
 interface EnrichmentResult {
   intersection: { score: number; connectors?: number; features?: string[] } | null;
-  nearMiss: { score: number; label?: string; distanceM?: number; approaching?: boolean } | null;
   vruDetections: Array<{
     label: string;
     segments: Array<{ startMs: number; endMs: number; maxConfidence: number }>;
@@ -51,8 +50,6 @@ export async function GET(
     // --- Scene attributes (weather + intersection) ---
     let weather: EnrichmentResult["weather"] = null;
     let intersection: EnrichmentResult["intersection"] = null;
-    let nearMiss: EnrichmentResult["nearMiss"] = null;
-
     if (runId) {
       const sceneResult = await db.query(
         `SELECT attribute, value, confidence FROM scene_attributes
@@ -69,9 +66,6 @@ export async function GET(
         }
         if (row.attribute === "intersection" && row.confidence !== null) {
           intersection = { score: row.confidence };
-        }
-        if (row.attribute === "near_miss" && row.confidence !== null) {
-          nearMiss = { score: row.confidence };
         }
       }
     }
@@ -222,7 +216,6 @@ export async function GET(
 
     const enrichment: EnrichmentResult = {
       intersection,
-      nearMiss,
       vruDetections,
       weather,
       road: {
