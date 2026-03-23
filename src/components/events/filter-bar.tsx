@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Calendar,
   Check,
@@ -126,21 +126,24 @@ export function FilterBar({
   const [draftRadius, setDraftRadius] = useState(searchRadius);
   const [draftCoordsInput, setDraftCoordsInput] = useState("");
 
-  // Reset draft state when modal opens
+  // Reset draft state only when modal OPENS (not on every prop change while open)
+  const prevOpenRef = useRef(false);
   useEffect(() => {
-    if (advancedOpen) {
-      setDraftStartDate(startDate);
-      setDraftEndDate(endDate);
-      setDraftTypes([...selectedTypes]);
-      setDraftTimeOfDay([...selectedTimeOfDay]);
-      setDraftCountries([...selectedCountries]);
-      setDraftRoadTypes([...selectedRoadTypes]);
-      setDraftCoordinates(searchCoordinates);
-      setDraftRadius(searchRadius);
-      setDraftCoordsInput(
-        searchCoordinates ? `${searchCoordinates.lat},${searchCoordinates.lon}` : ""
-      );
-    }
+    const justOpened = advancedOpen && !prevOpenRef.current;
+    prevOpenRef.current = advancedOpen;
+    if (!justOpened) return;
+
+    setDraftStartDate(startDate);
+    setDraftEndDate(endDate);
+    setDraftTypes([...selectedTypes]);
+    setDraftTimeOfDay([...selectedTimeOfDay]);
+    setDraftCountries([...selectedCountries]);
+    setDraftRoadTypes([...selectedRoadTypes]);
+    setDraftCoordinates(searchCoordinates);
+    setDraftRadius(searchRadius);
+    setDraftCoordsInput(
+      searchCoordinates ? `${searchCoordinates.lat},${searchCoordinates.lon}` : ""
+    );
   }, [advancedOpen, startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, searchCoordinates, searchRadius]);
 
   const handleTypeToggle = (type: AIEventType) => {
@@ -217,10 +220,11 @@ export function FilterBar({
       }
     }
 
-    // Clear coordinates if input is empty or invalid
+    // Only clear coordinates when user explicitly empties the field
     if (value.trim() === "") {
       setDraftCoordinates(null);
     }
+    // Otherwise keep existing draftCoordinates — don't clear while user is typing
   };
 
   const handleClearCoordinates = () => {

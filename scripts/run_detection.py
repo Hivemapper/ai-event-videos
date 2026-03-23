@@ -280,6 +280,12 @@ NON_AMBIGUOUS_CLASSES = {
 # Labels that indicate intersection features (for intersection scoring)
 INTERSECTION_LABELS = {"stop sign", "traffic light", "crosswalk", "traffic signal", "yield sign"}
 
+# Animal detection filtering — higher threshold + multi-frame consistency
+ANIMAL_LABELS = {"dog", "cat", "bird", "horse", "sheep", "cow", "bear"}
+ANIMAL_MIN_CONFIDENCE = 0.55
+ANIMAL_MIN_FRAMES = 2          # must appear in at least 2 frames
+ANIMAL_FRAME_GAP_MS = 2000     # max gap between frames to count as consecutive
+
 # All known valid labels (non-ambiguous + ambiguous)
 ALL_KNOWN_LABELS = NON_AMBIGUOUS_CLASSES | set(AMBIGUOUS_CLASSES.keys())
 
@@ -1131,6 +1137,59 @@ def penalize_riderless(detections: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Animal false positive filter — higher threshold + multi-frame consistency
+# ---------------------------------------------------------------------------
+
+def _filter_animal_detections(detections: list[dict]) -> list[dict]:
+    """Remove animal detections that are below confidence threshold or appear
+    in only a single frame (likely false positives from shadows/debris).
+
+    Non-animal detections pass through unchanged.
+    """
+    # Separate animal vs non-animal
+    animals: list[dict] = []
+    others: list[dict] = []
+    for d in detections:
+        if d["label"] in ANIMAL_LABELS:
+            animals.append(d)
+        else:
+            others.append(d)
+
+    if not animals:
+        return detections
+
+    # Step 1: confidence threshold
+    animals = [d for d in animals if d["confidence"] >= ANIMAL_MIN_CONFIDENCE]
+
+    # Step 2: multi-frame consistency — group by label, require >= 2 frames
+    by_label: dict[str, list[dict]] = defaultdict(list)
+    for d in animals:
+        by_label[d["label"]].append(d)
+
+    kept_animals: list[dict] = []
+    for label, dets in by_label.items():
+        # Sort by time
+        dets.sort(key=lambda d: d["frame_ms"])
+        # Find unique frame timestamps
+        frame_times = sorted(set(d["frame_ms"] for d in dets))
+
+        if len(frame_times) < ANIMAL_MIN_FRAMES:
+            continue  # only seen in 1 frame — discard
+
+        # Check that at least 2 frames are within the gap threshold
+        has_consecutive = False
+        for i in range(1, len(frame_times)):
+            if frame_times[i] - frame_times[i - 1] <= ANIMAL_FRAME_GAP_MS:
+                has_consecutive = True
+                break
+
+        if has_consecutive:
+            kept_animals.extend(dets)
+
+    return others + kept_animals
+
+
+# ---------------------------------------------------------------------------
 # Class-agnostic NMS (copied from run_gdino_clip_pipeline.py)
 # ---------------------------------------------------------------------------
 
@@ -1850,7 +1909,6 @@ def generate_timeline(
     video_id: str,
     run_id: str,
     scene_attrs: dict,
-    nearmiss_score: float,
     intersection_score: float,
 ) -> list[dict] | None:
     """Generate a narrative timeline using Claude Vision on key frames.
@@ -1968,7 +2026,10 @@ def generate_timeline(
             "- Say 'driver' not 'dashcam vehicle'\n"
             "- Keep event labels to 2-4 words\n"
             "- Keep details to ONE short sentence (max 15 words)\n"
-            "- Only describe what is clearly visible in the frames\n\n"
+            "- Only describe what is clearly visible in the frames\n"
+            "- Do NOT describe ambiguous objects as animals. Piles of dirt, debris, shadows, bags, "
+            "and other roadside objects are often mistaken for animals in dashcam footage. "
+            "Only mention an animal if you are highly confident it is one (clear shape, legs, movement).\n\n"
             "Return ONLY valid JSON — an array of objects:\n"
             '  startSec (number), endSec (number), event (short label), details (1 short sentence)\n\n'
             "Example:\n"
@@ -2616,6 +2677,14 @@ def main() -> int:
             print(f"  Riderless penalty: {riderless_count} bike/motorcycle detections "
                   f"had confidence reduced (no person nearby)")
 
+        # Filter animal false positives: require higher confidence + multi-frame
+        before_animal = len(detections)
+        detections = _filter_animal_detections(detections)
+        animal_removed = before_animal - len(detections)
+        if animal_removed:
+            print(f"\n  Animal filter: removed {animal_removed} low-confidence/single-frame "
+                  f"animal detections ({before_animal} -> {len(detections)})")
+
         # Save all detections using parameterized batch insert
         print(f"\n  Saving {len(detections)} detections to DB...")
         t_save = time.time()
@@ -2763,32 +2832,11 @@ def main() -> int:
         if overture_future or beemaps_future:
             _thread_pool.shutdown(wait=False)
 
-        # VRU near-miss scoring
-        nearmiss_score, nearmiss_details = compute_nearmiss_score(detections, event)
-        if nearmiss_score >= 0.5:
-            nm_label = "yes"
-        elif nearmiss_score >= 0.25:
-            nm_label = "possible"
-        else:
-            nm_label = "no"
-
-        _save_scene_attributes(conn, video_id, run_id, {
-            "near_miss": {"value": nm_label, "confidence": nearmiss_score},
-        })
-        if nearmiss_score > 0.1:
-            print(f"\n  Near-miss: {nm_label} (score={nearmiss_score:.2f})")
-            if nearmiss_details.get("label"):
-                print(f"    {nearmiss_details['label']} at {nearmiss_details.get('min_distance_m', '?')}m, "
-                      f"proximity={nearmiss_details.get('proximity', '?')}, "
-                      f"approaching={nearmiss_details.get('approaching', '?')}, "
-                      f"during_decel={nearmiss_details.get('during_decel', '?')}, "
-                      f"speed={nearmiss_details.get('speed_mph', '?')} mph")
-
         # Generate narrative timeline (Claude Vision)
         try:
             generate_timeline(
                 frames, detections, event, conn, video_id, run_id,
-                scene_attrs, nearmiss_score, intersection_score,
+                scene_attrs, intersection_score,
             )
         except Exception as tl_exc:
             print(f"  [!] Timeline generation failed: {tl_exc}")
