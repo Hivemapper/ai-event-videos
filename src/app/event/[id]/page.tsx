@@ -583,7 +583,7 @@ export default function EventDetailPage({
                     )}
                   </Badge>
                 )}
-                {sceneAttributes?.intersection && (
+                {sceneAttributes?.intersection && sceneAttributes.intersection.confidence !== null && sceneAttributes.intersection.confidence >= 0.5 && (
                   <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
                     Intersection
                     {sceneAttributes.intersection.confidence !== null && (
