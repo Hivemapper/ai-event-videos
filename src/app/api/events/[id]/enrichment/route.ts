@@ -5,7 +5,6 @@ import { getTimeOfDay } from "@/lib/sun";
 export const runtime = "nodejs";
 
 interface EnrichmentResult {
-  intersection: { score: number; connectors?: number; features?: string[] } | null;
   vruDetections: Array<{
     label: string;
     segments: Array<{ startMs: number; endMs: number; maxConfidence: number }>;
@@ -47,9 +46,8 @@ export async function GET(
     );
     const runId = (runResult.rows[0] as { id: string } | undefined)?.id ?? null;
 
-    // --- Scene attributes (weather + intersection) ---
+    // --- Scene attributes (weather) ---
     let weather: EnrichmentResult["weather"] = null;
-    let intersection: EnrichmentResult["intersection"] = null;
     if (runId) {
       const sceneResult = await db.query(
         `SELECT attribute, value, confidence FROM scene_attributes
@@ -63,9 +61,6 @@ export async function GET(
       }>) {
         if (row.attribute === "weather" && row.confidence !== null) {
           weather = { value: row.value, confidence: row.confidence };
-        }
-        if (row.attribute === "intersection" && row.confidence !== null) {
-          intersection = { score: row.confidence };
         }
       }
     }
@@ -215,7 +210,6 @@ export async function GET(
     }
 
     const enrichment: EnrichmentResult = {
-      intersection,
       vruDetections,
       weather,
       road: {

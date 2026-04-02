@@ -7,15 +7,22 @@ import {
   ArrowLeft,
   Check,
   Download,
+  FileQuestion,
+  Ghost,
   Loader2,
   Maximize2,
+  Route,
+  Tag,
+  VideoOff,
   X,
   ChevronRight,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import dynamic from "next/dynamic";
 
@@ -31,6 +38,7 @@ import { getCameraIntrinsics, BEE_HFOV, DevicesResponse, getSpeedUnit, SpeedUnit
 import { cn } from "@/lib/utils";
 import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { useRoadType } from "@/hooks/use-road-type";
+import { useTriageStatus, TriageCategory } from "@/hooks/use-triage-status";
 import { useDetectionRuns } from "@/hooks/use-detection-runs";
 import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
 import { useRunLogs } from "@/hooks/use-run-logs";
@@ -121,6 +129,14 @@ function countryFlag(name: string): string {
   return "";
 }
 
+const TRIAGE_OPTIONS: { value: TriageCategory; label: string; icon: typeof Ghost; color: string }[] = [
+  { value: "missing_video", label: "Missing Video", icon: VideoOff, color: "text-blue-600" },
+  { value: "missing_metadata", label: "Missing Metadata", icon: FileQuestion, color: "text-violet-600" },
+  { value: "ghost", label: "Ghost", icon: Ghost, color: "text-red-600" },
+  { value: "open_road", label: "Open Road", icon: Route, color: "text-amber-600" },
+  { value: "signal", label: "Signal", icon: Zap, color: "text-green-600" },
+];
+
 function CollapsibleSection({
   title,
   children,
@@ -158,6 +174,7 @@ export default function EventDetailPage({
     event?.location.lat ?? null,
     event?.location.lon ?? null
   );
+  const { data: triageStatus, setTriage, removeTriage } = useTriageStatus(id, event?.type);
   const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
@@ -462,6 +479,70 @@ export default function EventDetailPage({
 
       {/* Main content */}
       <main className="container mx-auto px-4 py-6">
+        {triageStatus?.triage_result === "missing_video" && (
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            <VideoOff className="w-5 h-5 mt-0.5 shrink-0 text-blue-500" />
+            <div>
+              <p className="font-medium">Missing Video</p>
+              <p className="mt-0.5 text-blue-700/80">
+                The video file for this event is missing or too small to be a valid recording.
+                {triageStatus.rules_triggered && (
+                  <span className="ml-1">
+                    Rules: {JSON.parse(triageStatus.rules_triggered).join(", ")}.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+        {triageStatus?.triage_result === "missing_metadata" && (
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-800">
+            <FileQuestion className="w-5 h-5 mt-0.5 shrink-0 text-violet-500" />
+            <div>
+              <p className="font-medium">Missing Metadata</p>
+              <p className="mt-0.5 text-violet-700/80">
+                This event is missing GNSS and/or IMU telemetry data required for triage analysis.
+                {triageStatus.rules_triggered && (
+                  <span className="ml-1">
+                    Rules: {JSON.parse(triageStatus.rules_triggered).join(", ")}.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+        {triageStatus?.triage_result === "ghost" && (
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <Ghost className="w-5 h-5 mt-0.5 shrink-0 text-red-500" />
+            <div>
+              <p className="font-medium">Ghost Event — Likely False Positive</p>
+              <p className="mt-0.5 text-red-700/80">
+                Telemetry analysis indicates this event may not reflect a real driving incident.
+                {triageStatus.rules_triggered && (
+                  <span className="ml-1">
+                    Rules: {JSON.parse(triageStatus.rules_triggered).join(", ")}.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
+        {triageStatus?.triage_result === "open_road" && (
+          <div className="mb-4 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <Route className="w-5 h-5 mt-0.5 shrink-0 text-amber-500" />
+            <div>
+              <p className="font-medium">Open Road — Low-Risk Context</p>
+              <p className="mt-0.5 text-amber-700/80">
+                This event occurred on an open road with stable, consistent driving at highway speeds.
+                {triageStatus.rules_triggered && (
+                  <span className="ml-1">
+                    Rules: {JSON.parse(triageStatus.rules_triggered).join(", ")}.
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {/* Left column - Video */}
           <div className="space-y-4">
@@ -561,6 +642,39 @@ export default function EventDetailPage({
                 >
                   {config.label}
                 </Badge>
+                <Select
+                  value={triageStatus?.triage_result ?? "none"}
+                  onValueChange={(val) => {
+                    if (val === "none") {
+                      removeTriage();
+                    } else {
+                      setTriage(val as TriageCategory);
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className={cn(
+                      "rounded-full px-2.5 text-xs font-medium",
+                      !triageStatus && "text-muted-foreground",
+                      triageStatus?.triage_result === "missing_video" && "bg-blue-50 text-blue-700 border-blue-200",
+                      triageStatus?.triage_result === "missing_metadata" && "bg-violet-50 text-violet-700 border-violet-200",
+                      triageStatus?.triage_result === "ghost" && "bg-red-50 text-red-700 border-red-200",
+                      triageStatus?.triage_result === "open_road" && "bg-amber-50 text-amber-700 border-amber-200",
+                      triageStatus?.triage_result === "signal" && "bg-green-50 text-green-700 border-green-200",
+                    )}
+                  >
+                    <SelectValue placeholder="Triage" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No Category</SelectItem>
+                    {TRIAGE_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 {roadType?.classLabel && (
                   <Badge variant="outline">
                     {roadType.classLabel}
@@ -579,16 +693,6 @@ export default function EventDetailPage({
                     {sceneAttributes.weather.value}
                     {sceneAttributes.weather.confidence !== null && (
                       <span className="ml-1 opacity-60">{Math.round(sceneAttributes.weather.confidence * 100)}%</span>
-                    )}
-                  </Badge>
-                )}
-                {sceneAttributes?.intersection && sceneAttributes.intersection.confidence !== null && sceneAttributes.intersection.confidence >= 0.5 && (
-                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
-                    Intersection
-                    {sceneAttributes.intersection.confidence !== null && (
-                      <span className="ml-1 opacity-60">
-                        {Math.round(sceneAttributes.intersection.confidence * 100)}%
-                      </span>
                     )}
                   </Badge>
                 )}

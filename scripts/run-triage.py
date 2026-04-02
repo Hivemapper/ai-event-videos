@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""
+Phase 0 Triage — classify events as Missing Video, Ghost, Open Road, or Signal.
+
+Usage:
+    python3 scripts/run-triage.py <num_events> [--days N]
+
+Examples:
+    python3 scripts/run-triage.py 500
+    python3 scripts/run-triage.py 500 --days 7
+"""
+
+import argparse
+import gzip
+import json
+import math
+import os
+import sqlite3
+import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from statistics import mean, stdev
+
+import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DB_PATH = PROJECT_ROOT / "data" / "labels.db"
+EVENT_CACHE_DIR = PROJECT_ROOT / "data" / "event-cache"
+
+MS_TO_MPH = 2.237
+G = 9.81  # m/s²
+MIN_VIDEO_SIZE = 500 * 1024  # 500KB — files at or below this aren't real videos
+
+# Event types that imply speed change
+SPEED_CHANGE_TYPES = {
+    "HARSH_BRAKING", "AGGRESSIVE_ACCELERATION", "HIGH_G_FORCE",
+    "SWERVING", "HARSH_CORNERING",
+}
+
+# ANSI colors
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+CYAN = "\033[36m"
+RESET = "\033[0m"
+
+
+def load_api_key() -> str:
+    key = os.environ.get("BEEMAPS_API_KEY")
+    if key:
+        return key
+    env_local = PROJECT_ROOT / ".env.local"
+    if env_local.exists():
+        for line in env_local.read_text().splitlines():
+            if line.startswith("BEEMAPS_API_KEY="):
+                return line.split("=", 1)[1].strip()
+    raise RuntimeError("BEEMAPS_API_KEY not found")
+
+
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distance in meters between two GPS points."""
+    R = 6371000
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def compute_heading(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Bearing in degrees from point 1 to point 2."""
+    dlon = math.radians(lon2 - lon1)
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    x = math.sin(dlon) * math.cos(lat2r)
+    y = (math.cos(lat1r) * math.sin(lat2r) -
+         math.sin(lat1r) * math.cos(lat2r) * math.cos(dlon))
+    return math.degrees(math.atan2(x, y)) % 360
+
+
+def derive_speed_from_gnss(gnss: list[dict]) -> list[dict]:
+    """Compute speed array from consecutive GNSS points (haversine distance / dt)."""
+    if len(gnss) < 2:
+        return []
+    result = []
+    for i in range(1, len(gnss)):
+        prev, curr = gnss[i - 1], gnss[i]
+        dt = (curr["timestamp"] - prev["timestamp"]) / 1000  # seconds
+        if dt <= 0:
+            continue
+        dist = haversine(prev["lat"], prev["lon"], curr["lat"], curr["lon"])
+        result.append({"AVG_SPEED_MS": dist / dt, "TIMESTAMP": curr["timestamp"]})
+    return result
+
+
+def check_video(video_url: str | None) -> tuple[bool, int | None]:
+    """Check video size via a 1-byte Range GET. Returns (is_valid, total_size).
+
+    Uses `Range: bytes=0-0` instead of HEAD because the video CDN (Cloudflare)
+    returns 405 for HEAD requests. The Range GET downloads only 1 byte and the
+    `Content-Range` header reveals the full file size.
+
+    A video is considered missing/invalid if:
+      - No URL provided
+      - Request fails or returns non-206
+      - Total size is <= MIN_VIDEO_SIZE (500KB)
+      - Response content-type is not video/*
+    """
+    if not video_url:
+        return False, None
+    try:
+        resp = api_request(
+            "GET",
+            video_url,
+            headers={"Range": "bytes=0-0"},
+            timeout=10,
+            allow_redirects=True,
+        )
+        if resp.status_code not in (200, 206):
+            return False, None
+        content_type = resp.headers.get("content-type", "")
+        if "text/html" in content_type:
+            return False, None
+
+        # Extract total size from Content-Range: bytes 0-0/TOTAL
+        content_range = resp.headers.get("content-range", "")
+        if "/" in content_range:
+            total_str = content_range.rsplit("/", 1)[1]
+            if total_str != "*":
+                size = int(total_str)
+                return size > MIN_VIDEO_SIZE, size
+
+        # Fallback: Content-Length on a 200 response (no range support)
+        if resp.status_code == 200:
+            length = resp.headers.get("content-length")
+            if length:
+                size = int(length)
+                return size > MIN_VIDEO_SIZE, size
+
+        # Can't determine size — assume valid
+        return True, None
+    except Exception:
+        return False, None
+
+
+def triage_event(event: dict) -> tuple[str, dict]:
+    """Classify event as ghost, open_road, or signal.
+
+    Returns (classification, details_dict).
+    """
+    event_type = event.get("type", "")
+    speeds_raw = event.get("metadata", {}).get("SPEED_ARRAY", [])
+    gnss = event.get("gnssData") or []
+    imu = event.get("imuData") or []
+
+    # Missing metadata — can't triage without telemetry
+    missing = []
+    if len(gnss) < 2:
+        missing.append("no_gnss")
+    if not imu:
+        missing.append("no_imu")
+    if missing:
+        return "missing_metadata", {
+            "event_type": event_type,
+            "rules": missing,
+            "speed_min": None, "speed_max": None,
+            "speed_mean": None, "speed_stddev": None,
+            "gnss_displacement_m": None,
+        }
+
+    # Derive speed from GNSS if SPEED_ARRAY is missing
+    if not speeds_raw and len(gnss) >= 2:
+        speeds_raw = derive_speed_from_gnss(gnss)
+
+    # Extract speed values in mph
+    speeds_mph = [s.get("AVG_SPEED_MS", 0) * MS_TO_MPH for s in speeds_raw]
+    speed_timestamps = [s.get("TIMESTAMP", 0) for s in speeds_raw]
+
+    details: dict = {
+        "event_type": event_type,
+        "speed_count": len(speeds_mph),
+        "gnss_count": len(gnss),
+        "imu_count": len(imu),
+    }
+
+    # Compute speed stats
+    if speeds_mph:
+        details["speed_min"] = round(min(speeds_mph), 1)
+        details["speed_max"] = round(max(speeds_mph), 1)
+        details["speed_mean"] = round(mean(speeds_mph), 1)
+        details["speed_stddev"] = round(stdev(speeds_mph), 1) if len(speeds_mph) > 1 else 0.0
+    else:
+        details["speed_min"] = details["speed_max"] = details["speed_mean"] = details["speed_stddev"] = None
+
+    # === GHOST CHECKS (any = ghost) ===
+    ghost_rules: list[str] = []
+
+    # Rule 0: Unrealistic speed (> 150 mph) — sensor glitch
+    if speeds_mph and max(speeds_mph) > 150:
+        ghost_rules.append("unrealistic_speed")
+
+    # Rule 1: GNSS displacement < 5m
+    if len(gnss) >= 2:
+        displacement = haversine(
+            gnss[0]["lat"], gnss[0]["lon"],
+            gnss[-1]["lat"], gnss[-1]["lon"]
+        )
+        details["gnss_displacement_m"] = round(displacement, 1)
+        if displacement < 5.0:
+            ghost_rules.append("gnss_no_movement")
+
+    # Rule 2: Zero speed entire clip
+    if speeds_mph and all(s < 0.5 for s in speeds_mph):
+        ghost_rules.append("zero_speed")
+
+    # Rule 3: Constant speed + event implies speed change
+    if speeds_mph and len(speeds_mph) > 1:
+        sd = stdev(speeds_mph)
+        if sd < 2.0 and event_type in SPEED_CHANGE_TYPES:
+            ghost_rules.append("constant_speed")
+
+    # Rule 4: Uncorrelated IMU spike
+    if imu and speeds_raw:
+        # Find largest acceleration spike
+        accel_magnitudes = []
+        for point in imu:
+            acc = point.get("accelerometer") or {}
+            if acc:
+                mag = math.sqrt(acc.get("x", 0)**2 + acc.get("y", 0)**2 + acc.get("z", 0)**2)
+                accel_magnitudes.append((point.get("timestamp", 0), abs(mag - G)))
+            else:
+                # Flat fields (acc_x, acc_y, acc_z)
+                ax = point.get("acc_x", point.get("accel_x", 0)) or 0
+                ay = point.get("acc_y", point.get("accel_y", 0)) or 0
+                az = point.get("acc_z", point.get("accel_z", 0)) or 0
+                mag = math.sqrt(float(ax)**2 + float(ay)**2 + float(az)**2)
+                accel_magnitudes.append((point.get("timestamp", 0), abs(mag - G)))
+
+        if accel_magnitudes:
+            peak_ts, peak_mag = max(accel_magnitudes, key=lambda x: x[1])
+            # Check if spike is isolated (< 0.5s of high accel)
+            spike_duration = sum(1 for _, m in accel_magnitudes
+                                 if m > peak_mag * 0.5) * (30000 / max(len(accel_magnitudes), 1))
+
+            if spike_duration < 500 and peak_mag > 0.3 * G:
+                # Check for corresponding GNSS change within 2s window
+                window_speeds = [
+                    s for s, t in zip(speeds_mph, speed_timestamps)
+                    if abs(t - peak_ts) < 2000
+                ]
+                if len(window_speeds) >= 2:
+                    speed_delta = max(window_speeds) - min(window_speeds)
+                else:
+                    speed_delta = 0
+
+                # Check heading change
+                heading_delta = 0.0
+                if len(gnss) >= 2:
+                    window_gnss = [g for g in gnss if abs(g["timestamp"] - peak_ts) < 2000]
+                    if len(window_gnss) >= 2:
+                        h1 = compute_heading(
+                            window_gnss[0]["lat"], window_gnss[0]["lon"],
+                            window_gnss[1]["lat"], window_gnss[1]["lon"]
+                        )
+                        h2 = compute_heading(
+                            window_gnss[-2]["lat"], window_gnss[-2]["lon"],
+                            window_gnss[-1]["lat"], window_gnss[-1]["lon"]
+                        )
+                        heading_delta = abs(h2 - h1)
+                        if heading_delta > 180:
+                            heading_delta = 360 - heading_delta
+
+                if speed_delta < 2.0 and heading_delta < 5.0:
+                    ghost_rules.append("uncorrelated_imu_spike")
+
+    # Rule 5: Speed contradicts event type
+    # Use max speed drop/gain anywhere in the clip, not just start vs end,
+    # since the event may occur in the middle of the 30s clip.
+    if speeds_mph and len(speeds_mph) >= 2:
+        running_max = speeds_mph[0]
+        largest_drop = 0.0
+        running_min = speeds_mph[0]
+        largest_gain = 0.0
+        for s in speeds_mph[1:]:
+            largest_drop = max(largest_drop, running_max - s)
+            running_max = max(running_max, s)
+            largest_gain = max(largest_gain, s - running_min)
+            running_min = min(running_min, s)
+        if event_type == "HARSH_BRAKING" and largest_drop < 2.0:
+            ghost_rules.append("speed_contradicts_braking")
+        elif event_type == "AGGRESSIVE_ACCELERATION" and largest_gain < 2.0:
+            ghost_rules.append("speed_contradicts_acceleration")
+
+    if ghost_rules:
+        details["rules"] = ghost_rules
+        return "ghost", details
+
+    # === OPEN ROAD CHECKS (all required) ===
+    # HIGH_SPEED events are never Open Road — the speed itself is the incident
+    if event_type == "HIGH_SPEED":
+        pass  # skip Open Road, fall through to Signal
+    elif speeds_mph and len(speeds_mph) >= 2:
+        open_road_pass: list[str] = []
+        open_road_fail: list[str] = []
+
+        # Rule 1: Min speed > 35 mph
+        if min(speeds_mph) > 35:
+            open_road_pass.append("min_speed_gt_35")
+        else:
+            open_road_fail.append("min_speed_gt_35")
+
+        # Rule 2: Mean speed > 45 mph
+        if mean(speeds_mph) > 45:
+            open_road_pass.append("mean_speed_gt_45")
+        else:
+            open_road_fail.append("mean_speed_gt_45")
+
+        # Rule 3: Speed std dev < 5 mph
+        if stdev(speeds_mph) < 5:
+            open_road_pass.append("speed_stable")
+        else:
+            open_road_fail.append("speed_stable")
+
+        # Rule 4: Heading stability < 15 degrees total change
+        total_heading_change = 0.0
+        if len(gnss) >= 3:
+            for i in range(1, len(gnss) - 1):
+                h1 = compute_heading(gnss[i-1]["lat"], gnss[i-1]["lon"],
+                                     gnss[i]["lat"], gnss[i]["lon"])
+                h2 = compute_heading(gnss[i]["lat"], gnss[i]["lon"],
+                                     gnss[i+1]["lat"], gnss[i+1]["lon"])
+                delta = abs(h2 - h1)
+                if delta > 180:
+                    delta = 360 - delta
+                total_heading_change += delta
+            details["total_heading_change"] = round(total_heading_change, 1)
+
+        if total_heading_change < 15:
+            open_road_pass.append("heading_stable")
+        else:
+            open_road_fail.append("heading_stable")
+
+        # Rule 5: No lateral accel > 0.3g
+        has_lateral_spike = False
+        if imu:
+            for point in imu:
+                acc = point.get("accelerometer") or {}
+                ay = abs(float(acc.get("y", 0) if acc else
+                               (point.get("acc_y") or point.get("accel_y") or 0)))
+                if ay > 0.3 * G:
+                    has_lateral_spike = True
+                    break
+        if not has_lateral_spike:
+            open_road_pass.append("no_lateral_spike")
+        else:
+            open_road_fail.append("no_lateral_spike")
+
+        # Rule 6: No longitudinal decel > 0.3g for > 0.5s
+        has_sustained_decel = False
+        if imu:
+            decel_start = None
+            for point in imu:
+                acc = point.get("accelerometer") or {}
+                ax = float(acc.get("x", 0) if acc else
+                           (point.get("acc_x") or point.get("accel_x") or 0))
+                ts = point.get("timestamp", 0)
+                if ax < -0.3 * G:
+                    if decel_start is None:
+                        decel_start = ts
+                    elif ts - decel_start > 500:
+                        has_sustained_decel = True
+                        break
+                else:
+                    decel_start = None
+        if not has_sustained_decel:
+            open_road_pass.append("no_sustained_decel")
+        else:
+            open_road_fail.append("no_sustained_decel")
+
+        if not open_road_fail:
+            details["rules"] = open_road_pass
+            return "open_road", details
+
+    # === SIGNAL ===
+    details["rules"] = ["default"]
+    return "signal", details
+
+
+def api_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Make an API request, pausing on 403 until it succeeds."""
+    kwargs.setdefault("timeout", 30)
+    wait = 30
+    while True:
+        resp = requests.request(method, url, **kwargs)
+        if resp.status_code != 403:
+            return resp
+        print(f"\n  {YELLOW}403 rate-limited — waiting {wait}s...{RESET}", flush=True)
+        time.sleep(wait)
+        wait = min(wait * 2, 300)
+
+
+def fetch_events(api_key: str, limit: int, days: int, offset: int = 0) -> list[dict]:
+    """Fetch recent events from Bee Maps. Splits into 31-day chunks if needed."""
+    auth = f"Basic {api_key}"
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    max_chunk = timedelta(days=31)
+
+    # Build 31-day chunks (newest first)
+    chunks: list[tuple[datetime, datetime]] = []
+    chunk_end = end
+    while chunk_end > start:
+        chunk_start = max(start, chunk_end - max_chunk)
+        chunks.append((chunk_start, chunk_end))
+        chunk_end = chunk_start
+
+    all_events: list[dict] = []
+    page_size = min(limit, 500)
+
+    print(f"Fetching {limit} events from last {days} days ({len(chunks)} chunk(s))...")
+
+    for chunk_start, chunk_end in chunks:
+        chunk_offset = offset if not all_events else 0
+        while len(all_events) < limit:
+            body = {
+                "startDate": chunk_start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "endDate": chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "limit": page_size,
+                "offset": chunk_offset,
+            }
+            resp = api_request(
+                "POST",
+                "https://beemaps.com/api/developer/aievents/search",
+                headers={"Content-Type": "application/json", "Authorization": auth},
+                json=body,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            events = data.get("events", [])
+            if not events:
+                break
+            all_events.extend(events)
+            chunk_offset += len(events)
+            print(f"  fetched {len(all_events)}/{limit}...", end="\r")
+            if len(events) < page_size:
+                break
+        if len(all_events) >= limit:
+            break
+
+    print(f"  fetched {len(all_events)} events total    ")
+    return all_events[:limit]
+
+
+def fetch_event_detail(api_key: str, event_id: str) -> dict:
+    """Fetch single event with GNSS + IMU data. Caches gzipped to data/event-cache/."""
+    # Check cache first (gzipped, then fall back to uncompressed)
+    cache_gz = EVENT_CACHE_DIR / f"{event_id}.json.gz"
+    cache_plain = EVENT_CACHE_DIR / f"{event_id}.json"
+    if cache_gz.exists():
+        with gzip.open(cache_gz, "rt") as f:
+            return json.loads(f.read())
+    if cache_plain.exists():
+        return json.loads(cache_plain.read_text())
+
+    auth = f"Basic {api_key}"
+    resp = api_request(
+        "GET",
+        f"https://beemaps.com/api/developer/aievents/{event_id}"
+        f"?includeGnssData=true&includeImuData=true",
+        headers={"Content-Type": "application/json", "Authorization": auth},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Cache the full response (gzipped)
+    EVENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with gzip.open(cache_gz, "wt") as f:
+        f.write(json.dumps(data))
+
+    return data
+
+
+def ensure_table(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS triage_results (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            triage_result TEXT NOT NULL,
+            rules_triggered TEXT NOT NULL DEFAULT '[]',
+            speed_min REAL,
+            speed_max REAL,
+            speed_mean REAL,
+            speed_stddev REAL,
+            gnss_displacement_m REAL,
+            video_size INTEGER,
+            event_timestamp TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    # Migrations: add columns if missing (existing DBs)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
+    if "video_size" not in cols:
+        conn.execute("ALTER TABLE triage_results ADD COLUMN video_size INTEGER")
+    if "lat" not in cols:
+        conn.execute("ALTER TABLE triage_results ADD COLUMN lat REAL")
+    if "lon" not in cols:
+        conn.execute("ALTER TABLE triage_results ADD COLUMN lon REAL")
+    conn.commit()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Phase 0 Triage — classify events without video")
+    parser.add_argument("num_events", type=int, help="Number of events to triage")
+    parser.add_argument("--days", type=int, default=30, help="Look back N days (default: 30)")
+    args = parser.parse_args()
+
+    api_key = load_api_key()
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    ensure_table(conn)
+
+    # Check already triaged
+    existing = set(
+        r[0] for r in conn.execute("SELECT id FROM triage_results").fetchall()
+    )
+
+    # Fetch all events in the date range, then filter to untriaged
+    print(f"{len(existing)} already triaged, looking for {args.num_events} new events...")
+    all_events = fetch_events(api_key, args.num_events + len(existing), args.days)
+    to_triage = [e for e in all_events if e["id"] not in existing][:args.num_events]
+    print(f"  found {len(to_triage)} new events (scanned {len(all_events)} total)\n")
+
+    if not to_triage:
+        print("Nothing to triage.")
+        return
+
+    counts = defaultdict(int)
+    t0 = time.time()
+
+    for i, evt_summary in enumerate(to_triage):
+        eid = evt_summary["id"]
+        etype = evt_summary.get("type", "UNKNOWN")
+        video_url = evt_summary.get("videoUrl")
+
+        # Step 1: Range-check the video (cheap, 1 byte)
+        video_valid, video_size = check_video(video_url)
+
+        if not video_valid:
+            result = "missing_video"
+            rules = ["no_video_url"] if not video_url else []
+            if video_size is not None and video_size <= MIN_VIDEO_SIZE:
+                rules = [f"file_too_small_{video_size}B"]
+            elif video_url and video_size is None:
+                rules = ["video_unreachable"]
+            details = {
+                "event_type": etype,
+                "rules": rules,
+                "video_size": video_size,
+                "speed_min": None, "speed_max": None,
+                "speed_mean": None, "speed_stddev": None,
+                "gnss_displacement_m": None,
+            }
+            # No need to fetch full event detail — skip the API call
+            event_timestamp = evt_summary.get("timestamp")
+        else:
+            # Step 2: Fetch full event with telemetry for Ghost/Open Road/Signal
+            try:
+                event = fetch_event_detail(api_key, eid)
+            except Exception as exc:
+                print(f"  [{i+1}/{len(to_triage)}] {eid} — fetch error: {exc}")
+                continue
+
+            result, details = triage_event(event)
+            details["video_size"] = video_size
+            event_timestamp = event.get("timestamp")
+
+        counts[result] += 1
+
+        # Color code
+        if result in ("missing_video", "missing_metadata"):
+            color = BLUE
+        elif result == "ghost":
+            color = RED
+        elif result == "open_road":
+            color = YELLOW
+        else:
+            color = GREEN
+
+        rules = details.get("rules", [])
+        speed_info = ""
+        if details.get("speed_min") is not None:
+            speed_info = f" ({details['speed_min']}-{details['speed_max']} mph)"
+        size_info = ""
+        if details.get("video_size") is not None:
+            size_kb = details["video_size"] / 1024
+            size_info = f" [{size_kb:.0f}KB]"
+
+        print(
+            f"  [{i+1}/{len(to_triage)}] {color}{result:>14}{RESET}  "
+            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}  "
+            f"{DIM}{', '.join(rules)}{RESET}"
+        )
+
+        # Save to DB
+        loc = evt_summary.get("location", {})
+        conn.execute(
+            """INSERT OR REPLACE INTO triage_results
+               (id, event_type, triage_result, rules_triggered,
+                speed_min, speed_max, speed_mean, speed_stddev,
+                gnss_displacement_m, video_size, event_timestamp, lat, lon, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (
+                eid, etype, result, json.dumps(rules),
+                details.get("speed_min"), details.get("speed_max"),
+                details.get("speed_mean"), details.get("speed_stddev"),
+                details.get("gnss_displacement_m"),
+                details.get("video_size"),
+                event_timestamp,
+                loc.get("lat"), loc.get("lon"),
+            ),
+        )
+        if (i + 1) % 10 == 0:
+            conn.commit()
+
+    conn.commit()
+    conn.close()
+
+    elapsed = time.time() - t0
+    total = sum(counts.values())
+
+    print(f"\n{BOLD}{'═' * 50}{RESET}")
+    print(f"  {BLUE}No Video:  {counts['missing_video']:>4}{RESET}")
+    print(f"  {BLUE}No Meta:   {counts['missing_metadata']:>4}{RESET}")
+    print(f"  {RED}Ghost:     {counts['ghost']:>4}{RESET}")
+    print(f"  {YELLOW}Open Road: {counts['open_road']:>4}{RESET}")
+    print(f"  {GREEN}Signal:    {counts['signal']:>4}{RESET}")
+    print(f"  Total:     {total:>4}  ({elapsed:.0f}s, {elapsed/max(total,1):.1f}s/event)")
+    print(f"{BOLD}{'═' * 50}{RESET}")
+
+
+if __name__ == "__main__":
+    main()

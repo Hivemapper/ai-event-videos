@@ -31,15 +31,20 @@ const navItems: NavItem[] = [
       pathname === "/" && searchParams.has("agent"),
   },
   {
-    href: "/pipeline",
-    label: "Pipeline",
-    isActive: (pathname) => pathname.startsWith("/pipeline"),
+    href: "/triage",
+    label: "Triage",
+    isActive: (pathname) => pathname.startsWith("/triage"),
   },
-  {
-    href: "/metrics",
-    label: "Metrics",
-    isActive: (pathname) => pathname.startsWith("/metrics"),
-  },
+  // {
+  //   href: "/pipeline",
+  //   label: "Pipeline",
+  //   isActive: (pathname) => pathname.startsWith("/pipeline"),
+  // },
+  // {
+  //   href: "/metrics",
+  //   label: "Metrics",
+  //   isActive: (pathname) => pathname.startsWith("/metrics"),
+  // },
 ];
 
 interface HeaderProps {

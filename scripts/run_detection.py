@@ -54,152 +54,8 @@ FRAMES_PER_VIDEO = 75
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
 BEEMAPS_MAP_DATA_URL = "https://beemaps.com/api/developer/map-data"
 
-# ---------------------------------------------------------------------------
-# Intersection detection — Overture connectors + BeeMaps stop signs
-# ---------------------------------------------------------------------------
-
-CONNECTOR_RADIUS_DEG = 0.0003   # ~30m at mid-latitudes
-MIN_CONNECTORS = 3
-OVERTURE_RELEASE = "2026-03-18.0"
-OVERTURE_WEIGHT = 0.35
-VISUAL_WEIGHT = 0.45
-BEEMAPS_WEIGHT = 0.20
-STOP_SIGN_RADIUS_M = 50
 
 
-def _query_overture_connectors(lat: float, lon: float) -> int:
-    """Query Overture Maps for road connector count near a GPS point.
-
-    Uses DuckDB Python package to query S3 parquet data.
-    Returns connector count (more connectors = more likely an intersection).
-    """
-    try:
-        import duckdb
-    except ImportError:
-        print("  [!] duckdb not installed, skipping Overture connector check")
-        return 0
-
-    r = CONNECTOR_RADIUS_DEG
-    min_lat, max_lat = lat - 0.001, lat + 0.001
-    min_lon, max_lon = lon - 0.001, lon + 0.001
-
-    sql = f"""
-    INSTALL spatial; LOAD spatial;
-    INSTALL httpfs; LOAD httpfs;
-    SET s3_region='us-west-2';
-
-    SELECT COUNT(*) as connectors
-    FROM read_parquet(
-        's3://overturemaps-us-west-2/release/{OVERTURE_RELEASE}/theme=transportation/type=connector/*',
-        filename=true, hive_partitioning=1
-    )
-    WHERE bbox.xmin > {min_lon} AND bbox.xmax < {max_lon}
-      AND bbox.ymin > {min_lat} AND bbox.ymax < {max_lat}
-      AND ST_X(geometry) BETWEEN {lon - r} AND {lon + r}
-      AND ST_Y(geometry) BETWEEN {lat - r} AND {lat + r};
-    """
-
-    try:
-        conn = duckdb.connect()
-        result = conn.execute(sql).fetchone()
-        conn.close()
-        count = result[0] if result else 0
-        return int(count)
-    except Exception as exc:
-        print(f"  [!] Overture query failed: {exc}")
-        return 0
-
-
-def _query_beemaps_stop_signs(lat: float, lon: float, api_key: str) -> list[dict]:
-    """Query BeeMaps map-data API for stop signs near a GPS point.
-
-    Returns list of stop sign features within STOP_SIGN_RADIUS_M.
-    """
-    import math
-
-    # Build circle polygon (~32 points)
-    radius_deg = STOP_SIGN_RADIUS_M / 111320  # rough m-to-deg
-    coords = []
-    for i in range(32):
-        angle = 2 * math.pi * i / 32
-        coords.append([
-            lon + radius_deg * math.cos(angle),
-            lat + radius_deg * math.sin(angle),
-        ])
-    coords.append(coords[0])  # close ring
-
-    try:
-        resp = requests.post(
-            BEEMAPS_MAP_DATA_URL,
-            headers={"Content-Type": "application/json", "Authorization": api_key},
-            json={
-                "type": ["mapFeatures"],
-                "geometry": {"type": "Polygon", "coordinates": [coords]},
-            },
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        features = data.get("mapFeatureResults", {}).get("data", [])
-        stop_signs = [f for f in features if f.get("class") == "stop-sign"]
-        return stop_signs
-    except Exception as exc:
-        print(f"  [!] BeeMaps stop sign query failed: {exc}")
-        return []
-
-
-def compute_intersection_score(
-    connector_count: int,
-    detections: list[dict],
-    stop_signs: list[dict],
-) -> tuple[float, dict]:
-    """Compute intersection confidence score from three signals.
-
-    Returns (score, details_dict) where score is 0.0-1.0.
-    """
-    # Overture score
-    c = connector_count
-    if c >= 5:
-        overture_score = 1.0
-    elif c >= MIN_CONNECTORS:
-        overture_score = 0.5 + 0.5 * ((c - MIN_CONNECTORS) / (5 - MIN_CONNECTORS))
-    else:
-        overture_score = c / MIN_CONNECTORS * 0.3
-
-    # Visual score — from GDINO intersection detections
-    intersection_dets = [d for d in detections if d["label"] in INTERSECTION_LABELS]
-    if intersection_dets:
-        best_per_label: dict[str, float] = {}
-        for d in intersection_dets:
-            lbl = d["label"]
-            if lbl not in best_per_label or d["confidence"] > best_per_label[lbl]:
-                best_per_label[lbl] = d["confidence"]
-        n_features = len(best_per_label)
-        avg_conf = sum(best_per_label.values()) / n_features
-        visual_score = min(1.0, avg_conf * (1 + 0.2 * (n_features - 1)))
-    else:
-        visual_score = 0.0
-
-    # BeeMaps score
-    beemaps_score = 1.0 if stop_signs else 0.0
-
-    # Combined
-    score = (
-        OVERTURE_WEIGHT * overture_score
-        + VISUAL_WEIGHT * visual_score
-        + BEEMAPS_WEIGHT * beemaps_score
-    )
-
-    details = {
-        "overture_score": round(overture_score, 3),
-        "visual_score": round(visual_score, 3),
-        "beemaps_score": round(beemaps_score, 3),
-        "connector_count": connector_count,
-        "intersection_features": list(best_per_label.keys()) if intersection_dets else [],
-        "stop_sign_count": len(stop_signs),
-    }
-
-    return round(score, 3), details
 
 
 # ---------------------------------------------------------------------------
@@ -276,9 +132,6 @@ NON_AMBIGUOUS_CLASSES = {
     "wheelchair", "motorcyclist",
     "stop sign", "traffic light", "crosswalk",
 }
-
-# Labels that indicate intersection features (for intersection scoring)
-INTERSECTION_LABELS = {"stop sign", "traffic light", "crosswalk", "traffic signal", "yield sign"}
 
 # Animal detection filtering — higher threshold + multi-frame consistency
 ANIMAL_LABELS = {"dog", "cat", "bird", "horse", "sheep", "cow", "bear"}
@@ -1909,7 +1762,6 @@ def generate_timeline(
     video_id: str,
     run_id: str,
     scene_attrs: dict,
-    intersection_score: float,
 ) -> list[dict] | None:
     """Generate a narrative timeline using Claude Vision on key frames.
 
@@ -2621,16 +2473,6 @@ def main() -> int:
         if event_lat and event_lon:
             print(f"  loc:  {event_lat:.6f}, {event_lon:.6f}")
 
-        # Start intersection queries in parallel with video download
-        from concurrent.futures import ThreadPoolExecutor, Future
-        overture_future: Future | None = None
-        beemaps_future: Future | None = None
-        _thread_pool = ThreadPoolExecutor(max_workers=2)
-        if event_lat and event_lon:
-            print(f"\n  Starting intersection queries (parallel)...")
-            overture_future = _thread_pool.submit(_query_overture_connectors, event_lat, event_lon)
-            beemaps_future = _thread_pool.submit(_query_beemaps_stop_signs, event_lat, event_lon, api_key)
-
         # Download video
         print(f"\n[4/6] Downloading video...")
         video_path = download_video(video_url)
@@ -2797,46 +2639,11 @@ def main() -> int:
             print(f"  [!] Scene classification failed: {scene_exc}")
             scene_attrs = {}
 
-        # Intersection detection — collect parallel query results + visual detections
-        try:
-            connector_count = overture_future.result(timeout=30) if overture_future else 0
-            stop_signs = beemaps_future.result(timeout=15) if beemaps_future else []
-        except Exception as iq_exc:
-            print(f"  [!] Intersection query failed: {iq_exc}")
-            connector_count = 0
-            stop_signs = []
-
-        intersection_score, intersection_details = compute_intersection_score(
-            connector_count, detections, stop_signs
-        )
-
-        # Classify and save
-        if intersection_score >= 0.6:
-            int_label = "yes"
-        elif intersection_score >= 0.3:
-            int_label = "possible"
-        else:
-            int_label = "no"
-
-        _save_scene_attributes(conn, video_id, run_id, {
-            "intersection": {"value": int_label, "confidence": intersection_score},
-        })
-        print(f"\n  Intersection: {int_label} (score={intersection_score:.2f})")
-        print(f"    overture={intersection_details['overture_score']:.2f} "
-              f"({connector_count} connectors), "
-              f"visual={intersection_details['visual_score']:.2f} "
-              f"({', '.join(intersection_details['intersection_features']) or 'none'}), "
-              f"beemaps={intersection_details['beemaps_score']:.2f} "
-              f"({len(stop_signs)} stop signs)")
-
-        if overture_future or beemaps_future:
-            _thread_pool.shutdown(wait=False)
-
         # Generate narrative timeline (Claude Vision)
         try:
             generate_timeline(
                 frames, detections, event, conn, video_id, run_id,
-                scene_attrs, intersection_score,
+                scene_attrs,
             )
         except Exception as tl_exc:
             print(f"  [!] Timeline generation failed: {tl_exc}")
