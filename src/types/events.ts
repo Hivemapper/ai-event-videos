@@ -37,7 +37,6 @@ export interface ImuDataPoint {
 }
 
 export interface EventEnrichment {
-  intersection: { score: number; connectors?: number; features?: string[] } | null;
   nearMiss: { score: number; label?: string; distanceM?: number; approaching?: boolean } | null;
   vruDetections: Array<{
     label: string;
