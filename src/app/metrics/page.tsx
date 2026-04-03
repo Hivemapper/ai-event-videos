@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useState, useEffect, useCallback } from "react";
-import { Loader2, TrendingUp, Calendar, BarChart3, Clock, RefreshCw } from "lucide-react";
+import { Loader2, TrendingUp, Calendar, BarChart3, Clock, RefreshCw, Globe, Download } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Header } from "@/components/layout/header";
 import { ALL_EVENT_TYPES, EVENT_TYPE_CONFIG } from "@/lib/constants";
@@ -13,6 +13,19 @@ interface DailyEntry {
   date: string;
   day: string;
   total: number;
+}
+
+interface GeoEntry {
+  country: string;
+  count: number;
+  pct: number;
+}
+
+interface GeoResponse {
+  countries: GeoEntry[];
+  total: number;
+  resolved: number;
+  unresolved: number;
 }
 
 interface PeriodMetrics {
@@ -35,6 +48,9 @@ function MetricsContent() {
   const [dailyData, setDailyData] = useState<DailyEntry[] | null>(null);
   const [dailyLoading, setDailyLoading] = useState(true);
   const [dailyError, setDailyError] = useState<string | null>(null);
+
+  const [geoData, setGeoData] = useState<GeoResponse | null>(null);
+  const [geoLoading, setGeoLoading] = useState(true);
 
   const fetchDaily = useCallback(async () => {
     setDailyLoading(true);
@@ -77,6 +93,10 @@ function MetricsContent() {
     }
     load();
     fetchDaily();
+    fetch("/api/metrics/geo")
+      .then((r) => r.json())
+      .then((d) => setGeoData(d))
+      .finally(() => setGeoLoading(false));
   }, [fetchDaily]);
 
   if (loading) {
@@ -193,6 +213,79 @@ function MetricsContent() {
               );
             })()
           ) : null}
+        </CardContent>
+      </Card>
+
+      {/* Signal Events by Country */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Globe className="w-4 h-4 text-muted-foreground" />
+            <CardTitle className="text-lg">Signal Events by Country</CardTitle>
+          </div>
+          <div className="flex items-center gap-3">
+            {geoData && geoData.resolved != null && (
+              <span className="text-xs text-muted-foreground">
+                {geoData.resolved.toLocaleString()} of {geoData.total.toLocaleString()} with location data
+              </span>
+            )}
+            {geoData && geoData.countries.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1"
+                onClick={() => {
+                  const header = "Country,Count,Percent\n";
+                  const rows = geoData.countries
+                    .map((c) => `"${c.country}",${c.count},${c.pct}`)
+                    .join("\n");
+                  const blob = new Blob([header + rows], { type: "text/csv" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "signal-events-by-country.csv";
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                <Download className="w-3 h-3" />
+                CSV
+              </Button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {geoLoading ? (
+            <div className="flex items-center gap-2 py-4">
+              <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              <span className="text-sm text-muted-foreground">Resolving countries...</span>
+            </div>
+          ) : geoData && geoData.countries.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-2 pr-4 font-medium text-muted-foreground">#</th>
+                    <th className="text-left py-2 pr-4 font-medium text-muted-foreground">Country</th>
+                    <th className="text-right py-2 px-4 font-medium text-muted-foreground">Count</th>
+                    <th className="text-right py-2 pl-4 font-medium text-muted-foreground">%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {geoData.countries.map((entry, i) => (
+                    <tr key={entry.country} className="border-b last:border-0">
+                      <td className="py-2 pr-4 text-muted-foreground tabular-nums">{i + 1}</td>
+                      <td className="py-2 pr-4 font-medium">{entry.country}</td>
+                      <td className="py-2 px-4 text-right tabular-nums">{entry.count.toLocaleString()}</td>
+                      <td className="py-2 pl-4 text-right tabular-nums text-muted-foreground">{entry.pct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground py-4">No geo data available.</p>
+          )}
         </CardContent>
       </Card>
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 
-const VALID_RESULTS = ["missing_video", "missing_metadata", "ghost", "open_road", "signal"] as const;
+const VALID_RESULTS = ["missing_video", "missing_metadata", "ghost", "open_road", "signal", "duplicate"] as const;
 
 export async function GET(
   _request: NextRequest,

@@ -643,6 +643,99 @@ def main():
     print(f"  Total:     {total:>4}  ({elapsed:.0f}s, {elapsed/max(total,1):.1f}s/event)")
     print(f"{BOLD}{'═' * 50}{RESET}")
 
+    # Dedupe signal events
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    dedupe_signals(conn)
+    conn.close()
+
+
+def dedupe_signals(conn: sqlite3.Connection, distance_m: float = 100, window_s: float = 60, min_cluster: int = 3):
+    """Find and mark egregious duplicate signal events (3+ for one incident)."""
+    from datetime import datetime as _dt
+
+    print(f"\n{BOLD}Running dedupe on signal events...{RESET}")
+
+    rows = conn.execute(
+        """SELECT id, event_type, event_timestamp, lat, lon, speed_min, speed_max
+           FROM triage_results
+           WHERE triage_result = 'signal'
+             AND lat IS NOT NULL AND lon IS NOT NULL
+             AND event_timestamp IS NOT NULL
+           ORDER BY event_timestamp"""
+    ).fetchall()
+
+    if not rows:
+        print("  No signal events to dedupe.")
+        return
+
+    def parse_ts(ts_str):
+        try:
+            return _dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0
+
+    # Group by event_type, sort by timestamp
+    events_by_type: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        evt = {"id": r[0], "event_type": r[1], "event_timestamp": r[2],
+               "lat": r[3], "lon": r[4], "speed_min": r[5], "speed_max": r[6]}
+        evt["_ts"] = parse_ts(evt["event_timestamp"])
+        events_by_type[evt["event_type"]].append(evt)
+
+    for etype in events_by_type:
+        events_by_type[etype].sort(key=lambda e: e["_ts"])
+
+    # Cluster
+    clusters: list[list[dict]] = []
+    seen: set[str] = set()
+
+    for etype, events in events_by_type.items():
+        for i, evt_a in enumerate(events):
+            if evt_a["id"] in seen:
+                continue
+            cluster = [evt_a]
+            seen.add(evt_a["id"])
+            for j in range(i + 1, len(events)):
+                evt_b = events[j]
+                if evt_b["id"] in seen:
+                    continue
+                if evt_b["_ts"] - evt_a["_ts"] > window_s:
+                    break
+                close = any(
+                    haversine(c["lat"], c["lon"], evt_b["lat"], evt_b["lon"]) <= distance_m
+                    for c in cluster
+                )
+                if close:
+                    cluster.append(evt_b)
+                    seen.add(evt_b["id"])
+            if len(cluster) >= min_cluster:
+                clusters.append(cluster)
+
+    total_dupes = sum(len(c) - 1 for c in clusters)
+
+    if not clusters:
+        print(f"  No egregious duplicates found ({len(rows)} signal events checked).")
+        return
+
+    # Mark duplicates — keep the best per cluster (largest speed drop)
+    marked = 0
+    for cluster in clusters:
+        best = max(cluster, key=lambda e: (e["speed_max"] or 0) - (e["speed_min"] or 0))
+        for evt in cluster:
+            if evt["id"] != best["id"]:
+                conn.execute(
+                    "UPDATE triage_results SET triage_result = 'duplicate' WHERE id = ? AND triage_result = 'signal'",
+                    (evt["id"],)
+                )
+                marked += 1
+    conn.commit()
+
+    print(f"  {len(rows)} signal events checked")
+    print(f"  {len(clusters)} clusters found (≥{min_cluster} events each)")
+    print(f"  {YELLOW}{marked} marked as duplicate{RESET}")
+
 
 if __name__ == "__main__":
     main()

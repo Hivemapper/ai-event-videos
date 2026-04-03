@@ -15,9 +15,17 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ videoId: string }> }
 ) {
-  const { videoId } = await params;
-  const runs = await listDetectionRuns(videoId);
-  return NextResponse.json({ runs });
+  try {
+    const { videoId } = await params;
+    const runs = await listDetectionRuns(videoId);
+    return NextResponse.json({ runs });
+  } catch (error) {
+    console.error("Detection runs GET error:", error);
+    return NextResponse.json(
+      { error: String(error) },
+      { status: 500 }
+    );
+  }
 }
 
 export async function POST(
