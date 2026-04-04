@@ -187,6 +187,24 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_video_pipeline_state_day
     ON video_pipeline_state (day);
+
+  CREATE TABLE IF NOT EXISTS triage_results (
+    id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    triage_result TEXT NOT NULL,
+    rules_triggered TEXT NOT NULL DEFAULT '[]',
+    speed_min REAL,
+    speed_max REAL,
+    speed_mean REAL,
+    speed_stddev REAL,
+    gnss_displacement_m REAL,
+    video_size INTEGER,
+    event_timestamp TEXT,
+    lat REAL,
+    lon REAL,
+    road_class TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `;
 
 // ---------------------------------------------------------------------------
@@ -275,8 +293,20 @@ async function createTursoClient(): Promise<DbClient> {
       };
     },
     async exec(sql: string): Promise<void> {
-      // libsql .executeMultiple() runs multiple semicolon-separated stmts
-      await libsql.executeMultiple(sql);
+      // Split into individual statements — executeMultiple is unreliable with
+      // Turso's HTTP API for DDL batches (returns 400 on some schemas).
+      const statements = sql
+        .split(";")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      for (const stmt of statements) {
+        try {
+          await libsql.execute(stmt);
+        } catch (err) {
+          console.error("[Turso] Failed statement:\n", stmt);
+          throw err;
+        }
+      }
     },
   };
 
@@ -352,6 +382,7 @@ export function getDb(): Promise<DbClient> {
   if (clientPromise) return clientPromise;
 
   clientPromise = (async () => {
+    try {
     const useTurso = !!process.env.TURSO_DATABASE_URL;
     const client = useTurso
       ? await createTursoClient()
@@ -372,6 +403,9 @@ export function getDb(): Promise<DbClient> {
     await ensureColumn(client, "labels", "detector_aliases", "TEXT");
     await ensureColumn(client, "video_detection_segments", "run_id", "TEXT");
     await ensureColumn(client, "detection_runs", "machine_id", "TEXT");
+    await ensureColumn(client, "triage_results", "lat", "REAL");
+    await ensureColumn(client, "triage_results", "lon", "REAL");
+    await ensureColumn(client, "triage_results", "road_class", "TEXT");
 
     // Seed defaults
     await seedDefaults(client);
@@ -379,6 +413,10 @@ export function getDb(): Promise<DbClient> {
     await markOutdatedPipelineStates(client);
 
     return client;
+    } catch (err) {
+      clientPromise = null; // allow retry on next request
+      throw err;
+    }
   })();
 
   return clientPromise;
