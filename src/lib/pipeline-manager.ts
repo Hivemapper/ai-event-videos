@@ -6,7 +6,6 @@
 import { getDb } from "@/lib/db";
 import {
   createDetectionRun,
-  getActiveDetectionRun,
   setDetectionRunWorkerPid,
   updateDetectionRunStatus,
 } from "@/lib/pipeline-store";
@@ -15,6 +14,7 @@ import { AVAILABLE_DETECTION_MODELS } from "@/lib/pipeline-config";
 
 let running = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let currentRunId: string | null = null; // Track this machine's active run
 
 const MODEL_NAME = "gdino-base-clip";
 const POLL_INTERVAL = 5000; // 5 seconds
@@ -38,12 +38,7 @@ export async function startPipeline(): Promise<{ started: boolean; error?: strin
       pollTimer = null;
       return;
     }
-
-    const activeRun = await getActiveDetectionRun();
-    if (!activeRun) {
-      // No active run — start next one
-      await startNextRun();
-    }
+    await startNextRun();
   }, POLL_INTERVAL);
 
   return result;
@@ -51,29 +46,37 @@ export async function startPipeline(): Promise<{ started: boolean; error?: strin
 
 export async function stopPipeline(): Promise<{ stopped: boolean; runId?: string }> {
   running = false;
+  currentRunId = null;
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
 
-  // Kill active run if any
-  const activeRun = await getActiveDetectionRun();
-  if (activeRun) {
-    if (activeRun.workerPid) {
+  // Kill this machine's active run if any
+  const stoppedRunId = currentRunId;
+  if (stoppedRunId) {
+    const db = await getDb();
+    const result = await db.query(
+      "SELECT worker_pid FROM detection_runs WHERE id = ? AND status IN ('queued', 'running')",
+      [stoppedRunId]
+    );
+    const pid = (result.rows[0] as { worker_pid: number } | undefined)?.worker_pid;
+    if (pid) {
       try {
-        process.kill(-activeRun.workerPid, "SIGTERM");
+        process.kill(-pid, "SIGTERM");
       } catch {
         try {
-          process.kill(activeRun.workerPid, "SIGTERM");
+          process.kill(pid, "SIGTERM");
         } catch {
           // already gone
         }
       }
     }
-    await updateDetectionRunStatus(activeRun.id, "cancelled", {
+    await updateDetectionRunStatus(stoppedRunId, "cancelled", {
       lastError: "Stopped by user",
     });
-    return { stopped: true, runId: activeRun.id };
+    currentRunId = null;
+    return { stopped: true, runId: stoppedRunId };
   }
 
   return { stopped: true };
@@ -82,9 +85,19 @@ export async function stopPipeline(): Promise<{ stopped: boolean; runId?: string
 async function startNextRun(): Promise<{ started: boolean; error?: string }> {
   if (!running) return { started: false, error: "Pipeline stopped" };
 
-  // Check if this machine already has a run going
-  const activeRun = await getActiveDetectionRun();
-  if (activeRun) return { started: true };
+  // Check if this machine's current run is still going
+  if (currentRunId) {
+    const db = await getDb();
+    const check = await db.query(
+      "SELECT status FROM detection_runs WHERE id = ?",
+      [currentRunId]
+    );
+    const status = (check.rows[0] as { status: string } | undefined)?.status;
+    if (status === "queued" || status === "running") {
+      return { started: true }; // Our run is still active
+    }
+    currentRunId = null; // Our run finished, ready for next
+  }
 
   // Pick multiple candidates to handle races with other machines
   const db = await getDb();
@@ -130,6 +143,7 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
     try {
       const worker = spawnDetectionWorker({ runId: run.id });
       await setDetectionRunWorkerPid(run.id, worker.pid);
+      currentRunId = run.id;
       return { started: true };
     } catch (error) {
       await updateDetectionRunStatus(run.id, "failed", {
