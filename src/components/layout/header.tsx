@@ -35,11 +35,11 @@ const navItems: NavItem[] = [
     label: "Triage",
     isActive: (pathname) => pathname.startsWith("/triage"),
   },
-  // {
-  //   href: "/pipeline",
-  //   label: "Pipeline",
-  //   isActive: (pathname) => pathname.startsWith("/pipeline"),
-  // },
+  {
+    href: "/pipeline",
+    label: "Pipeline",
+    isActive: (pathname) => pathname.startsWith("/pipeline"),
+  },
   // {
   //   href: "/metrics",
   //   label: "Metrics",

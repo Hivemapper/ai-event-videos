@@ -41,6 +41,12 @@ import requests
 import torch
 from PIL import Image
 
+try:
+    import av as _av
+    HAS_PYAV = True
+except ImportError:
+    HAS_PYAV = False
+
 # ---------------------------------------------------------------------------
 # Project paths
 # ---------------------------------------------------------------------------
@@ -49,7 +55,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 CACHE_DIR = PROJECT_ROOT / "data" / "pipeline-video-cache"
 PIPELINE_VERSION = "vru-yolo-v2"
-FRAMES_PER_VIDEO = 75
+FRAMES_PER_VIDEO = 45
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
 BEEMAPS_MAP_DATA_URL = "https://beemaps.com/api/developer/map-data"
@@ -63,11 +69,8 @@ BEEMAPS_MAP_DATA_URL = "https://beemaps.com/api/developer/map-data"
 # ---------------------------------------------------------------------------
 
 GDINO_TEXT_PROMPT = (
-    "person. bicycle. motorcycle. person on electric scooter. "
-    "electric kick scooter. wheelchair. stroller. "
-    "person wearing safety vest. skateboard. dog. traffic cone. "
-    "car. truck. bus. "
-    "stop sign. traffic light. crosswalk."
+    "person. bicycle. motorcycle. wheelchair. stroller. "
+    "crosswalk. dog. electric kick scooter."
 )
 GDINO_BOX_THRESHOLD = 0.30
 GDINO_TEXT_THRESHOLD = 0.25
@@ -82,25 +85,10 @@ CLIP_MIN_SIMILARITY = 0.26  # below this, drop the detection entirely
 # The first candidate is the "agreeing" label — if CLIP picks it, GDINO's
 # label stands. Otherwise, the detection is relabeled to the CLIP winner.
 AMBIGUOUS_CLASSES: dict[str, list[str]] = {
-    "person wearing safety vest": [
-        "construction worker with safety vest and hard hat",
-        "pedestrian",
-        "person walking",
-    ],
-    "person riding bicycle": [
-        "person riding a bicycle",
-        "pedestrian",
-        "person on motorcycle",
-    ],
     "stroller": [
         "baby stroller",
         "shopping cart",
         "wheelchair",
-    ],
-    "person on electric scooter": [
-        "person riding electric scooter",
-        "pedestrian",
-        "person on motorcycle",
     ],
     "electric kick scooter": [
         "electric kick scooter",
@@ -111,33 +99,25 @@ AMBIGUOUS_CLASSES: dict[str, list[str]] = {
 
 # Map from CLIP winning label back to a canonical GDINO-style label for the DB
 CLIP_LABEL_REMAP: dict[str, str | None] = {
-    "construction worker with safety vest and hard hat": "construction worker",
-    "pedestrian": "person",
-    "person walking": "person",
-    "person riding a bicycle": "cyclist",
-    "person on motorcycle": "motorcyclist",
     "baby stroller": "stroller",
     "shopping cart": None,  # drop — not a VRU
     "wheelchair": "wheelchair",
-    "person riding electric scooter": "scooter",
     "electric kick scooter": "scooter",
     "bicycle": "bicycle",
-    "skateboard": "skateboard",
+    "skateboard": None,  # drop
 }
 
 # Non-ambiguous classes — pass through without CLIP verification
 NON_AMBIGUOUS_CLASSES = {
-    "car", "truck", "bus", "motorcycle", "person", "dog",
-    "traffic cone", "skateboard", "scooter", "bicycle",
-    "wheelchair", "motorcyclist",
-    "stop sign", "traffic light", "crosswalk",
+    "person", "bicycle", "motorcycle", "wheelchair",
+    "crosswalk", "dog", "scooter",
 }
 
-# Animal detection filtering — higher threshold + multi-frame consistency
-ANIMAL_LABELS = {"dog", "cat", "bird", "horse", "sheep", "cow", "bear"}
+# Animal detection filtering — only dog is in the detection prompt
+ANIMAL_LABELS = {"dog"}
 ANIMAL_MIN_CONFIDENCE = 0.55
-ANIMAL_MIN_FRAMES = 2          # must appear in at least 2 frames
-ANIMAL_FRAME_GAP_MS = 2000     # max gap between frames to count as consecutive
+ANIMAL_MIN_FRAMES = 2
+ANIMAL_FRAME_GAP_MS = 2000
 
 # All known valid labels (non-ambiguous + ambiguous)
 ALL_KNOWN_LABELS = NON_AMBIGUOUS_CLASSES | set(AMBIGUOUS_CLASSES.keys())
@@ -210,7 +190,9 @@ def utc_now() -> str:
 
 def get_device() -> str:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        print(f"  [GPU] MPS (Apple Silicon GPU) is available")
         return "mps"
+    print(f"  [GPU] MPS not available — using CPU")
     return "cpu"
 
 
@@ -243,8 +225,46 @@ def download_video(video_url: str) -> Path | None:
         return None
 
 
-def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
-    """Returns list of (frame_ms, frame_bgr, frame_idx)."""
+def _extract_frames_pyav(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+    """Extract frames using PyAV (faster seeking than OpenCV)."""
+    container = _av.open(str(video_path))
+    stream = container.streams.video[0]
+    total_frames = stream.frames or 0
+    fps = float(stream.average_rate or 30)
+
+    # Fallback: estimate total frames from duration
+    if total_frames <= 0 and stream.duration and stream.time_base:
+        total_frames = int(float(stream.duration * stream.time_base) * fps)
+    if total_frames <= 0:
+        container.close()
+        return []
+
+    margin = max(1, total_frames // 20)
+    usable = total_frames - 2 * margin
+    if usable <= 0 or num_frames == 1:
+        indices = [total_frames // 2]
+    else:
+        step = usable / (num_frames - 1)
+        indices = [margin + int(i * step) for i in range(num_frames)]
+
+    time_base = float(stream.time_base)
+    frames = []
+    for idx in indices:
+        t_sec = idx / fps
+        target_ts = int(t_sec / time_base)
+        container.seek(target_ts, stream=stream, backward=True, any_frame=False)
+        for frame in container.decode(video=0):
+            bgr = frame.to_ndarray(format="bgr24")
+            frame_ms = int(round(t_sec * 1000))
+            frames.append((frame_ms, bgr, idx))
+            break
+
+    container.close()
+    return frames
+
+
+def _extract_frames_cv2(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+    """Fallback: extract frames using OpenCV."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
@@ -268,6 +288,22 @@ def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, in
             frame_ms = int(round((idx / fps) * 1000))
             frames.append((frame_ms, frame, idx))
     cap.release()
+    return frames
+
+
+def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+    """Extract frames — uses PyAV if available, falls back to OpenCV."""
+    if HAS_PYAV:
+        try:
+            t0 = time.time()
+            frames = _extract_frames_pyav(video_path, num_frames)
+            print(f"    [PyAV] Extracted {len(frames)} frames in {time.time()-t0:.1f}s")
+            return frames
+        except Exception as exc:
+            print(f"    [!] PyAV failed ({exc}), falling back to OpenCV")
+    t0 = time.time()
+    frames = _extract_frames_cv2(video_path, num_frames)
+    print(f"    [OpenCV] Extracted {len(frames)} frames in {time.time()-t0:.1f}s")
     return frames
 
 
@@ -1116,19 +1152,21 @@ def run_gdino_pass(
     batch_size: int = 8,
 ) -> list[dict]:
     """
-    Load GDINO-base, run on all frames in batches, unload.
+    Load GDINO-tiny (float16), run on all frames in batches, unload.
     Returns a flat list of detection dicts, each with an extra 'frame_ms' key.
     """
     from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-    print("\n  --- GDINO-base pass ---")
-    model_id = "IDEA-Research/grounding-dino-base"
+    print("\n  --- GDINO-tiny pass ---")
+    model_id = "IDEA-Research/grounding-dino-tiny"
     print(f"  Loading {model_id}...")
     processor = AutoProcessor.from_pretrained(model_id)
     model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
     model.eval()
 
     device = get_device()
+    use_half = False  # MPS does not support float16 matmul reliably
+
     if device == "mps":
         try:
             model = model.to("mps")
@@ -1138,11 +1176,16 @@ def run_gdino_pass(
             dummy = {k: v.to("mps") if hasattr(v, "to") else v for k, v in dummy.items()}
             with torch.no_grad():
                 model(**dummy)
+            print(f"  [GDINO] Confirmed running on MPS GPU (float32)")
         except Exception as exc:
-            print(f"  [!] MPS failed ({exc}), falling back to CPU")
+            print(f"  [!] GDINO MPS FAILED ({exc}), falling back to CPU")
             model = model.to("cpu")
             device = "cpu"
-    print(f"  Running on {device.upper()} (batch_size={batch_size})")
+
+    # Note: torch.compile adds ~60s compilation overhead on first batch.
+    # Only worthwhile in persistent server mode, not one-shot runs.
+
+    print(f"  Running on {device.upper()} (fp32, batch_size={batch_size}, frames={len(frames)})")
 
     all_detections: list[dict] = []
     nms_suppressed_total = 0
@@ -1150,9 +1193,18 @@ def run_gdino_pass(
     frames_processed = 0
     t0 = time.time()
 
+    GDINO_MAX_SIZE = 640  # downscale for faster inference
+
     for batch_start in range(0, len(frames), batch_size):
         batch_frames = frames[batch_start:batch_start + batch_size]
-        pil_images = [Image.fromarray(cv2.cvtColor(f[1], cv2.COLOR_BGR2RGB)) for f in batch_frames]
+        pil_images = []
+        for f in batch_frames:
+            img = Image.fromarray(cv2.cvtColor(f[1], cv2.COLOR_BGR2RGB))
+            # Downscale large images for faster inference
+            if img.width > GDINO_MAX_SIZE:
+                ratio = GDINO_MAX_SIZE / img.width
+                img = img.resize((GDINO_MAX_SIZE, int(img.height * ratio)), Image.BILINEAR)
+            pil_images.append(img)
 
         # Process batch — all images use the same text prompt
         inputs = processor(
@@ -1277,14 +1329,18 @@ def run_clip_verification(
     print(f"  Loading {CLIP_MODEL_NAME} (pretrained: {CLIP_PRETRAINED})...")
 
     device = get_device()
+    clip_half = False  # MPS does not support float16 matmul reliably
     try:
         clip_model, _, preprocess = open_clip.create_model_and_transforms(
             CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED, device=device,
         )
         tokenizer = open_clip.get_tokenizer(CLIP_MODEL_NAME)
+        if device == "mps":
+            print(f"  [CLIP] Confirmed running on MPS GPU (float32)")
     except Exception as exc:
         if device == "mps":
-            print(f"  [!] MPS failed ({exc}), falling back to CPU")
+            print(f"  [!] CLIP MPS FAILED ({exc})")
+            print(f"  [!] Falling back to CPU — verification will be slower")
             device = "cpu"
             clip_model, _, preprocess = open_clip.create_model_and_transforms(
                 CLIP_MODEL_NAME, pretrained=CLIP_PRETRAINED, device=device,
@@ -1293,7 +1349,7 @@ def run_clip_verification(
         else:
             raise
     clip_model.eval()
-    print(f"  Running on {device.upper()}")
+    print(f"  Running CLIP on {device.upper()}")
 
     # Pre-compute text features for all candidate label sets using prompt ensembling.
     # Averaging embeddings from multiple prompt templates yields more robust
@@ -2639,14 +2695,8 @@ def main() -> int:
             print(f"  [!] Scene classification failed: {scene_exc}")
             scene_attrs = {}
 
-        # Generate narrative timeline (Claude Vision)
-        try:
-            generate_timeline(
-                frames, detections, event, conn, video_id, run_id,
-                scene_attrs,
-            )
-        except Exception as tl_exc:
-            print(f"  [!] Timeline generation failed: {tl_exc}")
+        # Timeline generation (Claude Vision) — disabled for speed
+        # generate_timeline(frames, detections, event, conn, video_id, run_id, scene_attrs)
 
         # Mark as completed
         update_run_status(conn, run_id, "completed", detection_count=total_saved)
