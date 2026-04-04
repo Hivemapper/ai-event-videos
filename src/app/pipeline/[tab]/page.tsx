@@ -304,6 +304,11 @@ export default function PipelineTabPage({
                         Status
                       </th>
                     )}
+                    {tab !== "queued" && (
+                      <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">
+                        Machine
+                      </th>
+                    )}
                     <th className="text-right font-medium px-4 py-2.5 text-muted-foreground">
                       Date
                     </th>
@@ -371,6 +376,11 @@ export default function PipelineTabPage({
                             <Loader2 className="w-3 h-3 animate-spin" />
                             {String(r.run_status ?? "running")}
                           </Badge>
+                        </td>
+                      )}
+                      {tab !== "queued" && (
+                        <td className="px-4 py-2.5 text-xs text-muted-foreground">
+                          {r.machine_id ? String(r.machine_id) : "—"}
                         </td>
                       )}
                       <td className="px-4 py-2.5 text-right text-muted-foreground">

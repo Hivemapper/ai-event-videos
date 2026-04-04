@@ -156,6 +156,7 @@ export interface DetectionRun {
   completedAt: string | null;
   lastHeartbeatAt: string | null;
   lastError: string | null;
+  machineId: string | null;
   createdAt: string;
 }
 

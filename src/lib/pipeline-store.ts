@@ -1,5 +1,8 @@
 import { randomUUID } from "crypto";
+import os from "os";
 import { getDb } from "@/lib/db";
+
+const MACHINE_ID = os.hostname().split(".")[0] || "unknown";
 import {
   createEmptyPipelineTotals,
   CURRENT_PIPELINE_VERSION,
@@ -92,6 +95,7 @@ interface DbDetectionRunRow {
   completed_at: string | null;
   last_heartbeat_at: string | null;
   last_error: string | null;
+  machine_id: string | null;
   created_at: string;
 }
 
@@ -190,6 +194,7 @@ function mapDetectionRun(row: DbDetectionRunRow): DetectionRun {
     completedAt: row.completed_at,
     lastHeartbeatAt: row.last_heartbeat_at,
     lastError: row.last_error,
+    machineId: row.machine_id,
     createdAt: row.created_at,
   };
 }
@@ -702,12 +707,12 @@ export async function createDetectionRun(params: {
   const db = await getDb();
   const id = randomUUID();
   const result = await db.run(
-    `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
-     SELECT ?, ?, ?, 'queued', ?, datetime('now')
+    `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at)
+     SELECT ?, ?, ?, 'queued', ?, ?, datetime('now')
      WHERE NOT EXISTS (
        SELECT 1 FROM detection_runs WHERE video_id = ? AND status IN ('queued', 'running', 'completed')
      )`,
-    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}), params.videoId]
+    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}), MACHINE_ID, params.videoId]
   );
   if (result.changes === 0) return null;
   return (await getDetectionRun(id))!;
