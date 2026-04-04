@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, use } from "react";
+import { useState, useCallback, useEffect, use } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
@@ -76,8 +76,6 @@ export default function PipelineTabPage({
   const [offset, setOffset] = useState(0);
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
-  const [autoRun, setAutoRun] = useState(false);
-  const autoRunTriggered = useRef(false);
 
   // Reset offset when tab changes via URL
   useEffect(() => {
@@ -89,12 +87,14 @@ export default function PipelineTabPage({
     counts: Record<string, number>;
     rows: Record<string, unknown>[];
     total: number;
+    pipelineRunning: boolean;
   }>(url, fetcher, {
-    refreshInterval: autoRun || tab === "running" ? 3000 : 0,
+    refreshInterval: 3000,
     revalidateOnFocus: false,
   });
 
   const counts = data?.counts ?? {};
+  const autoRun = data?.pipelineRunning ?? false;
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
   const pageNum = Math.floor(offset / PAGE_SIZE) + 1;
@@ -102,17 +102,23 @@ export default function PipelineTabPage({
   const isRunning = (counts.running ?? 0) > 0;
   const hasQueued = (counts.queued ?? 0) > 0;
 
-  const handleStart = useCallback(async () => {
+  const handleStartPipeline = useCallback(async () => {
     setIsStarting(true);
     try {
-      const resp = await fetch("/api/pipeline/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ modelName: "gdino-base-clip" }),
-      });
-      if (resp.ok) {
-        router.push("/pipeline/running");
-      }
+      await fetch("/api/pipeline/start", { method: "POST" });
+      router.push("/pipeline/running");
+      mutate();
+    } finally {
+      setIsStarting(false);
+    }
+  }, [mutate, router]);
+
+  const handleRunOne = useCallback(async () => {
+    setIsStarting(true);
+    try {
+      // Use the old direct approach for single run
+      const db = await fetch("/api/pipeline/start", { method: "POST" });
+      if (db.ok) router.push("/pipeline/running");
       mutate();
     } finally {
       setIsStarting(false);
@@ -121,7 +127,6 @@ export default function PipelineTabPage({
 
   const handleStop = useCallback(async () => {
     setIsStopping(true);
-    setAutoRun(false);
     try {
       await fetch("/api/pipeline/stop", { method: "POST" });
       mutate();
@@ -129,20 +134,6 @@ export default function PipelineTabPage({
       setIsStopping(false);
     }
   }, [mutate]);
-
-  // Auto-run: when current run finishes and there are queued events, start next
-  useEffect(() => {
-    if (!autoRun || isRunning || !hasQueued || isStarting) {
-      autoRunTriggered.current = false;
-      return;
-    }
-    if (autoRunTriggered.current) return;
-    autoRunTriggered.current = true;
-    const timer = setTimeout(() => {
-      handleStart();
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, [autoRun, isRunning, hasQueued, isStarting, handleStart]);
 
   return (
     <>
@@ -175,10 +166,7 @@ export default function PipelineTabPage({
                 <Button
                   variant="default"
                   size="sm"
-                  onClick={() => {
-                    setAutoRun(true);
-                    if (!isRunning) handleStart();
-                  }}
+                  onClick={handleStartPipeline}
                   disabled={isStarting || !hasQueued}
                 >
                   <Play className="w-4 h-4 mr-2" />
@@ -187,7 +175,7 @@ export default function PipelineTabPage({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleStart}
+                  onClick={handleRunOne}
                   disabled={isStarting || isRunning || !hasQueued}
                 >
                   {isStarting ? (
