@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
     total = counts.running;
     const result = await db.query(
       `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.status as run_status, dr.model_name, dr.started_at
+              dr.id as run_id, dr.status as run_status, dr.model_name, dr.started_at, dr.machine_id
        FROM detection_runs dr
        JOIN triage_results t ON t.id = dr.video_id
        WHERE t.triage_result = 'signal'
@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
     total = counts.completed;
     const result = await db.query(
       `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.model_name, dr.detection_count, dr.started_at, dr.completed_at
+              dr.id as run_id, dr.model_name, dr.detection_count, dr.started_at, dr.completed_at, dr.machine_id
        FROM detection_runs dr
        JOIN triage_results t ON t.id = dr.video_id
        WHERE t.triage_result = 'signal'
@@ -93,7 +93,7 @@ export async function GET(request: NextRequest) {
     total = counts.failed;
     const result = await db.query(
       `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.model_name, dr.last_error, dr.completed_at
+              dr.id as run_id, dr.model_name, dr.last_error, dr.completed_at, dr.machine_id
        FROM detection_runs dr
        JOIN triage_results t ON t.id = dr.video_id
        WHERE t.triage_result = 'signal'

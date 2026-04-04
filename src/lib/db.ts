@@ -371,6 +371,7 @@ export function getDb(): Promise<DbClient> {
     await ensureColumn(client, "labels", "enabled", "INTEGER NOT NULL DEFAULT 1");
     await ensureColumn(client, "labels", "detector_aliases", "TEXT");
     await ensureColumn(client, "video_detection_segments", "run_id", "TEXT");
+    await ensureColumn(client, "detection_runs", "machine_id", "TEXT");
 
     // Seed defaults
     await seedDefaults(client);
