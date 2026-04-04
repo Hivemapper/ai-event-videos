@@ -82,16 +82,18 @@ export async function stopPipeline(): Promise<{ stopped: boolean; runId?: string
 async function startNextRun(): Promise<{ started: boolean; error?: string }> {
   if (!running) return { started: false, error: "Pipeline stopped" };
 
+  // Check if this machine already has a run going
   const activeRun = await getActiveDetectionRun();
-  if (activeRun) return { started: true }; // Something already running
+  if (activeRun) return { started: true };
 
+  // Pick multiple candidates to handle races with other machines
   const db = await getDb();
   const result = await db.query(
     `SELECT t.id FROM triage_results t
      WHERE t.triage_result = 'signal'
        AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-     ORDER BY t.event_timestamp DESC
-     LIMIT 1`
+     ORDER BY RANDOM()
+     LIMIT 5`
   );
 
   if (result.rows.length === 0) {
@@ -103,35 +105,39 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
     return { started: false, error: "No queued signal events" };
   }
 
-  const videoId = (result.rows[0] as { id: string }).id;
   const modelConfig = AVAILABLE_DETECTION_MODELS.find((m) => m.id === MODEL_NAME);
 
-  const run = await createDetectionRun({
-    videoId,
-    modelName: MODEL_NAME,
-    config: {
-      modelDisplayName: modelConfig?.name,
-      type: modelConfig?.type,
-      device: modelConfig?.device,
-      classes: modelConfig?.classes,
-      prompt: modelConfig?.prompt,
-      features: modelConfig?.features,
-      estimatedTime: modelConfig?.estimatedTime,
-    },
-  });
+  // Try each candidate — first one to claim wins
+  for (const row of result.rows) {
+    const videoId = (row as { id: string }).id;
 
-  if (!run) {
-    return { started: false, error: "Concurrent run exists" };
-  }
-
-  try {
-    const worker = spawnDetectionWorker({ runId: run.id });
-    await setDetectionRunWorkerPid(run.id, worker.pid);
-    return { started: true };
-  } catch (error) {
-    await updateDetectionRunStatus(run.id, "failed", {
-      lastError: error instanceof Error ? error.message : "Failed to start worker",
+    const run = await createDetectionRun({
+      videoId,
+      modelName: MODEL_NAME,
+      config: {
+        modelDisplayName: modelConfig?.name,
+        type: modelConfig?.type,
+        device: modelConfig?.device,
+        classes: modelConfig?.classes,
+        prompt: modelConfig?.prompt,
+        features: modelConfig?.features,
+        estimatedTime: modelConfig?.estimatedTime,
+      },
     });
-    return { started: false, error: String(error) };
+
+    if (!run) continue; // Another machine claimed this one, try next
+
+    try {
+      const worker = spawnDetectionWorker({ runId: run.id });
+      await setDetectionRunWorkerPid(run.id, worker.pid);
+      return { started: true };
+    } catch (error) {
+      await updateDetectionRunStatus(run.id, "failed", {
+        lastError: error instanceof Error ? error.message : "Failed to start worker",
+      });
+      // Try next candidate
+    }
   }
+
+  return { started: false, error: "Could not claim any event" };
 }

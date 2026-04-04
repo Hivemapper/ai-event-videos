@@ -705,9 +705,9 @@ export async function createDetectionRun(params: {
     `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at)
      SELECT ?, ?, ?, 'queued', ?, datetime('now')
      WHERE NOT EXISTS (
-       SELECT 1 FROM detection_runs WHERE status IN ('queued', 'running')
+       SELECT 1 FROM detection_runs WHERE video_id = ? AND status IN ('queued', 'running', 'completed')
      )`,
-    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {})]
+    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}), params.videoId]
   );
   if (result.changes === 0) return null;
   return (await getDetectionRun(id))!;

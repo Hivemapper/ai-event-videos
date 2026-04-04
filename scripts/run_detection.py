@@ -54,6 +54,20 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 CACHE_DIR = PROJECT_ROOT / "data" / "pipeline-video-cache"
+
+
+def api_request(method: str, url: str, **kwargs) -> requests.Response:
+    """Make an HTTP request with 403 backoff retry."""
+    kwargs.setdefault("timeout", 60)
+    wait = 30
+    for attempt in range(6):  # up to ~5 min total backoff
+        resp = requests.request(method, url, **kwargs)
+        if resp.status_code != 403:
+            return resp
+        print(f"    [!] 403 rate-limited — waiting {wait}s (attempt {attempt + 1})...")
+        time.sleep(wait)
+        wait = min(wait * 2, 120)
+    return resp  # return last 403 if all retries exhausted
 PIPELINE_VERSION = "vru-yolo-v2"
 FRAMES_PER_VIDEO = 45
 
@@ -211,7 +225,7 @@ def download_video(video_url: str) -> Path | None:
         path.touch()
         return path
     try:
-        with requests.get(video_url, stream=True, timeout=120) as resp:
+        with api_request("GET", video_url, stream=True, timeout=120) as resp:
             resp.raise_for_status()
             with path.open("wb") as f:
                 for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -2493,18 +2507,28 @@ def main() -> int:
         # Fetch event from API
         print(f"\n[3/6] Fetching event {video_id} from API...")
         api_key = load_api_key()
-        resp = requests.get(
+        resp = api_request(
+            "GET",
             f"{API_BASE_URL}/{video_id}",
             headers={
                 "Content-Type": "application/json",
                 "Authorization": api_key,
             },
-            timeout=60,
         )
         resp.raise_for_status()
         event = resp.json()
         video_url = event.get("videoUrl")
         if not video_url:
+            # Mark as missing_video so it won't be picked again
+            try:
+                conn.execute(
+                    "UPDATE triage_results SET triage_result = 'missing_video', "
+                    "rules_triggered = '[\"no_video_url_at_detection\"]' WHERE id = ?",
+                    (video_id,)
+                )
+                conn.commit()
+            except Exception:
+                pass
             raise RuntimeError(f"Event {video_id} has no videoUrl")
         event_timestamp = event.get("timestamp", "")
         day = event_timestamp[:10] or "2026-01-01"
