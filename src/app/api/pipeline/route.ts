@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import { isPipelineRunning } from "@/lib/pipeline-manager";
 
 export const runtime = "nodejs";
 
@@ -105,5 +106,5 @@ export async function GET(request: NextRequest) {
     rows = result.rows;
   }
 
-  return NextResponse.json({ counts, rows, total });
+  return NextResponse.json({ counts, rows, total, pipelineRunning: isPipelineRunning() });
 }
