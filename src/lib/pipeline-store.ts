@@ -1,8 +1,18 @@
 import { randomUUID } from "crypto";
+import { execSync } from "child_process";
 import os from "os";
 import { getDb } from "@/lib/db";
 
-const MACHINE_ID = os.hostname().split(".")[0] || "unknown";
+function getMachineId(): string {
+  try {
+    return execSync("scutil --get ComputerName", { timeout: 2000 })
+      .toString()
+      .trim();
+  } catch {
+    return os.hostname().split(".")[0] || "unknown";
+  }
+}
+const MACHINE_ID = getMachineId();
 import {
   createEmptyPipelineTotals,
   CURRENT_PIPELINE_VERSION,
