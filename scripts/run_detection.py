@@ -341,8 +341,7 @@ class TursoDb:
         return TursoCursor(rs)
 
     def executemany(self, sql, rows):
-        # Don't use this — use batch_insert instead
-        raise NotImplementedError("Use batch_insert() for bulk inserts with TursoDb")
+        self.batch_insert(sql, list(rows))
 
     def executescript(self, sql):
         import libsql_client
