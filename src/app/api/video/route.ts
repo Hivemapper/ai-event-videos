@@ -16,12 +16,21 @@ export async function GET(request: NextRequest) {
       fetchHeaders["Range"] = rangeHeader;
     }
 
-    const response = await fetch(url, { headers: fetchHeaders });
+    // Retry on 403 (CDN rate limiting)
+    let response = await fetch(url, { headers: fetchHeaders });
+    if (response.status === 403) {
+      await new Promise((r) => setTimeout(r, 2000));
+      response = await fetch(url, { headers: fetchHeaders });
+    }
+    if (response.status === 403) {
+      await new Promise((r) => setTimeout(r, 5000));
+      response = await fetch(url, { headers: fetchHeaders });
+    }
 
     if (!response.ok && response.status !== 206) {
       return NextResponse.json(
         { error: `Failed to fetch video: ${response.status}` },
-        { status: response.status }
+        { status: response.status, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -41,7 +50,7 @@ export async function GET(request: NextRequest) {
     const headers = new Headers({
       "Content-Type": contentType,
       "Accept-Ranges": "bytes",
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, max-age=300",
     });
 
     if (contentLength) {

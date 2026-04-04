@@ -17,7 +17,8 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let currentRunId: string | null = null; // Track this machine's active run
 
 const MODEL_NAME = "gdino-base-clip";
-const POLL_INTERVAL = 5000; // 5 seconds
+const POLL_INTERVAL = 6000; // 6 seconds between polls
+const COOLDOWN_BETWEEN_RUNS = 5000; // 5 seconds between finishing one run and starting next
 
 export function isPipelineRunning() {
   return running;
@@ -96,7 +97,8 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
     if (status === "queued" || status === "running") {
       return { started: true }; // Our run is still active
     }
-    currentRunId = null; // Our run finished, ready for next
+    currentRunId = null; // Our run finished, cooldown before next
+    await new Promise((r) => setTimeout(r, COOLDOWN_BETWEEN_RUNS));
   }
 
   // Pick multiple candidates to handle races with other machines
