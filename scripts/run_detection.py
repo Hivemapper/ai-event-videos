@@ -409,16 +409,17 @@ def get_db():
     if not isinstance(conn, TursoDb):
         conn.execute("PRAGMA journal_mode=WAL")
 
-    # Ensure run_id column exists on frame_detections
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(frame_detections)").fetchall()]
-    if "model_name" not in cols:
-        conn.execute(
-            "ALTER TABLE frame_detections ADD COLUMN model_name TEXT NOT NULL DEFAULT 'yolo11x'"
-        )
-        conn.commit()
-    if "run_id" not in cols:
-        conn.execute("ALTER TABLE frame_detections ADD COLUMN run_id TEXT")
-        conn.commit()
+    # Ensure columns exist on frame_detections (skip for Turso — schema managed by Node.js)
+    if not isinstance(conn, TursoDb):
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(frame_detections)").fetchall()]
+        if "model_name" not in cols:
+            conn.execute(
+                "ALTER TABLE frame_detections ADD COLUMN model_name TEXT NOT NULL DEFAULT 'yolo11x'"
+            )
+            conn.commit()
+        if "run_id" not in cols:
+            conn.execute("ALTER TABLE frame_detections ADD COLUMN run_id TEXT")
+            conn.commit()
 
     return conn
 
