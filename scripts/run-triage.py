@@ -29,6 +29,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 EVENT_CACHE_DIR = PROJECT_ROOT / "data" / "event-cache"
 
+
+def get_db_conn():
+    """Connect to Turso if configured, otherwise local SQLite."""
+    turso_url = os.environ.get("TURSO_DATABASE_URL")
+    turso_token = os.environ.get("TURSO_AUTH_TOKEN")
+
+    # Also check .env.local
+    if not turso_url:
+        env_local = PROJECT_ROOT / ".env.local"
+        if env_local.exists():
+            for line in env_local.read_text().splitlines():
+                if line.startswith("TURSO_DATABASE_URL="):
+                    turso_url = line.split("=", 1)[1].strip()
+                elif line.startswith("TURSO_AUTH_TOKEN="):
+                    turso_token = line.split("=", 1)[1].strip()
+
+    if turso_url and turso_token:
+        import libsql_experimental as libsql  # type: ignore
+        conn = libsql.connect("local.db", sync_url=turso_url, auth_token=turso_token)
+        conn.sync()
+        print(f"  {CYAN}Connected to Turso: {turso_url.split('//')[1][:40]}…{RESET}")
+        return conn
+
+    print(f"  Using local SQLite: {DB_PATH}")
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
 MS_TO_MPH = 2.237
 G = 9.81  # m/s²
 MIN_VIDEO_SIZE = 500 * 1024  # 500KB — files at or below this aren't real videos
@@ -60,6 +89,66 @@ def load_api_key() -> str:
             if line.startswith("BEEMAPS_API_KEY="):
                 return line.split("=", 1)[1].strip()
     raise RuntimeError("BEEMAPS_API_KEY not found")
+
+
+def load_mapbox_token() -> str | None:
+    token = os.environ.get("NEXT_PUBLIC_MAPBOX_TOKEN")
+    if token:
+        return token
+    env_local = PROJECT_ROOT / ".env.local"
+    if env_local.exists():
+        for line in env_local.read_text().splitlines():
+            if line.startswith("NEXT_PUBLIC_MAPBOX_TOKEN="):
+                val = line.split("=", 1)[1].strip()
+                if val and val != "your_mapbox_token_here":
+                    return val
+    return None
+
+
+NON_DRIVABLE_ROADS = {"path", "pedestrian", "track"}
+
+ROAD_CLASS_RANK = {
+    "motorway": 10, "motorway_link": 9,
+    "trunk": 8, "trunk_link": 7,
+    "primary": 6, "primary_link": 5,
+    "secondary": 4, "secondary_link": 3,
+    "tertiary": 2, "tertiary_link": 1,
+    "street": 0, "street_limited": 0,
+    "service": -1, "path": -2, "pedestrian": -3, "track": -4,
+}
+
+
+def query_road_class(lat: float, lon: float, token: str) -> str | None:
+    """Query Mapbox Tilequery for road class at a coordinate."""
+    try:
+        url = (
+            f"https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/"
+            f"{lon},{lat}.json?layers=road&radius=15&limit=5&access_token={token}"
+        )
+        resp = requests.get(url, timeout=10)
+        if not resp.ok:
+            return None
+        features = resp.json().get("features", [])
+        if not features:
+            return None
+
+        # Pick the highest-ranked drivable road
+        best_class = None
+        best_rank = -999
+        for f in features:
+            cls = f.get("properties", {}).get("class")
+            if not cls:
+                continue
+            rank = ROAD_CLASS_RANK.get(cls, -5)
+            if cls not in NON_DRIVABLE_ROADS and rank > best_rank:
+                best_rank = rank
+                best_class = cls
+        # Fall back to first feature if all non-drivable
+        if best_class is None:
+            best_class = features[0].get("properties", {}).get("class")
+        return best_class
+    except Exception:
+        return None
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -485,7 +574,7 @@ def fetch_event_detail(api_key: str, event_id: str) -> dict:
     return data
 
 
-def ensure_table(conn: sqlite3.Connection):
+def ensure_table(conn):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS triage_results (
             id TEXT PRIMARY KEY,
@@ -503,13 +592,16 @@ def ensure_table(conn: sqlite3.Connection):
         )
     """)
     # Migrations: add columns if missing (existing DBs)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
-    if "video_size" not in cols:
-        conn.execute("ALTER TABLE triage_results ADD COLUMN video_size INTEGER")
-    if "lat" not in cols:
-        conn.execute("ALTER TABLE triage_results ADD COLUMN lat REAL")
-    if "lon" not in cols:
-        conn.execute("ALTER TABLE triage_results ADD COLUMN lon REAL")
+    for col, defn in [
+        ("video_size", "INTEGER"),
+        ("lat", "REAL"),
+        ("lon", "REAL"),
+        ("road_class", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE triage_results ADD COLUMN {col} {defn}")
+        except Exception:
+            pass  # Column already exists
     conn.commit()
 
 
@@ -520,9 +612,10 @@ def main():
     args = parser.parse_args()
 
     api_key = load_api_key()
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    mapbox_token = load_mapbox_token()
+    if not mapbox_token:
+        print(f"{YELLOW}Warning: No Mapbox token found — road_class will be skipped{RESET}")
+    conn = get_db_conn()
     ensure_table(conn)
 
     # Check already triaged
@@ -601,20 +694,28 @@ def main():
             size_kb = details["video_size"] / 1024
             size_info = f" [{size_kb:.0f}KB]"
 
+        road_info = f" {road_class}" if road_class else ""
         print(
             f"  [{i+1}/{len(to_triage)}] {color}{result:>14}{RESET}  "
-            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}  "
+            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}{road_info}  "
             f"{DIM}{', '.join(rules)}{RESET}"
         )
 
-        # Save to DB
+        # Query road class from Mapbox
         loc = evt_summary.get("location", {})
+        evt_lat = loc.get("lat")
+        evt_lon = loc.get("lon")
+        road_class = None
+        if mapbox_token and evt_lat and evt_lon:
+            road_class = query_road_class(evt_lat, evt_lon, mapbox_token)
+
+        # Save to DB
         conn.execute(
             """INSERT OR REPLACE INTO triage_results
                (id, event_type, triage_result, rules_triggered,
                 speed_min, speed_max, speed_mean, speed_stddev,
-                gnss_displacement_m, video_size, event_timestamp, lat, lon, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                gnss_displacement_m, video_size, event_timestamp, lat, lon, road_class, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
             (
                 eid, etype, result, json.dumps(rules),
                 details.get("speed_min"), details.get("speed_max"),
@@ -622,13 +723,17 @@ def main():
                 details.get("gnss_displacement_m"),
                 details.get("video_size"),
                 event_timestamp,
-                loc.get("lat"), loc.get("lon"),
+                evt_lat, evt_lon, road_class,
             ),
         )
         if (i + 1) % 10 == 0:
             conn.commit()
+            if hasattr(conn, "sync"):
+                conn.sync()
 
     conn.commit()
+    if hasattr(conn, "sync"):
+        conn.sync()
     conn.close()
 
     elapsed = time.time() - t0
@@ -642,6 +747,99 @@ def main():
     print(f"  {GREEN}Signal:    {counts['signal']:>4}{RESET}")
     print(f"  Total:     {total:>4}  ({elapsed:.0f}s, {elapsed/max(total,1):.1f}s/event)")
     print(f"{BOLD}{'═' * 50}{RESET}")
+
+    # Dedupe signal events
+    conn = get_db_conn()
+    dedupe_signals(conn)
+    conn.close()
+
+
+def dedupe_signals(conn: sqlite3.Connection, distance_m: float = 100, window_s: float = 60, min_cluster: int = 3):
+    """Find and mark egregious duplicate signal events (3+ for one incident)."""
+    from datetime import datetime as _dt
+
+    print(f"\n{BOLD}Running dedupe on signal events...{RESET}")
+
+    rows = conn.execute(
+        """SELECT id, event_type, event_timestamp, lat, lon, speed_min, speed_max
+           FROM triage_results
+           WHERE triage_result = 'signal'
+             AND lat IS NOT NULL AND lon IS NOT NULL
+             AND event_timestamp IS NOT NULL
+           ORDER BY event_timestamp"""
+    ).fetchall()
+
+    if not rows:
+        print("  No signal events to dedupe.")
+        return
+
+    def parse_ts(ts_str):
+        try:
+            return _dt.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0
+
+    # Group by event_type, sort by timestamp
+    events_by_type: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        evt = {"id": r[0], "event_type": r[1], "event_timestamp": r[2],
+               "lat": r[3], "lon": r[4], "speed_min": r[5], "speed_max": r[6]}
+        evt["_ts"] = parse_ts(evt["event_timestamp"])
+        events_by_type[evt["event_type"]].append(evt)
+
+    for etype in events_by_type:
+        events_by_type[etype].sort(key=lambda e: e["_ts"])
+
+    # Cluster
+    clusters: list[list[dict]] = []
+    seen: set[str] = set()
+
+    for etype, events in events_by_type.items():
+        for i, evt_a in enumerate(events):
+            if evt_a["id"] in seen:
+                continue
+            cluster = [evt_a]
+            seen.add(evt_a["id"])
+            for j in range(i + 1, len(events)):
+                evt_b = events[j]
+                if evt_b["id"] in seen:
+                    continue
+                if evt_b["_ts"] - evt_a["_ts"] > window_s:
+                    break
+                close = any(
+                    haversine(c["lat"], c["lon"], evt_b["lat"], evt_b["lon"]) <= distance_m
+                    for c in cluster
+                )
+                if close:
+                    cluster.append(evt_b)
+                    seen.add(evt_b["id"])
+            if len(cluster) >= min_cluster:
+                clusters.append(cluster)
+
+    total_dupes = sum(len(c) - 1 for c in clusters)
+
+    if not clusters:
+        print(f"  No egregious duplicates found ({len(rows)} signal events checked).")
+        return
+
+    # Mark duplicates — keep the best per cluster (largest speed drop)
+    marked = 0
+    for cluster in clusters:
+        best = max(cluster, key=lambda e: (e["speed_max"] or 0) - (e["speed_min"] or 0))
+        for evt in cluster:
+            if evt["id"] != best["id"]:
+                conn.execute(
+                    "UPDATE triage_results SET triage_result = 'duplicate' WHERE id = ? AND triage_result = 'signal'",
+                    (evt["id"],)
+                )
+                marked += 1
+    conn.commit()
+    if hasattr(conn, "sync"):
+        conn.sync()
+
+    print(f"  {len(rows)} signal events checked")
+    print(f"  {len(clusters)} clusters found (≥{min_cluster} events each)")
+    print(f"  {YELLOW}{marked} marked as duplicate{RESET}")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
-import { ChevronLeft, ChevronRight, FileQuestion, Ghost, Route, VideoOff, Zap } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, FileQuestion, Ghost, Route, VideoOff, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,7 +16,7 @@ const fetcher = (url: string) => fetch(url).then((r) => r.json());
 interface TriageResult {
   id: string;
   event_type: string;
-  triage_result: "missing_video" | "missing_metadata" | "ghost" | "open_road" | "signal";
+  triage_result: "missing_video" | "missing_metadata" | "ghost" | "open_road" | "signal" | "duplicate";
   rules_triggered: string;
   speed_min: number | null;
   speed_max: number | null;
@@ -33,6 +33,7 @@ const RESULT_CONFIG = {
   ghost: { label: "Ghost", color: "bg-red-50 text-red-700 border-red-200", icon: Ghost },
   open_road: { label: "Open Road", color: "bg-amber-50 text-amber-700 border-amber-200", icon: Route },
   signal: { label: "Signal", color: "bg-green-50 text-green-700 border-green-200", icon: Zap },
+  duplicate: { label: "Duplicate", color: "bg-orange-50 text-orange-700 border-orange-200", icon: Copy },
 } as const;
 
 const FILTER_OPTIONS = [
@@ -41,6 +42,7 @@ const FILTER_OPTIONS = [
   { value: "missing_metadata", label: "Missing Metadata" },
   { value: "ghost", label: "Ghost" },
   { value: "open_road", label: "Open Road" },
+  { value: "duplicate", label: "Duplicate" },
   { value: "signal", label: "Signal" },
 ] as const;
 
@@ -89,7 +91,7 @@ function TriageTable() {
   return (
     <div>
       {/* Summary cards */}
-      <div className="grid grid-cols-6 gap-3 mb-6">
+      <div className="grid grid-cols-7 gap-2 mb-6">
         {FILTER_OPTIONS.map(({ value, label }) => {
           const count = value ? (summary[value] ?? 0) : Object.values(summary).reduce((a, b) => a + b, 0);
           const grandTotal = Object.values(summary).reduce((a, b) => a + b, 0);
@@ -101,11 +103,12 @@ function TriageTable() {
               key={label}
               onClick={() => handleFilter(value)}
               className={cn(
-                "rounded-lg border px-4 py-3 text-left transition-all",
-                isActive ? "ring-2 ring-primary border-primary" : "hover:border-foreground/20"
+                "rounded-lg border px-3 py-2 text-left transition-all",
+                isActive ? "ring-2 ring-primary border-primary" : "hover:border-foreground/20",
+                value === "signal" && "bg-green-50 border-green-200"
               )}
             >
-              <p className="text-2xl font-semibold tabular-nums">{count} <span className="text-sm font-normal text-muted-foreground">{pct}%</span></p>
+              <p className="text-xl font-semibold tabular-nums">{count} <span className="text-xs font-normal text-muted-foreground">{pct}%</span></p>
               <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
             </button>
           );
