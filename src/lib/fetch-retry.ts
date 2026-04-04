@@ -7,14 +7,14 @@ export async function fetchWithRetry(
   init?: RequestInit,
   opts?: { retries?: number; backoffMs?: number }
 ): Promise<Response> {
-  const { retries = 3, backoffMs = 500 } = opts ?? {};
+  const { retries = 3, backoffMs = 2000 } = opts ?? {};
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await fetch(url, init);
-      // Don't retry client errors (4xx), only server errors (5xx)
-      if (response.status < 500 || attempt === retries) {
+      // Retry on 403 (rate limiting) and 5xx server errors
+      if (response.status !== 403 && response.status < 500 || attempt === retries) {
         return response;
       }
       lastError = new Error(`Server error: ${response.status}`);

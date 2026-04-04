@@ -325,92 +325,39 @@ def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, in
 # Database — uses Turso if env vars are set, otherwise local SQLite
 # ---------------------------------------------------------------------------
 
-class TursoCursor:
-    """Mimics sqlite3.Cursor for libsql_client results."""
-
-    def __init__(self, result_set):
-        self._rs = result_set
-        self._rows = result_set.rows if result_set else []
-
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
-
-    def fetchall(self):
-        return list(self._rows)
-
-
-class TursoDb:
-    """Wrapper around libsql_client that provides a sqlite3-like interface."""
-
-    def __init__(self, client):
-        self._client = client
-
-    def execute(self, sql, params=None):
-        import libsql_client
-        if params:
-            stmt = libsql_client.Statement(sql, list(params))
-            rs = self._client.execute(stmt)
-        else:
-            rs = self._client.execute(sql)
-        return TursoCursor(rs)
-
-    def executemany(self, sql, rows):
-        self.batch_insert(sql, list(rows))
-
-    def executescript(self, sql):
-        import libsql_client
-        # Split on semicolons and batch
-        stmts = [s.strip() for s in sql.split(';') if s.strip()]
-        if stmts:
-            self._client.batch([libsql_client.Statement(s) for s in stmts])
-
-    def batch_insert(self, sql, rows):
-        """Efficient bulk insert using batch()."""
-        import libsql_client
-        stmts = [libsql_client.Statement(sql, list(row)) for row in rows]
-        # batch() has a limit, chunk into groups of 500
-        CHUNK = 500
-        for i in range(0, len(stmts), CHUNK):
-            self._client.batch(stmts[i:i + CHUNK])
-
-    def commit(self):
-        pass  # libsql_client auto-commits
-
-    def sync(self):
-        pass  # No-op for direct HTTP
-
-    def close(self):
-        self._client.close()
+_is_turso = False
 
 
 def get_db():
+    """Connect to Turso via embedded replica (local writes, sync at end) or local SQLite."""
+    global _is_turso
     turso_url = _load_env_var("TURSO_DATABASE_URL")
     turso_token = _load_env_var("TURSO_AUTH_TOKEN")
 
     if turso_url and turso_token:
         try:
-            import libsql_client
-            # libsql_client needs https:// not libsql://
-            http_url = turso_url.replace("libsql://", "https://")
-            client = libsql_client.create_client_sync(
-                url=http_url,
+            import libsql_experimental as libsql  # type: ignore
+            conn = libsql.connect(
+                str(DB_PATH),  # local replica file
+                sync_url=turso_url,
                 auth_token=turso_token,
             )
-            conn = TursoDb(client)
-            print(f"  DB: Connected to Turso ({turso_url.split('//')[1].split('.')[0]})")
+            conn.sync()
+            _is_turso = True
+            print(f"  DB: Turso embedded replica ({turso_url.split('//')[1].split('.')[0]})")
         except ImportError:
-            print("  [!] libsql_client not installed, falling back to local SQLite")
-            print("      Install with: pip install libsql-client")
+            print("  [!] libsql_experimental not installed, falling back to local SQLite")
+            print("      Install with: pip install libsql-experimental")
             conn = sqlite3.connect(str(DB_PATH))
     else:
         conn = sqlite3.connect(str(DB_PATH))
         print("  DB: Using local SQLite")
 
-    if not isinstance(conn, TursoDb):
+    if not _is_turso:
         conn.execute("PRAGMA journal_mode=WAL")
 
-    # Ensure columns exist on frame_detections (skip for Turso — schema managed by Node.js)
-    if not isinstance(conn, TursoDb):
+    # Ensure columns exist on frame_detections
+    if not _is_turso:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(frame_detections)").fetchall()]
         if "model_name" not in cols:
             conn.execute(
@@ -425,8 +372,10 @@ def get_db():
 
 
 def commit_and_sync(conn) -> None:
-    """Commit and, for sqlite3, flush to disk. TursoDb auto-commits."""
+    """Commit changes to local DB and sync to Turso if connected."""
     conn.commit()
+    if _is_turso and hasattr(conn, "sync"):
+        conn.sync()
 
 
 # ---------------------------------------------------------------------------
@@ -532,11 +481,7 @@ def save_detections(
         )
         for d in detections
     ]
-    if isinstance(conn, TursoDb):
-        conn.batch_insert(sql, rows)
-    else:
-        conn.executemany(sql, rows)
-    # Don't sync here — caller batches inserts and syncs once at the end
+    conn.executemany(sql, rows)
     conn.commit()
     return len(rows)
 
@@ -2501,7 +2446,7 @@ def main() -> int:
     print(f"  config:     {json.dumps(config)}")
     print(f"  frames:     {num_frames}")
 
-    # Update status to running
+    # Update status to running and sync so UI sees it immediately
     update_run_status(conn, run_id, "running")
 
     try:
@@ -2627,13 +2572,8 @@ def main() -> int:
         ]
 
         t_build = time.time()
-        if isinstance(conn, TursoDb):
-            conn.batch_insert(insert_sql, insert_rows)
-        else:
-            # sqlite3: use executemany inside a transaction for speed
-            conn.execute("BEGIN")
-            conn.executemany(insert_sql, insert_rows)
-            conn.execute("COMMIT")
+        conn.executemany(insert_sql, insert_rows)
+        conn.commit()
         t_insert = time.time()
         total_saved = len(detections)
         print(f"  Saved {total_saved} detections for {video_id}")
@@ -2689,11 +2629,12 @@ def main() -> int:
                     seg_max_conf, "supported", PIPELINE_VERSION, model_name, run_id,
                 ))
 
-            # Ensure run_id column exists
-            seg_cols = [r[1] for r in conn.execute("PRAGMA table_info(video_detection_segments)").fetchall()]
-            if "run_id" not in seg_cols:
-                conn.execute("ALTER TABLE video_detection_segments ADD COLUMN run_id TEXT")
-                conn.commit()
+            # Ensure run_id column exists (skip for Turso — schema managed by Node.js)
+            if not _is_turso:
+                seg_cols = [r[1] for r in conn.execute("PRAGMA table_info(video_detection_segments)").fetchall()]
+                if "run_id" not in seg_cols:
+                    conn.execute("ALTER TABLE video_detection_segments ADD COLUMN run_id TEXT")
+                    conn.commit()
 
             conn.execute("DELETE FROM video_detection_segments WHERE run_id = ?", (run_id,))
             seg_sql = (
@@ -2722,7 +2663,7 @@ def main() -> int:
         # Timeline generation (Claude Vision) — disabled for speed
         # generate_timeline(frames, detections, event, conn, video_id, run_id, scene_attrs)
 
-        # Mark as completed
+        # Mark as completed and sync so UI sees it immediately
         update_run_status(conn, run_id, "completed", detection_count=total_saved)
         print(f"\n  Run completed: {total_saved} detections")
         if scene_attrs:
@@ -2737,6 +2678,14 @@ def main() -> int:
         return 1
 
     finally:
+        # Sync all local writes to Turso in one batch
+        if _is_turso and hasattr(conn, "sync"):
+            try:
+                print(f"\n  Syncing to Turso...")
+                conn.sync()
+                print(f"  Synced successfully.")
+            except Exception as sync_exc:
+                print(f"  [!] Turso sync failed: {sync_exc}")
         conn.close()
 
     print(f"\n{'=' * 70}")

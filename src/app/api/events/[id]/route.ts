@@ -67,7 +67,7 @@ export async function GET(
 
       return NextResponse.json(
         { error: errorMessage },
-        { status: response.status }
+        { status: response.status, headers: { "Cache-Control": "no-store" } }
       );
     }
 
