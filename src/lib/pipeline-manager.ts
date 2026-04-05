@@ -19,6 +19,7 @@ let currentRunId: string | null = null; // Track this machine's active run
 const MODEL_NAME = "gdino-base-clip";
 const POLL_INTERVAL = 6000; // 6 seconds between polls
 const COOLDOWN_BETWEEN_RUNS = 5000; // 5 seconds between finishing one run and starting next
+const RUN_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 export function isPipelineRunning() {
   return running;
@@ -90,14 +91,32 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
   if (currentRunId) {
     const db = await getDb();
     const check = await db.query(
-      "SELECT status FROM detection_runs WHERE id = ?",
+      "SELECT status, worker_pid, started_at, created_at FROM detection_runs WHERE id = ?",
       [currentRunId]
     );
-    const status = (check.rows[0] as { status: string } | undefined)?.status;
-    if (status === "queued" || status === "running") {
-      return { started: true }; // Our run is still active
+    const row = check.rows[0] as { status: string; worker_pid: number | null; started_at: string | null; created_at: string } | undefined;
+    if (row && (row.status === "queued" || row.status === "running")) {
+      // Check for timeout
+      const startTime = row.started_at || row.created_at;
+      const elapsed = Date.now() - new Date(startTime.endsWith("Z") ? startTime : startTime + "Z").getTime();
+      if (elapsed > RUN_TIMEOUT_MS) {
+        console.log(`[pipeline] Run ${currentRunId} timed out after ${Math.round(elapsed / 60000)}m — killing`);
+        // Kill the worker
+        if (row.worker_pid) {
+          try { process.kill(-row.worker_pid, "SIGTERM"); } catch {
+            try { process.kill(row.worker_pid, "SIGTERM"); } catch { /* gone */ }
+          }
+        }
+        await updateDetectionRunStatus(currentRunId, "failed", {
+          lastError: `Timeout — exceeded ${Math.round(RUN_TIMEOUT_MS / 60000)} minutes`,
+        });
+        currentRunId = null;
+      } else {
+        return { started: true }; // Our run is still active
+      }
+    } else {
+      currentRunId = null; // Our run finished, cooldown before next
     }
-    currentRunId = null; // Our run finished, cooldown before next
     await new Promise((r) => setTimeout(r, COOLDOWN_BETWEEN_RUNS));
   }
 
