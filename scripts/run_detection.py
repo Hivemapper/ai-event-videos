@@ -328,13 +328,69 @@ def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, in
 _is_turso = False
 
 
+class TursoCursor:
+    """Mimics sqlite3.Cursor for libsql_client results."""
+
+    def __init__(self, result_set):
+        self._rs = result_set
+        self._rows = result_set.rows if result_set else []
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TursoDb:
+    """HTTP fallback wrapper around libsql_client that provides a sqlite3-like interface."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def execute(self, sql, params=None):
+        import libsql_client
+        if params:
+            stmt = libsql_client.Statement(sql, list(params))
+            rs = self._client.execute(stmt)
+        else:
+            rs = self._client.execute(sql)
+        return TursoCursor(rs)
+
+    def executemany(self, sql, rows):
+        self.batch_insert(sql, list(rows))
+
+    def executescript(self, sql):
+        import libsql_client
+        stmts = [s.strip() for s in sql.split(';') if s.strip()]
+        if stmts:
+            self._client.batch([libsql_client.Statement(s) for s in stmts])
+
+    def batch_insert(self, sql, rows):
+        import libsql_client
+        stmts = [libsql_client.Statement(sql, list(row)) for row in rows]
+        CHUNK = 500
+        for i in range(0, len(stmts), CHUNK):
+            self._client.batch(stmts[i:i + CHUNK])
+
+    def commit(self):
+        pass  # libsql_client auto-commits
+
+    def sync(self):
+        pass  # No-op for HTTP mode
+
+    def close(self):
+        self._client.close()
+
+
 def get_db():
-    """Connect to Turso via embedded replica (local writes, sync at end) or local SQLite."""
+    """Connect to Turso via embedded replica, HTTP fallback, or local SQLite."""
     global _is_turso
     turso_url = _load_env_var("TURSO_DATABASE_URL")
     turso_token = _load_env_var("TURSO_AUTH_TOKEN")
 
     if turso_url and turso_token:
+        # Try embedded replica first (better performance, local caching)
         try:
             import libsql_experimental as libsql  # type: ignore
             conn = libsql.connect(
@@ -345,10 +401,19 @@ def get_db():
             conn.sync()
             _is_turso = True
             print(f"  DB: Turso embedded replica ({turso_url.split('//')[1].split('.')[0]})")
-        except ImportError:
-            print("  [!] libsql_experimental not installed, falling back to local SQLite")
-            print("      Install with: pip install libsql-experimental")
-            conn = sqlite3.connect(str(DB_PATH))
+        except Exception:
+            # Fall back to HTTP mode via libsql_client
+            try:
+                import libsql_client
+                http_url = turso_url.replace("libsql://", "https://")
+                client = libsql_client.create_client_sync(url=http_url, auth_token=turso_token)
+                conn = TursoDb(client)
+                _is_turso = True
+                print(f"  DB: Turso HTTP ({turso_url.split('//')[1].split('.')[0]})")
+            except ImportError:
+                print("  [!] Neither libsql_experimental nor libsql_client installed, falling back to local SQLite")
+                print("      Install with: pip install libsql-client")
+                conn = sqlite3.connect(str(DB_PATH))
     else:
         conn = sqlite3.connect(str(DB_PATH))
         print("  DB: Using local SQLite")
