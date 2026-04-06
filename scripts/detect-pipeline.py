@@ -15,7 +15,6 @@ import argparse
 import json
 import os
 import signal
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -27,8 +26,11 @@ from pathlib import Path
 
 import requests
 
+# Add parent to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_detection import get_db
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "run_detection.py"
 LOG_DIR = PROJECT_ROOT / "data" / "pipeline-logs"
 
@@ -123,7 +125,7 @@ def fetch_event_ids(api_key: str, event_type: str, limit: int) -> list[str]:
     return all_ids[:limit]
 
 
-def get_already_processed(conn: sqlite3.Connection) -> set[str]:
+def get_already_processed(conn) -> set[str]:
     """Get video IDs that already have a completed detection run."""
     rows = conn.execute(
         "SELECT DISTINCT video_id FROM detection_runs WHERE status = 'completed'"
@@ -131,8 +133,8 @@ def get_already_processed(conn: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
-def create_run(conn: sqlite3.Connection, video_id: str, model: str, config: dict) -> str:
-    """Create a detection run entry directly in SQLite (bypasses single-run constraint)."""
+def create_run(conn, video_id: str, model: str, config: dict) -> str:
+    """Create a detection run entry in the database."""
     run_id = str(uuid.uuid4())
     conn.execute(
         "INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at) "
@@ -170,7 +172,7 @@ class BatchRunner:
         self.stop_event = threading.Event()
 
         # Create all runs in DB
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = get_db()
         self.runs: list[RunState] = []
         for i, vid in enumerate(video_ids):
             run_id = create_run(conn, vid, model, config)
@@ -219,7 +221,7 @@ class BatchRunner:
         elapsed = run.completed_at - (run.started_at or run.completed_at)
 
         # Read final status from DB
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = get_db()
         row = conn.execute(
             "SELECT status, detection_count, last_error FROM detection_runs WHERE id = ?",
             (run.run_id,),
@@ -411,7 +413,7 @@ def main():
 
     # Filter out already processed
     print("Checking for already-processed events…", end="", flush=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = get_db()
     processed = get_already_processed(conn)
     conn.close()
 
@@ -436,7 +438,7 @@ def main():
             if run.process and run.process.poll() is None:
                 run.process.terminate()
         # Mark queued runs as cancelled
-        conn = sqlite3.connect(str(DB_PATH))
+        conn = get_db()
         for run in runner.queue:
             conn.execute(
                 "UPDATE detection_runs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?",
