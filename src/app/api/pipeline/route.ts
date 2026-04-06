@@ -23,6 +23,8 @@ export async function GET(request: NextRequest) {
     SELECT
       (SELECT COUNT(*) FROM triage_results t
        WHERE t.triage_result = 'signal'
+         AND (t.road_class IS NULL OR t.road_class != 'motorway')
+         AND (t.speed_min IS NULL OR t.speed_min < 45)
          AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
       ) as queued,
       (SELECT COUNT(DISTINCT dr.video_id) FROM detection_runs dr
@@ -55,6 +57,8 @@ export async function GET(request: NextRequest) {
       `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class
        FROM triage_results t
        WHERE t.triage_result = 'signal'
+         AND (t.road_class IS NULL OR t.road_class != 'motorway')
+         AND (t.speed_min IS NULL OR t.speed_min < 45)
          AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
        ORDER BY t.event_timestamp DESC
        LIMIT ? OFFSET ?`,

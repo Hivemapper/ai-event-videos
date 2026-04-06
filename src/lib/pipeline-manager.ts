@@ -48,14 +48,12 @@ export async function startPipeline(): Promise<{ started: boolean; error?: strin
 
 export async function stopPipeline(): Promise<{ stopped: boolean; runId?: string }> {
   running = false;
+  const stoppedRunId = currentRunId;
   currentRunId = null;
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-
-  // Kill this machine's active run if any
-  const stoppedRunId = currentRunId;
   if (stoppedRunId) {
     const db = await getDb();
     const result = await db.query(
@@ -77,7 +75,6 @@ export async function stopPipeline(): Promise<{ stopped: boolean; runId?: string
     await updateDetectionRunStatus(stoppedRunId, "cancelled", {
       lastError: "Stopped by user",
     });
-    currentRunId = null;
     return { stopped: true, runId: stoppedRunId };
   }
 
@@ -125,6 +122,8 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
   const result = await db.query(
     `SELECT t.id FROM triage_results t
      WHERE t.triage_result = 'signal'
+       AND (t.road_class IS NULL OR t.road_class != 'motorway')
+       AND (t.speed_min IS NULL OR t.speed_min < 45)
        AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
      ORDER BY RANDOM()
      LIMIT 5`

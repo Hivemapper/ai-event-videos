@@ -694,13 +694,6 @@ def main():
             size_kb = details["video_size"] / 1024
             size_info = f" [{size_kb:.0f}KB]"
 
-        road_info = f" {road_class}" if road_class else ""
-        print(
-            f"  [{i+1}/{len(to_triage)}] {color}{result:>14}{RESET}  "
-            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}{road_info}  "
-            f"{DIM}{', '.join(rules)}{RESET}"
-        )
-
         # Query road class from Mapbox
         loc = evt_summary.get("location", {})
         evt_lat = loc.get("lat")
@@ -708,6 +701,13 @@ def main():
         road_class = None
         if mapbox_token and evt_lat and evt_lon:
             road_class = query_road_class(evt_lat, evt_lon, mapbox_token)
+
+        road_info = f" {road_class}" if road_class else ""
+        print(
+            f"  [{i+1}/{len(to_triage)}] {color}{result:>14}{RESET}  "
+            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}{road_info}  "
+            f"{DIM}{', '.join(rules)}{RESET}"
+        )
 
         # Save to DB
         conn.execute(
