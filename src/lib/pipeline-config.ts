@@ -155,7 +155,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
     type: "Open-vocabulary (detect anything described in text)",
     device: "MPS (GPU)",
     prompt:
-      "person. bicycle. motorcycle. person on electric scooter. electric kick scooter. wheelchair. stroller. person wearing safety vest. skateboard. dog. traffic cone. car. truck. bus.",
+      "person. bicycle. motorcycle. wheelchair. stroller. person wearing safety vest. skateboard. dog.",
     features: ["OpenCLIP verification (filters false positives)"],
     estimatedTime: "~1.5 min for 75 frames",
   },
