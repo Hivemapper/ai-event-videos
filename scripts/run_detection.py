@@ -203,16 +203,21 @@ def utc_now() -> str:
 
 
 def get_device() -> str:
+    if torch.cuda.is_available():
+        print(f"  [GPU] CUDA is available ({torch.cuda.get_device_name(0)})")
+        return "cuda"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         print(f"  [GPU] MPS (Apple Silicon GPU) is available")
         return "mps"
-    print(f"  [GPU] MPS not available — using CPU")
+    print(f"  [GPU] No GPU available — using CPU")
     return "cpu"
 
 
 def free_gpu():
     """Force-free MPS/CUDA memory."""
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
         torch.mps.empty_cache()
 
