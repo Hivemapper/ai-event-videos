@@ -98,12 +98,8 @@ class ModelCache:
                 self.device = "cpu"
                 print(f"  {RED}[GDINO] GPU failed ({exc}), running on CPU{RESET}")
 
-        # Try torch.compile
-        try:
-            self.gdino_model = torch.compile(self.gdino_model)
-            print(f"  [GDINO] torch.compile enabled")
-        except Exception as exc:
-            print(f"  [GDINO] torch.compile skipped ({exc})")
+        # Skip torch.compile — incompatible with transformers 5.x on CUDA
+        # The CUDA GPU acceleration alone provides sufficient speedup
 
     def load_clip(self):
         try:
