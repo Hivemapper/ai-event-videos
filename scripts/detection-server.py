@@ -248,6 +248,8 @@ class ModelCache:
 
             crop = Image.fromarray(cv2.cvtColor(frame_bgr[y1:y2, x1:x2], cv2.COLOR_BGR2RGB))
             tensor = self.clip_preprocess(crop).unsqueeze(0).to(self.device)
+            if self.clip_half:
+                tensor = tensor.half()
 
             with torch.no_grad():
                 img_feat = self.clip_model.encode_image(tensor)
