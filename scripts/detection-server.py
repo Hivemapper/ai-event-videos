@@ -424,7 +424,7 @@ def get_machine_id() -> str:
 MACHINE_ID = get_machine_id()
 
 
-def claim_next_run(cache: ModelCache) -> str | None:
+def claim_next_run(cache: ModelCache, args_ref=None) -> str | None:
     """Find and claim the next video to process. Returns run_id or None."""
     conn = get_db()
 
@@ -463,6 +463,7 @@ def claim_next_run(cache: ModelCache) -> str | None:
         "modelDisplayName": "GDINO Base + CLIP",
         "type": "Open-vocabulary (detect anything described in text)",
         "device": "CUDA",
+        "framesPerVideo": args_ref.frames,
     })
     conn.execute(
         """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at, started_at, worker_pid)
@@ -478,6 +479,7 @@ def main():
     parser = argparse.ArgumentParser(description="Persistent detection server")
     parser.add_argument("--poll", type=float, default=2, help="Poll interval (default: 2s)")
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers (default: 1)")
+    parser.add_argument("--frames", type=int, default=45, help="Frames per video (default: 45)")
     args = parser.parse_args()
 
     print(f"{BOLD}{'═' * 60}{RESET}")
@@ -485,6 +487,7 @@ def main():
     print(f"  Machine: {MACHINE_ID}")
     print(f"  PID: {os.getpid()}")
     print(f"  Workers: {args.workers}")
+    print(f"  Frames:  {args.frames}")
     print(f"{BOLD}{'═' * 60}{RESET}")
 
     # Load models once
@@ -529,7 +532,7 @@ def main():
             time.sleep(0.5)
             continue
 
-        run_id = claim_next_run(cache)
+        run_id = claim_next_run(cache, args_ref=args)
         if not run_id:
             time.sleep(args.poll)
             continue
