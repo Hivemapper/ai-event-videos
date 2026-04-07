@@ -81,28 +81,22 @@ class ModelCache:
         self.gdino_model.eval()
 
         self.device = get_device()
-        self.use_half = self.device == "cuda"
+        self.use_half = False  # GDINO's BERT encoder doesn't support float16
 
         if self.device in ("cuda", "mps"):
             try:
                 self.gdino_model = self.gdino_model.to(self.device)
-                if self.use_half:
-                    self.gdino_model = self.gdino_model.half()
                 dummy = self.gdino_processor(
                     images=Image.new("RGB", (64, 64)), text="test.", return_tensors="pt"
                 )
                 dummy = {k: v.to(self.device) if hasattr(v, "to") else v for k, v in dummy.items()}
-                if self.use_half:
-                    dummy = {k: v.half() if hasattr(v, "half") and v.is_floating_point() else v for k, v in dummy.items()}
                 with torch.no_grad():
                     self.gdino_model(**dummy)
-                dtype_str = "float16" if self.use_half else "float32"
-                print(f"  {GREEN}[GDINO] Running on {self.device.upper()} ({dtype_str}){RESET}")
+                print(f"  {GREEN}[GDINO] Running on {self.device.upper()} (float32){RESET}")
             except Exception as exc:
-                self.gdino_model = self.gdino_model.float().to("cpu")
+                self.gdino_model = self.gdino_model.to("cpu")
                 self.device = "cpu"
-                self.use_half = False
-                print(f"  {RED}[GDINO] {self.device} failed ({exc}), running on CPU{RESET}")
+                print(f"  {RED}[GDINO] GPU failed ({exc}), running on CPU{RESET}")
 
         # Try torch.compile
         try:
