@@ -21,6 +21,7 @@ import sqlite3
 import sys
 import time
 import traceback
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -435,6 +436,8 @@ def main():
     runs_processed = 0
     while running:
         conn = get_db()
+
+        # First check for existing queued detection runs (e.g. from web UI)
         row = conn.execute(
             "SELECT id FROM detection_runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
         ).fetchone()
@@ -447,17 +450,44 @@ def main():
             )
             conn.commit()
             conn.close()
-
-            print(f"\n{CYAN}Run {run_id[:16]}…{RESET}")
-            t_run = time.time()
-            ok = process_run(cache, run_id)
-            elapsed = time.time() - t_run
-            if ok:
-                runs_processed += 1
-                print(f"  {elapsed:.1f}s (no model load overhead)")
         else:
+            # Pick from triage_results: signal events with no detection run yet
+            candidate = conn.execute(
+                """SELECT t.id FROM triage_results t
+                   WHERE t.triage_result = 'signal'
+                     AND (t.road_class IS NULL OR t.road_class != 'motorway')
+                     AND (t.speed_min IS NULL OR t.speed_min < 45)
+                     AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
+                   LIMIT 1"""
+            ).fetchone()
+
+            if not candidate:
+                conn.close()
+                time.sleep(args.poll)
+                continue
+
+            video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
+            run_id = str(uuid.uuid4())
+            config = json.dumps({
+                "modelDisplayName": "GDINO Base + CLIP",
+                "type": "Open-vocabulary (detect anything described in text)",
+                "device": "CUDA",
+            })
+            conn.execute(
+                """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at, started_at, worker_pid)
+                   VALUES (?, ?, 'gdino-base-clip', 'running', ?, ?, ?, ?)""",
+                (run_id, video_id, config, utc_now(), utc_now(), os.getpid())
+            )
+            conn.commit()
             conn.close()
-            time.sleep(args.poll)
+
+        print(f"\n{CYAN}Run {run_id[:16]}…{RESET}")
+        t_run = time.time()
+        ok = process_run(cache, run_id)
+        elapsed = time.time() - t_run
+        if ok:
+            runs_processed += 1
+            print(f"  {elapsed:.1f}s (no model load overhead)")
 
     print(f"\n{BOLD}Server stopped. Processed {runs_processed} runs.{RESET}")
     del cache
