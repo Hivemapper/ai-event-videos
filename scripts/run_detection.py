@@ -219,7 +219,10 @@ def free_gpu():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-        torch.mps.empty_cache()
+        try:
+            torch.mps.empty_cache()
+        except RuntimeError:
+            pass  # MPS backend not available (e.g. on Linux/CUDA)
 
 
 def download_video(video_url: str) -> Path | None:

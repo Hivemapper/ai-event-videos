@@ -293,6 +293,7 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
     config = json.loads(run["config_json"] or "{}")
     num_frames = int(config.get("framesPerVideo", FRAMES_PER_VIDEO))
 
+    video_path = None
     try:
         # Fetch event
         api_key = load_api_key()
@@ -405,6 +406,9 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
         update_run_status(conn, run_id, "failed", last_error=str(exc)[:1000])
         return False
     finally:
+        # Clean up cached video to prevent disk from filling up
+        if video_path and video_path.exists():
+            video_path.unlink(missing_ok=True)
         conn.close()
 
 
