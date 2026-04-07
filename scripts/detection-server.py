@@ -16,11 +16,14 @@ import argparse
 import gc
 import json
 import os
+import platform
 import signal
 import sqlite3
+import subprocess
 import sys
 import time
 import traceback
+import threading
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -405,14 +408,83 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
         conn.close()
 
 
+def get_machine_id() -> str:
+    """Get a human-readable machine identifier."""
+    try:
+        # Try macOS ComputerName first
+        return subprocess.check_output(
+            ["scutil", "--get", "ComputerName"], timeout=2, stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        pass
+    # Fall back to hostname (e.g. "ip-10-0-18-49" on EC2)
+    return platform.node().split(".")[0] or "unknown"
+
+
+MACHINE_ID = get_machine_id()
+
+
+def claim_next_run(cache: ModelCache) -> str | None:
+    """Find and claim the next video to process. Returns run_id or None."""
+    conn = get_db()
+
+    # First check for existing queued detection runs (e.g. from web UI)
+    row = conn.execute(
+        "SELECT id FROM detection_runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+    ).fetchone()
+
+    if row:
+        run_id = row[0] if isinstance(row, tuple) else row["id"]
+        conn.execute(
+            "UPDATE detection_runs SET status = 'running', started_at = ?, worker_pid = ?, machine_id = ? WHERE id = ?",
+            (utc_now(), os.getpid(), MACHINE_ID, run_id)
+        )
+        conn.commit()
+        conn.close()
+        return run_id
+
+    # Pick from triage_results: signal events with no detection run yet
+    candidate = conn.execute(
+        """SELECT t.id FROM triage_results t
+           WHERE t.triage_result = 'signal'
+             AND (t.road_class IS NULL OR t.road_class != 'motorway')
+             AND (t.speed_min IS NULL OR t.speed_min < 45)
+             AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
+           LIMIT 1"""
+    ).fetchone()
+
+    if not candidate:
+        conn.close()
+        return None
+
+    video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
+    run_id = str(uuid.uuid4())
+    config = json.dumps({
+        "modelDisplayName": "GDINO Base + CLIP",
+        "type": "Open-vocabulary (detect anything described in text)",
+        "device": "CUDA",
+    })
+    conn.execute(
+        """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at, started_at, worker_pid)
+           VALUES (?, ?, 'gdino-base-clip', 'running', ?, ?, ?, ?, ?)""",
+        (run_id, video_id, config, MACHINE_ID, utc_now(), utc_now(), os.getpid())
+    )
+    conn.commit()
+    conn.close()
+    return run_id
+
+
 def main():
     parser = argparse.ArgumentParser(description="Persistent detection server")
     parser.add_argument("--poll", type=float, default=2, help="Poll interval (default: 2s)")
+    parser.add_argument("--workers", type=int, default=1, help="Parallel workers (default: 1)")
     args = parser.parse_args()
 
     print(f"{BOLD}{'═' * 60}{RESET}")
     print(f"  Detection Server")
+    print(f"  Machine: {MACHINE_ID}")
     print(f"  PID: {os.getpid()}")
+    print(f"  Workers: {args.workers}")
     print(f"{BOLD}{'═' * 60}{RESET}")
 
     # Load models once
@@ -434,60 +506,48 @@ def main():
     signal.signal(signal.SIGTERM, handle_signal)
 
     runs_processed = 0
-    while running:
-        conn = get_db()
+    lock = threading.Lock()
+    active_workers = 0
 
-        # First check for existing queued detection runs (e.g. from web UI)
-        row = conn.execute(
-            "SELECT id FROM detection_runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-        ).fetchone()
-
-        if row:
-            run_id = row[0] if isinstance(row, tuple) else row["id"]
-            conn.execute(
-                "UPDATE detection_runs SET status = 'running', started_at = ?, worker_pid = ? WHERE id = ?",
-                (utc_now(), os.getpid(), run_id)
-            )
-            conn.commit()
-            conn.close()
-        else:
-            # Pick from triage_results: signal events with no detection run yet
-            candidate = conn.execute(
-                """SELECT t.id FROM triage_results t
-                   WHERE t.triage_result = 'signal'
-                     AND (t.road_class IS NULL OR t.road_class != 'motorway')
-                     AND (t.speed_min IS NULL OR t.speed_min < 45)
-                     AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-                   LIMIT 1"""
-            ).fetchone()
-
-            if not candidate:
-                conn.close()
-                time.sleep(args.poll)
-                continue
-
-            video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
-            run_id = str(uuid.uuid4())
-            config = json.dumps({
-                "modelDisplayName": "GDINO Base + CLIP",
-                "type": "Open-vocabulary (detect anything described in text)",
-                "device": "CUDA",
-            })
-            conn.execute(
-                """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, created_at, started_at, worker_pid)
-                   VALUES (?, ?, 'gdino-base-clip', 'running', ?, ?, ?, ?)""",
-                (run_id, video_id, config, utc_now(), utc_now(), os.getpid())
-            )
-            conn.commit()
-            conn.close()
-
-        print(f"\n{CYAN}Run {run_id[:16]}…{RESET}")
+    def worker_fn(run_id: str):
+        nonlocal runs_processed, active_workers
         t_run = time.time()
         ok = process_run(cache, run_id)
         elapsed = time.time() - t_run
-        if ok:
-            runs_processed += 1
-            print(f"  {elapsed:.1f}s (no model load overhead)")
+        with lock:
+            if ok:
+                runs_processed += 1
+            active_workers -= 1
+            status = f"{GREEN}done{RESET}" if ok else f"{RED}failed{RESET}"
+            print(f"  {run_id[:12]}… {status} in {elapsed:.1f}s  [{active_workers}/{args.workers} active]")
+
+    while running:
+        with lock:
+            slots = args.workers - active_workers
+
+        if slots <= 0:
+            time.sleep(0.5)
+            continue
+
+        run_id = claim_next_run(cache)
+        if not run_id:
+            time.sleep(args.poll)
+            continue
+
+        with lock:
+            active_workers += 1
+        print(f"\n{CYAN}Run {run_id[:16]}…{RESET}  [{active_workers}/{args.workers} active]")
+
+        if args.workers == 1:
+            # Single worker: run inline (simpler, no threading overhead)
+            worker_fn(run_id)
+        else:
+            t = threading.Thread(target=worker_fn, args=(run_id,), daemon=True)
+            t.start()
+
+    # Wait for active workers to finish
+    while active_workers > 0:
+        time.sleep(1)
 
     print(f"\n{BOLD}Server stopped. Processed {runs_processed} runs.{RESET}")
     del cache
