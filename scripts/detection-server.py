@@ -78,8 +78,8 @@ class ModelCache:
     def load_gdino(self):
         from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
 
-        print(f"\n  {CYAN}Loading GDINO-tiny...{RESET}")
-        model_id = "IDEA-Research/grounding-dino-tiny"
+        print(f"\n  {CYAN}Loading GDINO-base...{RESET}")
+        model_id = "IDEA-Research/grounding-dino-base"
         self.gdino_processor = AutoProcessor.from_pretrained(model_id)
         self.gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
         self.gdino_model.eval()
