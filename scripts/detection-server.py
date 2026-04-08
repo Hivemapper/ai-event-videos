@@ -163,7 +163,7 @@ class ModelCache:
 
     def run_gdino(self, frames: list[tuple[int, Any, int]], batch_size: int = 8) -> list[dict]:
         """Run GDINO on frames using cached model."""
-        GDINO_MAX_SIZE = 640
+        GDINO_MAX_SIZE = 1080
         all_detections: list[dict] = []
         t0 = time.time()
 
