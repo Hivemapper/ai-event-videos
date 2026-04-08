@@ -60,6 +60,8 @@ CYAN = "\033[36m"
 RED = "\033[31m"
 RESET = "\033[0m"
 
+MODEL_NAME = "gdino-base+clip"
+
 
 class ModelCache:
     """Holds pre-loaded GDINO + CLIP models."""
@@ -341,7 +343,7 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
                 (video_id, det["frame_ms"], det["label"],
                  det["x_min"], det["y_min"], det["x_max"], det["y_max"],
                  det["confidence"], det["frame_width"], det["frame_height"],
-                 PIPELINE_VERSION, "gdino-base-clip", run_id),
+                 PIPELINE_VERSION, MODEL_NAME, run_id),
             )
             total_saved += 1
         conn.commit()
@@ -376,14 +378,14 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
                     else:
                         segments.append((
                             video_id, label, seg_start, seg_end,
-                            seg_max_conf, "supported", PIPELINE_VERSION, "gdino-base-clip", run_id,
+                            seg_max_conf, "supported", PIPELINE_VERSION, MODEL_NAME, run_id,
                         ))
                         seg_start = dets[i]["frame_ms"]
                         seg_end = dets[i]["frame_ms"]
                         seg_max_conf = dets[i]["confidence"]
                 segments.append((
                     video_id, label, seg_start, seg_end,
-                    seg_max_conf, "supported", PIPELINE_VERSION, "gdino-base-clip", run_id,
+                    seg_max_conf, "supported", PIPELINE_VERSION, MODEL_NAME, run_id,
                 ))
 
         conn.execute("DELETE FROM video_detection_segments WHERE run_id = ?", (run_id,))
@@ -464,15 +466,15 @@ def claim_next_run(cache: ModelCache, args_ref=None) -> str | None:
     video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
     run_id = str(uuid.uuid4())
     config = json.dumps({
-        "modelDisplayName": "GDINO Base + CLIP",
+        "modelDisplayName": "GDINO Base (grounding-dino-base) + CLIP",
         "type": "Open-vocabulary (detect anything described in text)",
         "device": "CUDA",
         "framesPerVideo": args_ref.frames,
     })
     conn.execute(
         """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at, started_at, worker_pid)
-           VALUES (?, ?, 'gdino-base-clip', 'running', ?, ?, ?, ?, ?)""",
-        (run_id, video_id, config, MACHINE_ID, utc_now(), utc_now(), os.getpid())
+           VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+        (run_id, video_id, MODEL_NAME, config, MACHINE_ID, utc_now(), utc_now(), os.getpid())
     )
     conn.commit()
     conn.close()
