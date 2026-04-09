@@ -291,8 +291,8 @@ def _get_plate_model():
     return _plate_model
 
 
-def detect_license_plates(video_path: Path, num_frames: int = 60) -> list[dict]:
-    """Run YOLO license plate detection on sampled frames. Returns blur boxes."""
+def detect_license_plates(video_path: Path) -> list[dict]:
+    """Run YOLO license plate detection on every frame. Returns blur boxes."""
     model = _get_plate_model()
     if model is None:
         return []
@@ -303,11 +303,10 @@ def detect_license_plates(video_path: Path, num_frames: int = 60) -> list[dict]:
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    step = max(1, total_frames // num_frames)
 
     plate_boxes = []
 
-    for i in range(0, total_frames, step):
+    for i in range(total_frames):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
