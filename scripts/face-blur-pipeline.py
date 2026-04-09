@@ -291,7 +291,7 @@ def _get_plate_model():
     return _plate_model
 
 
-def detect_license_plates(video_path: Path, num_frames: int = 30) -> list[dict]:
+def detect_license_plates(video_path: Path, num_frames: int = 60) -> list[dict]:
     """Run YOLO license plate detection on sampled frames. Returns blur boxes."""
     model = _get_plate_model()
     if model is None:
