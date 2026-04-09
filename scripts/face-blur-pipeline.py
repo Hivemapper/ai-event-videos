@@ -155,7 +155,8 @@ def _create_face_detector():
             min_detection_confidence=FACE_MIN_CONFIDENCE,
         )
         return "new", FaceDetector.create_from_options(options)
-    except (AttributeError, Exception):
+    except Exception as e:
+        print(f"    [!] New MediaPipe API failed: {e}")
         pass
 
     # Old API (mediapipe < 0.10.8)
