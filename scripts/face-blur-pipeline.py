@@ -112,15 +112,16 @@ def video_already_blurred(s3, video_id: str) -> bool:
 def get_videos_with_persons(conn, limit: int = 100) -> list[str]:
     """Get video IDs that have person detections but no blurred video yet."""
     rows = conn.execute(
-        """SELECT DISTINCT fd.video_id
+        """SELECT fd.video_id, COUNT(*) as det_count
            FROM frame_detections fd
            JOIN detection_runs dr ON dr.id = fd.run_id
            WHERE fd.label IN ('person', 'construction worker', 'pedestrian')
              AND dr.status = 'completed'
              AND fd.video_id NOT IN (
-               SELECT video_id FROM blur_runs WHERE status = 'completed'
+               SELECT video_id FROM blur_runs
              )
-           ORDER BY dr.completed_at DESC
+           GROUP BY fd.video_id
+           ORDER BY det_count DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
