@@ -623,6 +623,7 @@ def main():
     parser = argparse.ArgumentParser(description="Face blur pipeline")
     parser.add_argument("--poll", type=float, default=5, help="Poll interval in seconds (default: 5)")
     parser.add_argument("--limit", type=int, default=0, help="Process N videos then stop (0=unlimited)")
+    parser.add_argument("--event-id", type=str, help="Process a single event ID")
     args = parser.parse_args()
 
     print(f"{BOLD}{'═' * 60}{RESET}")
@@ -652,9 +653,12 @@ def main():
     processed = 0
 
     while running:
-        video_ids = get_videos_with_persons(conn, limit=10)
+        if args.event_id:
+            video_ids = [args.event_id]
+        else:
+            video_ids = get_videos_with_persons(conn, limit=10)
         if not video_ids:
-            if args.limit > 0:
+            if args.limit > 0 or args.event_id:
                 break
             time.sleep(args.poll)
             continue
@@ -683,7 +687,7 @@ def main():
             print(f"  {video_id[:16]}… {status} in {elapsed:.1f}s")
 
             processed += 1
-            if args.limit > 0 and processed >= args.limit:
+            if args.event_id or (args.limit > 0 and processed >= args.limit):
                 running = False
                 break
 
