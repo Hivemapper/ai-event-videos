@@ -297,10 +297,18 @@ def _download_plate_model() -> str:
     model_path = model_dir / "yolov8s-license-plate.pt"
     if not model_path.exists():
         import urllib.request
-        # keremberke's model hosted on HuggingFace
+        # Use a standard YOLO model and detect vehicles, then blur plate region
+        # (upper or lower portion of vehicle bbox depending on position)
+        # For dedicated plate detection, set HF_TOKEN env var and use HuggingFace model
+        # Requires HF_TOKEN env var for gated model
+        hf_token = os.environ.get("HF_TOKEN")
+        if not hf_token:
+            raise RuntimeError("Set HF_TOKEN env var for license plate model (huggingface.co/settings/tokens)")
         url = "https://huggingface.co/keremberke/yolov8s-license-plate-detection/resolve/main/best.pt"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {hf_token}"})
         print(f"    Downloading license plate model...")
-        urllib.request.urlretrieve(url, str(model_path))
+        with urllib.request.urlopen(req) as resp:
+            model_path.write_bytes(resp.read())
     return str(model_path)
 
 
