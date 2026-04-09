@@ -361,6 +361,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
+    blurred_frame_count = 0
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for fi in range(total_frames):
         ret, frame = cap.read()
@@ -368,6 +369,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
             break
 
         if fi in blur_per_frame:
+            blurred_frame_count += 1
             for (x, y, w, h) in blur_per_frame[fi]:
                 roi = frame[y:y+h, x:x+w]
                 if roi.size > 0:
@@ -378,6 +380,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
 
     cap.release()
     writer.release()
+    print(f"    Blurred {blurred_frame_count}/{total_frames} frames, {len(blur_per_frame)} unique frames in map")
 
     # Re-mux with ffmpeg for proper mp4 container + copy audio
     final_path = output_path.with_suffix(".final.mp4")
