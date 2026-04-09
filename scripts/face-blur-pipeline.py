@@ -320,6 +320,11 @@ def detect_license_plates(video_path: Path, num_frames: int = 30) -> list[dict]:
         for result in results:
             for box in result.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
+
+                # Skip detections in upper 40% of frame (signs, not plates)
+                if (y1 + y2) / 2 < h * 0.4:
+                    continue
+
                 pw = x2 - x1
                 ph = y2 - y1
 
