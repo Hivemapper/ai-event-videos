@@ -88,7 +88,9 @@ MACHINE_ID = get_machine_id()
 
 
 def get_s3_client():
-    return boto3.client("s3", region_name=S3_REGION)
+    from botocore import UNSIGNED
+    from botocore.config import Config
+    return boto3.client("s3", region_name=S3_REGION, config=Config(signature_version=UNSIGNED))
 
 
 def video_already_blurred(s3, video_id: str) -> bool:
