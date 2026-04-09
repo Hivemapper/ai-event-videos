@@ -57,17 +57,17 @@ CACHE_DIR = PROJECT_ROOT / "data" / "pipeline-video-cache"
 
 
 def api_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Make an HTTP request with 403 backoff retry."""
+    """Make an HTTP request with rate-limit backoff retry (403/429)."""
     kwargs.setdefault("timeout", 60)
     wait = 30
     for attempt in range(6):  # up to ~5 min total backoff
         resp = requests.request(method, url, **kwargs)
-        if resp.status_code != 403:
+        if resp.status_code not in (403, 429):
             return resp
-        print(f"    [!] 403 rate-limited — waiting {wait}s (attempt {attempt + 1})...")
+        print(f"    [!] {resp.status_code} rate-limited — waiting {wait}s (attempt {attempt + 1})...")
         time.sleep(wait)
         wait = min(wait * 2, 120)
-    return resp  # return last 403 if all retries exhausted
+    return resp  # return last response if all retries exhausted
 PIPELINE_VERSION = "vru-yolo-v2"
 FRAMES_PER_VIDEO = 45
 

@@ -299,7 +299,9 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
     try:
         # Fetch event
         api_key = load_api_key()
-        resp = requests.get(
+        from run_detection import api_request
+        resp = api_request(
+            "GET",
             f"{API_BASE_URL}/{video_id}?includeGnssData=true&includeImuData=true",
             headers={"Authorization": api_key, "Content-Type": "application/json"},
             timeout=30,
