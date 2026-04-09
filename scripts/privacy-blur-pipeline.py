@@ -192,7 +192,7 @@ def _get_face_model():
 
 
 def detect_faces(video_path: Path) -> list[dict]:
-    """Run YOLO face detection on every frame of the video."""
+    """Run YOLO face detection on sampled frames (every 3rd frame)."""
     model = _get_face_model()
     if model is None:
         return []
@@ -205,7 +205,8 @@ def detect_faces(video_path: Path) -> list[dict]:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     face_boxes = []
 
-    for i in range(total_frames):
+    # Sample every 3rd frame — BLUR_SPREAD covers the gaps
+    for i in range(0, total_frames, 3):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
