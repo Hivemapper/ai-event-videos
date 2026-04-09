@@ -263,21 +263,15 @@ def _download_plate_model() -> str:
     """Download YOLO license plate model weights."""
     model_dir = PROJECT_ROOT / "data" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "yolov8s-license-plate.pt"
+    model_path = model_dir / "license_plate_detector.pt"
     if not model_path.exists():
         import urllib.request
         # Use a standard YOLO model and detect vehicles, then blur plate region
         # (upper or lower portion of vehicle bbox depending on position)
         # For dedicated plate detection, set HF_TOKEN env var and use HuggingFace model
-        # Requires HF_TOKEN env var for gated model
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            raise RuntimeError("Set HF_TOKEN env var for license plate model (huggingface.co/settings/tokens)")
-        url = "https://huggingface.co/keremberke/yolov8s-license-plate-detection/resolve/main/best.pt"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {hf_token}"})
+        url = "https://github.com/Muhammad-Zeerak-Khan/Automatic-License-Plate-Recognition-using-YOLOv8/raw/main/license_plate_detector.pt"
         print(f"    Downloading license plate model...")
-        with urllib.request.urlopen(req) as resp:
-            model_path.write_bytes(resp.read())
+        urllib.request.urlretrieve(url, str(model_path))
     return str(model_path)
 
 
