@@ -287,13 +287,36 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
 
 # Cache YOLO plate model globally so it loads once
 _plate_model = None
+_plate_model_failed = False
+
+
+def _download_plate_model() -> str:
+    """Download YOLO license plate model weights."""
+    model_dir = PROJECT_ROOT / "data" / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "yolov8s-license-plate.pt"
+    if not model_path.exists():
+        import urllib.request
+        # keremberke's model hosted on HuggingFace
+        url = "https://huggingface.co/keremberke/yolov8s-license-plate-detection/resolve/main/best.pt"
+        print(f"    Downloading license plate model...")
+        urllib.request.urlretrieve(url, str(model_path))
+    return str(model_path)
 
 
 def _get_plate_model():
-    global _plate_model
+    global _plate_model, _plate_model_failed
+    if _plate_model_failed:
+        return None
     if _plate_model is None and HAS_YOLO:
-        print(f"    Loading license plate model...")
-        _plate_model = _YOLO(PLATE_MODEL_NAME)
+        try:
+            model_path = _download_plate_model()
+            print(f"    Loading license plate model...")
+            _plate_model = _YOLO(model_path)
+        except Exception as e:
+            print(f"    {YELLOW}License plate model failed: {e}{RESET}")
+            _plate_model_failed = True
+            return None
     return _plate_model
 
 
