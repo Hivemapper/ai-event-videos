@@ -185,7 +185,11 @@ def _get_face_model():
 
 
 def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[dict]:
-    """Run YOLO face detection on person crops, return face bounding boxes in video coords."""
+    """Run YOLO face detection on full frames at detection timestamps.
+
+    Only keeps faces that overlap with a person bounding box.
+    Running on full frame gives YOLO better context for small/distant faces.
+    """
     model = _get_face_model()
     if model is None:
         return []
@@ -209,51 +213,46 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
 
         h, w = frame.shape[:2]
 
+        # Run YOLO face detection on the full frame
+        results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
+
+        # Collect all detected faces
+        detected_faces = []
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                detected_faces.append((x1, y1, x2, y2))
+
+        if not detected_faces:
+            continue
+
+        # Only keep faces that overlap with a person bounding box
         for det in frame_dets:
             px1 = max(0, int(det["x_min"]))
             py1 = max(0, int(det["y_min"]))
             px2 = min(w, int(det["x_max"]))
             py2 = min(h, int(det["y_max"]))
-            if px2 <= px1 or py2 <= py1:
-                continue
 
-            # Run YOLO face detection on the person crop
-            crop = frame[py1:py2, px1:px2]
-            results = model.predict(crop, conf=FACE_MIN_CONFIDENCE, imgsz=320, verbose=False)
-
-            person_w = px2 - px1
-            person_h = py2 - py1
-
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    # Convert crop coords to video coords
-                    fx = px1 + x1
-                    fy = py1 + y1
-                    fw = x2 - x1
-                    fh = y2 - y1
+            for (fx1, fy1, fx2, fy2) in detected_faces:
+                # Check overlap: face center should be inside person box
+                face_cx = (fx1 + fx2) / 2
+                face_cy = (fy1 + fy2) / 2
+                if px1 <= face_cx <= px2 and py1 <= face_cy <= py2:
+                    fw = fx2 - fx1
+                    fh = fy2 - fy1
 
                     # Add padding
                     pad_x = fw * FACE_BOX_PADDING
                     pad_y = fh * FACE_BOX_PADDING
-                    fx = max(0, fx - pad_x)
-                    fy = max(0, fy - pad_y)
-                    fw = min(w - fx, fw + 2 * pad_x)
-                    fh = min(h - fy, fh + 2 * pad_y)
-
-                    # Cap: blur should not exceed upper 40% of person box
-                    max_fw = person_w * 0.8
-                    max_fh = person_h * 0.4
-                    if fw > max_fw:
-                        fx = fx + (fw - max_fw) / 2
-                        fw = max_fw
-                    if fh > max_fh:
-                        fh = max_fh
+                    bx = max(0, fx1 - pad_x)
+                    by = max(0, fy1 - pad_y)
+                    bw = min(w - bx, fw + 2 * pad_x)
+                    bh = min(h - by, fh + 2 * pad_y)
 
                     face_boxes.append({
                         "frame_ms": frame_ms,
-                        "x": int(fx), "y": int(fy),
-                        "w": int(fw), "h": int(fh),
+                        "x": int(bx), "y": int(by),
+                        "w": int(bw), "h": int(bh),
                     })
 
     cap.release()
