@@ -274,8 +274,8 @@ def _get_gdino():
 
 
 PLATE_TEXT_PROMPT = "license plate."
-PLATE_GDINO_BOX_THRESHOLD = 0.2
-PLATE_GDINO_TEXT_THRESHOLD = 0.2
+PLATE_GDINO_BOX_THRESHOLD = 0.3
+PLATE_GDINO_TEXT_THRESHOLD = 0.25
 
 
 def detect_license_plates(video_path: Path) -> list[dict]:
@@ -327,23 +327,23 @@ def detect_license_plates(video_path: Path) -> list[dict]:
             for box, score in zip(boxes, scores):
                 x1, y1, x2, y2 = box.cpu().tolist()
 
-                # Skip detections in upper 40% of frame
-                if (y1 + y2) / 2 < h * 0.4:
+                # Skip detections in upper half of frame — too far away
+                if (y1 + y2) / 2 < h * 0.50:
                     continue
 
                 pw = x2 - x1
                 ph = y2 - y1
 
                 # Skip tiny plates on distant vehicles — not readable anyway
-                if pw < 40 or ph < 12:
+                if pw < 50 or ph < 15:
                     continue
 
-                # Skip oversized detections — plates are small (max ~15% of frame width)
-                if pw > w * 0.15 or ph > h * 0.10:
+                # Skip oversized detections — plates are small (max ~10% of frame width)
+                if pw > w * 0.10 or ph > h * 0.06:
                     continue
 
-                # Skip wrong aspect ratio — plates are wider than tall
-                if pw > 0 and ph / pw > 1.0:
+                # Plates are rectangular (wider than tall), at least 2:1 ratio
+                if pw <= 0 or pw / ph < 2.0:
                     continue
 
                 pad_x = pw * PLATE_BOX_PADDING
