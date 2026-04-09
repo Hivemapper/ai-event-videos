@@ -63,7 +63,7 @@ PERSON_LABELS = {"person", "construction worker", "pedestrian"}
 FACE_MIN_CONFIDENCE = 0.4
 
 # Expand face box by this factor for better coverage
-FACE_BOX_PADDING = 0.3
+FACE_BOX_PADDING = 0.1
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -372,7 +372,9 @@ def _blur_with_opencv(video_path: Path, face_boxes: list[dict], output_path: Pat
                     w = max(1, min(w, width - x))
                     h = max(1, min(h, height - y))
                     roi = frame[y:y+h, x:x+w]
-                    blurred = cv2.GaussianBlur(roi, (99, 99), 30)
+                    # Scale blur kernel to face size
+                    k = max(15, min(99, (w + h) // 2 | 1))
+                    blurred = cv2.GaussianBlur(roi, (k, k), k // 3)
                     frame[y:y+h, x:x+w] = blurred
 
         writer.write(frame)
