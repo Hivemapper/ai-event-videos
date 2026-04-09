@@ -579,8 +579,8 @@ def main():
             if not running:
                 break
 
-            # Skip if already in S3
-            if video_already_blurred(s3, video_id):
+            # Skip if already in S3 (unless --event-id forces reprocess)
+            if not args.event_id and video_already_blurred(s3, video_id):
                 conn.execute(
                     """INSERT INTO blur_runs (video_id, status, completed_at)
                        VALUES (?, 'completed', ?)
