@@ -330,6 +330,14 @@ def detect_license_plates(video_path: Path) -> list[dict]:
                 pw = x2 - x1
                 ph = y2 - y1
 
+                # Skip oversized detections — plates are small (max ~15% of frame width)
+                if pw > w * 0.15 or ph > h * 0.10:
+                    continue
+
+                # Skip wrong aspect ratio — plates are wider than tall
+                if pw > 0 and ph / pw > 1.0:
+                    continue
+
                 pad_x = pw * PLATE_BOX_PADDING
                 pad_y = ph * PLATE_BOX_PADDING
                 x1 = max(0, x1 - pad_x)
