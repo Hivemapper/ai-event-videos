@@ -233,6 +233,10 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
                         bb = face.location_data.relative_bounding_box
                         faces.append((bb.xmin, bb.ymin, bb.width, bb.height))
 
+            # Person box dimensions
+            person_w = px2 - px1
+            person_h = py2 - py1
+
             for (rx, ry, rw, rh) in faces:
                 fx = px1 + rx * crop_w
                 fy = py1 + ry * crop_h
@@ -245,6 +249,15 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
                 fy = max(0, fy - pad_y)
                 fw = min(w - fx, fw + 2 * pad_x)
                 fh = min(h - fy, fh + 2 * pad_y)
+
+                # Cap: blur box should not exceed upper 40% of person box
+                max_fw = person_w * 0.8
+                max_fh = person_h * 0.4
+                if fw > max_fw:
+                    fx = fx + (fw - max_fw) / 2
+                    fw = max_fw
+                if fh > max_fh:
+                    fh = max_fh
 
                 face_boxes.append({
                     "frame_ms": frame_ms,
