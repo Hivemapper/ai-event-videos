@@ -282,8 +282,8 @@ def detect_license_plates(video_path: Path) -> list[dict]:
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    # Phase 1: Detect plates on sampled frames (~every 10th frame)
-    sample_step = max(1, total_frames // 90)
+    # Phase 1: Detect plates on sampled frames (~every 5th frame for more re-inits)
+    sample_step = max(1, total_frames // 180)
     detections_by_frame: dict[int, list[tuple]] = {}
 
     for i in range(0, total_frames, sample_step):
@@ -316,7 +316,7 @@ def detect_license_plates(video_path: Path) -> list[dict]:
     # Phase 2: Track plates forward through every frame using CSRT
     plate_boxes = []
     active_trackers: list[list] = []  # [tracker, lost_count, last_bbox]
-    MAX_LOST = int(fps * 2)  # re-init if lost for 2 seconds
+    MAX_LOST = int(fps * 5)  # keep blurring last position for up to 5 seconds
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for fi in range(total_frames):
