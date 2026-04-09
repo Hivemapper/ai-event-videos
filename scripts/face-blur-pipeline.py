@@ -345,17 +345,21 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     # Pre-compute: for each frame, which blur regions are active
     # We'll do a forward pass with trackers
 
-    # Group blur boxes by frame index
+    # Group blur boxes by frame index, extending to neighboring frames
+    BLUR_SPREAD = 3  # blur N frames before and after each detection
     blur_per_frame: dict[int, list[tuple]] = {}
     for bb in blur_boxes:
         frame_idx = int(bb["frame_ms"] * fps / 1000)
-        frame_idx = max(0, min(frame_idx, total_frames - 1))
         x, y, w, h = bb["x"], bb["y"], bb["w"], bb["h"]
         x = max(0, min(x, width - 1))
         y = max(0, min(y, height - 1))
         w = max(1, min(w, width - x))
         h = max(1, min(h, height - y))
-        blur_per_frame.setdefault(frame_idx, []).append((x, y, w, h))
+        rect = (x, y, w, h)
+        for offset in range(-BLUR_SPREAD, BLUR_SPREAD + 1):
+            fi = frame_idx + offset
+            if 0 <= fi < total_frames:
+                blur_per_frame.setdefault(fi, []).append(rect)
 
     # Re-encode with blur applied per frame
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
