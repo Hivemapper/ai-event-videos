@@ -215,27 +215,25 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
         h, w = frame.shape[:2]
 
         # Run YOLO face detection on the full frame
-        detected_faces = []
-        if model is not None:
-            results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    detected_faces.append((x1, y1, x2, y2))
+        results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
 
-        # For each person, try to match a YOLO face. If none found, blur upper 25%.
+        # Collect all detected faces
+        detected_faces = []
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                detected_faces.append((x1, y1, x2, y2))
+
+        if not detected_faces:
+            continue
+
+        # Only keep faces that overlap with a person bounding box
         for det in frame_dets:
             px1 = max(0, int(det["x_min"]))
             py1 = max(0, int(det["y_min"]))
             px2 = min(w, int(det["x_max"]))
             py2 = min(h, int(det["y_max"]))
-            person_w = px2 - px1
-            person_h = py2 - py1
-            if person_w <= 0 or person_h <= 0:
-                continue
 
-            # Try to find a YOLO face inside this person box
-            matched = False
             for (fx1, fy1, fx2, fy2) in detected_faces:
                 face_cx = (fx1 + fx2) / 2
                 face_cy = (fy1 + fy2) / 2
@@ -253,15 +251,6 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
                         "x": int(bx), "y": int(by),
                         "w": int(bw), "h": int(bh),
                     })
-                    matched = True
-
-            # Fallback: blur upper 25% of person bounding box
-            if not matched:
-                face_boxes.append({
-                    "frame_ms": frame_ms,
-                    "x": px1, "y": py1,
-                    "w": person_w, "h": int(person_h * 0.25),
-                })
 
     cap.release()
     return face_boxes
