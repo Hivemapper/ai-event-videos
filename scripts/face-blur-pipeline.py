@@ -225,6 +225,10 @@ def detect_faces(video_path: Path) -> list[dict]:
                 if fh < 15:
                     continue
 
+                # Skip oversized detections — real faces in dashcam are small
+                if fw > w * 0.12 or fh > h * 0.12:
+                    continue
+
                 # Skip non-face-shaped detections (faces are roughly square)
                 aspect = fh / fw if fw > 0 else 99
                 if aspect > 2.0 or aspect < 0.4:
@@ -329,6 +333,10 @@ def detect_license_plates(video_path: Path) -> list[dict]:
 
                 pw = x2 - x1
                 ph = y2 - y1
+
+                # Skip tiny plates on distant vehicles — not readable anyway
+                if pw < 40 or ph < 12:
+                    continue
 
                 # Skip oversized detections — plates are small (max ~15% of frame width)
                 if pw > w * 0.15 or ph > h * 0.10:

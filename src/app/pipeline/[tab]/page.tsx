@@ -12,7 +12,10 @@ import {
   Clock,
   Loader2,
   Play,
+  Server,
   Square,
+  TrendingUp,
+  Timer,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,6 +85,21 @@ export default function PipelineTabPage({
     setOffset(0);
   }, [tab]);
 
+  const { data: stats } = useSWR<{
+    machines: string[];
+    machineCount: number;
+    ratePerHour: number;
+    last10m: number;
+    last30m: number;
+    last60m: number;
+    queued: number;
+    etaHours: number | null;
+    lastCompletedAt: string | null;
+  }>("/api/pipeline/stats", fetcher, {
+    refreshInterval: 10000,
+    revalidateOnFocus: false,
+  });
+
   const url = `/api/pipeline?tab=${tab}&limit=${PAGE_SIZE}&offset=${offset}`;
   const { data, isLoading, mutate } = useSWR<{
     counts: Record<string, number>;
@@ -141,7 +159,7 @@ export default function PipelineTabPage({
       <main className="container mx-auto px-4 py-6">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-xl font-semibold">Detection Pipeline</h1>
+            <h1 className="text-xl font-semibold">VRU Pipeline</h1>
             <p className="text-sm text-muted-foreground mt-1">
               VRU detection on triaged signal events
             </p>
@@ -240,6 +258,52 @@ export default function PipelineTabPage({
             );
           })}
         </div>
+
+        {/* Processing stats */}
+        {stats && (
+          <div className="mb-4 grid grid-cols-3 gap-3">
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <Server className={cn("w-5 h-5", stats.machineCount > 0 ? "text-green-600" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Active Servers</p>
+                <p className="text-lg font-semibold tabular-nums">{stats.machineCount}</p>
+                {stats.machines.length > 0 && (
+                  <p className="text-xs text-muted-foreground truncate max-w-[200px]">
+                    {stats.machines.map((m) => m.replace("ip-", "")).join(", ")}
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <TrendingUp className={cn("w-5 h-5", stats.ratePerHour > 0 ? "text-blue-600" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Processing Rate</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {stats.ratePerHour.toLocaleString()}<span className="text-sm font-normal text-muted-foreground">/hr</span>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.last10m} last 10m · {stats.last30m} last 30m
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <Timer className={cn("w-5 h-5", stats.etaHours ? "text-orange-500" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Est. Time Remaining</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {stats.etaHours != null && stats.ratePerHour > 0
+                    ? stats.etaHours < 24
+                      ? `${stats.etaHours.toFixed(1)} hrs`
+                      : `${(stats.etaHours / 24).toFixed(1)} days`
+                    : "—"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.queued.toLocaleString()} remaining
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Auto-run indicator */}
         {autoRun && (

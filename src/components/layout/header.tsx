@@ -37,14 +37,14 @@ const navItems: NavItem[] = [
   },
   {
     href: "/pipeline",
-    label: "Pipeline",
+    label: "VRU Pipeline",
     isActive: (pathname) => pathname.startsWith("/pipeline"),
   },
-  // {
-  //   href: "/metrics",
-  //   label: "Metrics",
-  //   isActive: (pathname) => pathname.startsWith("/metrics"),
-  // },
+  {
+    href: "/metrics",
+    label: "Metrics",
+    isActive: (pathname) => pathname.startsWith("/metrics"),
+  },
 ];
 
 interface HeaderProps {
