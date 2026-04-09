@@ -515,7 +515,13 @@ def process_video(s3, conn, video_id: str) -> bool:
         if not ok or not output_path.exists():
             raise RuntimeError("Blur encoding failed")
 
-        # Upload to S3
+        # Upload original to S3 for comparison
+        original_key = f"original/{video_id}.mp4"
+        with open(video_path, "rb") as f:
+            s3.put_object(Bucket=S3_BUCKET, Key=original_key, Body=f, ContentType="video/mp4")
+        print(f"    Uploaded original to S3: {original_key}")
+
+        # Upload blurred to S3
         s3_url = upload_to_s3(s3, video_id, output_path)
         print(f"    Uploaded to S3: {s3_url}")
 
