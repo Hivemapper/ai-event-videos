@@ -38,8 +38,13 @@ try:
     HAS_YOLO = True
 except ImportError:
     HAS_YOLO = False
-    print("ultralytics not installed. Run: pip install ultralytics")
-    sys.exit(1)
+
+try:
+    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+    import torch
+    HAS_GDINO = True
+except ImportError:
+    HAS_GDINO = False
 
 try:
     import boto3
@@ -147,11 +152,13 @@ def get_person_detections(conn, video_id: str) -> list[dict]:
     ]
 
 
-# Cache YOLO models globally so they load once
+# Cache models globally so they load once
 _face_model = None
 _face_model_failed = False
-_plate_model = None
-_plate_model_failed = False
+_gdino_model = None
+_gdino_processor = None
+_gdino_device = None
+_gdino_failed = False
 
 
 def _download_yolo_face_model() -> str:
@@ -240,43 +247,40 @@ def detect_faces(video_path: Path) -> list[dict]:
     return face_boxes
 
 
-def _download_plate_model() -> str:
-    """Download YOLO license plate model weights."""
-    model_dir = PROJECT_ROOT / "data" / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "license_plate_detector.pt"
-    if not model_path.exists():
-        import urllib.request
-        # Use a standard YOLO model and detect vehicles, then blur plate region
-        # (upper or lower portion of vehicle bbox depending on position)
-        # For dedicated plate detection, set HF_TOKEN env var and use HuggingFace model
-        url = "https://github.com/Muhammad-Zeerak-Khan/Automatic-License-Plate-Recognition-using-YOLOv8/raw/main/license_plate_detector.pt"
-        print(f"    Downloading license plate model...")
-        urllib.request.urlretrieve(url, str(model_path))
-    return str(model_path)
-
-
-def _get_plate_model():
-    global _plate_model, _plate_model_failed
-    if _plate_model_failed:
-        return None
-    if _plate_model is None and HAS_YOLO:
+def _get_gdino():
+    """Load GDINO model for license plate detection."""
+    global _gdino_model, _gdino_processor, _gdino_device, _gdino_failed
+    if _gdino_failed:
+        return None, None, None
+    if _gdino_model is None and HAS_GDINO:
         try:
-            model_path = _download_plate_model()
-            print(f"    Loading license plate model...")
-            _plate_model = _YOLO(model_path)
+            print(f"    Loading GDINO for plate detection...")
+            model_id = "IDEA-Research/grounding-dino-base"
+            _gdino_processor = AutoProcessor.from_pretrained(model_id)
+            _gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
+            _gdino_model.eval()
+            _gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
+            _gdino_model = _gdino_model.to(_gdino_device)
+            print(f"    GDINO loaded on {_gdino_device.upper()}")
         except Exception as e:
-            print(f"    {YELLOW}License plate model failed: {e}{RESET}")
-            _plate_model_failed = True
-            return None
-    return _plate_model
+            print(f"    {YELLOW}GDINO failed: {e}{RESET}")
+            _gdino_failed = True
+            return None, None, None
+    return _gdino_model, _gdino_processor, _gdino_device
+
+
+PLATE_TEXT_PROMPT = "license plate."
+PLATE_GDINO_BOX_THRESHOLD = 0.2
+PLATE_GDINO_TEXT_THRESHOLD = 0.2
 
 
 def detect_license_plates(video_path: Path) -> list[dict]:
-    """Run YOLO license plate detection on every frame."""
-    model = _get_plate_model()
+    """Run GDINO license plate detection on sampled frames."""
+    model, processor, device = _get_gdino()
     if model is None:
         return []
+
+    from PIL import Image as PILImage
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -286,7 +290,10 @@ def detect_license_plates(video_path: Path) -> list[dict]:
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     plate_boxes = []
 
-    for i in range(total_frames):
+    # Sample every ~3 frames — GDINO is slower but more accurate
+    sample_step = max(1, total_frames // 300)
+
+    for i in range(0, total_frames, sample_step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
@@ -295,12 +302,28 @@ def detect_license_plates(video_path: Path) -> list[dict]:
         h, w = frame.shape[:2]
         frame_ms = int(i * 1000 / fps)
 
-        results = model.predict(frame, conf=PLATE_MIN_CONFIDENCE, imgsz=640, verbose=False)
-        for result in results:
-            for box in result.boxes:
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
+        pil_img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        inputs = processor(images=pil_img, text=PLATE_TEXT_PROMPT, return_tensors="pt")
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
 
-                # Skip detections in upper 40% of frame (signs, not plates)
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        results = processor.post_process_grounded_object_detection(
+            outputs, inputs["input_ids"],
+            threshold=PLATE_GDINO_BOX_THRESHOLD,
+            text_threshold=PLATE_GDINO_TEXT_THRESHOLD,
+            target_sizes=[(h, w)],
+        )
+
+        if results:
+            r = results[0]
+            boxes = r.get("boxes", torch.tensor([]))
+            scores = r.get("scores", torch.tensor([]))
+            for box, score in zip(boxes, scores):
+                x1, y1, x2, y2 = box.cpu().tolist()
+
+                # Skip detections in upper 40% of frame
                 if (y1 + y2) / 2 < h * 0.4:
                     continue
 
