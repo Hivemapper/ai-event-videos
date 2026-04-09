@@ -406,10 +406,11 @@ def _blur_with_opencv(video_path: Path, face_boxes: list[dict], output_path: Pat
 def upload_to_s3(s3, video_id: str, file_path: Path) -> str:
     """Upload blurred video to S3. Returns the S3 URL."""
     key = f"{video_id}.mp4"
-    s3.upload_file(
-        str(file_path), S3_BUCKET, key,
-        ExtraArgs={"ContentType": "video/mp4"},
-    )
+    with open(file_path, "rb") as f:
+        s3.put_object(
+            Bucket=S3_BUCKET, Key=key,
+            Body=f, ContentType="video/mp4",
+        )
     return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
 
