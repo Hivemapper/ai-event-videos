@@ -61,12 +61,11 @@ S3_REGION = "us-west-2"
 
 PERSON_LABELS = {"person", "construction worker", "pedestrian"}
 
-# Face detection confidence threshold
-FACE_MIN_CONFIDENCE = 0.4
-
 # Face detection
 FACE_MIN_CONFIDENCE = 0.3
 FACE_BOX_PADDING = 0.15
+# Only blur faces on persons taller than this (pixels). ~100px = close/medium range.
+MIN_PERSON_HEIGHT_PX = 100
 
 # License plate detection
 PLATE_MIN_CONFIDENCE = 0.25
@@ -227,12 +226,16 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
         if not detected_faces:
             continue
 
-        # Only keep faces that overlap with a person bounding box
+        # Only keep faces that overlap with a close/medium-range person
         for det in frame_dets:
             px1 = max(0, int(det["x_min"]))
             py1 = max(0, int(det["y_min"]))
             px2 = min(w, int(det["x_max"]))
             py2 = min(h, int(det["y_max"]))
+
+            # Skip small/distant persons
+            if (py2 - py1) < MIN_PERSON_HEIGHT_PX:
+                continue
 
             for (fx1, fy1, fx2, fy2) in detected_faces:
                 face_cx = (fx1 + fx2) / 2
