@@ -159,10 +159,10 @@ def _download_yolo_face_model() -> str:
     import urllib.request
     model_dir = PROJECT_ROOT / "data" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "yolov8n-face.pt"
+    model_path = model_dir / "yolov8n-face-lindevs.pt"
     if not model_path.exists():
-        # Public YOLO face model trained on WIDERFace
-        url = "https://github.com/akanametov/yolo-face/releases/download/v0.0.0/yolov8n-face.pt"
+        # lindevs YOLOv8 face model trained on WIDERFace
+        url = "https://github.com/lindevs/yolov8-face/releases/download/1.0.1/yolov8n-face-lindevs.pt"
         print(f"    Downloading YOLO face model...")
         urllib.request.urlretrieve(url, str(model_path))
     return str(model_path)
