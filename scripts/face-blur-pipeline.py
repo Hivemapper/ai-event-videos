@@ -140,19 +140,57 @@ def get_person_detections(conn, video_id: str) -> list[dict]:
     ]
 
 
+def _create_face_detector():
+    """Create a MediaPipe face detector, handling both old and new API."""
+    # New API (mediapipe >= 0.10.8)
+    try:
+        BaseOptions = mp.tasks.BaseOptions
+        FaceDetector = mp.tasks.vision.FaceDetector
+        FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
+        VisionRunningMode = mp.tasks.vision.RunningMode
+
+        options = FaceDetectorOptions(
+            base_options=BaseOptions(model_asset_path=_download_face_model()),
+            running_mode=VisionRunningMode.IMAGE,
+            min_detection_confidence=FACE_MIN_CONFIDENCE,
+        )
+        return "new", FaceDetector.create_from_options(options)
+    except (AttributeError, Exception):
+        pass
+
+    # Old API (mediapipe < 0.10.8)
+    try:
+        detector = mp.solutions.face_detection.FaceDetection(
+            model_selection=1,
+            min_detection_confidence=FACE_MIN_CONFIDENCE,
+        )
+        return "old", detector
+    except AttributeError:
+        raise RuntimeError("Cannot initialize MediaPipe face detection. Try: pip install mediapipe>=0.10.14")
+
+
+def _download_face_model() -> str:
+    """Download the MediaPipe face detection model if not cached."""
+    import urllib.request
+    model_dir = PROJECT_ROOT / "data" / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "blaze_face_short_range.tflite"
+    if not model_path.exists():
+        url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
+        print(f"    Downloading face detection model...")
+        urllib.request.urlretrieve(url, str(model_path))
+    return str(model_path)
+
+
 def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[dict]:
     """Run MediaPipe face detection on person crops, return face bounding boxes in video coords."""
-    face_detector = mp.solutions.face_detection.FaceDetection(
-        model_selection=1,  # full range model
-        min_detection_confidence=FACE_MIN_CONFIDENCE,
-    )
+    api_version, detector = _create_face_detector()
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    face_boxes = []  # list of {frame_ms, x, y, w, h} in video pixel coords
+    face_boxes = []
 
     # Group detections by frame_ms
     by_frame: dict[int, list[dict]] = {}
@@ -160,7 +198,6 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
         by_frame.setdefault(det["frame_ms"], []).append(det)
 
     for frame_ms, frame_dets in sorted(by_frame.items()):
-        # Seek to frame
         cap.set(cv2.CAP_PROP_POS_MSEC, frame_ms)
         ret, frame = cap.read()
         if not ret:
@@ -169,7 +206,6 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
         h, w = frame.shape[:2]
 
         for det in frame_dets:
-            # Crop person region
             px1 = max(0, int(det["x_min"]))
             py1 = max(0, int(det["y_min"]))
             px2 = min(w, int(det["x_max"]))
@@ -179,35 +215,47 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
 
             crop = frame[py1:py2, px1:px2]
             crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            results = face_detector.process(crop_rgb)
+            crop_h, crop_w = crop.shape[:2]
 
-            if results.detections:
-                for face in results.detections:
-                    bbox = face.location_data.relative_bounding_box
-                    crop_h, crop_w = crop.shape[:2]
+            faces = []
+            if api_version == "new":
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop_rgb)
+                result = detector.detect(mp_image)
+                for face in result.detections:
+                    bb = face.bounding_box
+                    faces.append((bb.origin_x / crop_w, bb.origin_y / crop_h,
+                                  bb.width / crop_w, bb.height / crop_h))
+            else:
+                result = detector.process(crop_rgb)
+                if result.detections:
+                    for face in result.detections:
+                        bb = face.location_data.relative_bounding_box
+                        faces.append((bb.xmin, bb.ymin, bb.width, bb.height))
 
-                    # Convert relative coords to video pixel coords
-                    fx = px1 + bbox.xmin * crop_w
-                    fy = py1 + bbox.ymin * crop_h
-                    fw = bbox.width * crop_w
-                    fh = bbox.height * crop_h
+            for (rx, ry, rw, rh) in faces:
+                fx = px1 + rx * crop_w
+                fy = py1 + ry * crop_h
+                fw = rw * crop_w
+                fh = rh * crop_h
 
-                    # Add padding
-                    pad_x = fw * FACE_BOX_PADDING
-                    pad_y = fh * FACE_BOX_PADDING
-                    fx = max(0, fx - pad_x)
-                    fy = max(0, fy - pad_y)
-                    fw = min(w - fx, fw + 2 * pad_x)
-                    fh = min(h - fy, fh + 2 * pad_y)
+                pad_x = fw * FACE_BOX_PADDING
+                pad_y = fh * FACE_BOX_PADDING
+                fx = max(0, fx - pad_x)
+                fy = max(0, fy - pad_y)
+                fw = min(w - fx, fw + 2 * pad_x)
+                fh = min(h - fy, fh + 2 * pad_y)
 
-                    face_boxes.append({
-                        "frame_ms": frame_ms,
-                        "x": int(fx), "y": int(fy),
-                        "w": int(fw), "h": int(fh),
-                    })
+                face_boxes.append({
+                    "frame_ms": frame_ms,
+                    "x": int(fx), "y": int(fy),
+                    "w": int(fw), "h": int(fh),
+                })
 
     cap.release()
-    face_detector.close()
+    if api_version == "old":
+        detector.close()
+    else:
+        detector.close()
     return face_boxes
 
 
