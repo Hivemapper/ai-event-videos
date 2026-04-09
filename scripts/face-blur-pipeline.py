@@ -347,125 +347,121 @@ def detect_license_plates(video_path: Path, num_frames: int = 30) -> list[dict]:
     return plate_boxes
 
 
-def build_ffmpeg_blur(video_path: Path, face_boxes: list[dict], output_path: Path) -> bool:
-    """Re-encode video with blur applied to face regions using FFmpeg."""
-    if not face_boxes:
-        # No faces found — just copy the file
+def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Path) -> bool:
+    """Re-encode video with tracked blur regions.
+
+    Uses OpenCV CSRT trackers: initializes a tracker at each detection frame,
+    then tracks the region forward (and backward) through all frames so blur
+    follows faces/plates smoothly.
+    """
+    if not blur_boxes:
         import shutil
         shutil.copy2(video_path, output_path)
         return True
 
     cap = cv2.VideoCapture(str(video_path))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    duration = total_frames / fps if fps > 0 else 30.0
-    cap.release()
-
-    # Build FFmpeg filter_complex with boxblur for each face region
-    # Group face boxes and create enable conditions based on time windows
-    # Each face gets a blur filter enabled for a time window around its frame_ms
-
-    filters = []
-    last_output = "0:v"
-
-    for i, face in enumerate(face_boxes):
-        t = face["frame_ms"] / 1000.0
-        # Enable blur for a window around the detection frame
-        # Use +/- half the gap between sampled frames (typically ~1s)
-        t_start = max(0, t - 0.5)
-        t_end = min(duration, t + 0.5)
-
-        x, y, w, h = face["x"], face["y"], face["w"], face["h"]
-        # Clamp to video bounds
-        x = max(0, min(x, width - 1))
-        y = max(0, min(y, height - 1))
-        w = max(1, min(w, width - x))
-        h = max(1, min(h, height - y))
-
-        input_label = last_output
-        output_label = f"v{i}"
-
-        # Crop the face region, blur it, overlay it back
-        filters.append(
-            f"[{input_label}]crop={w}:{h}:{x}:{y},boxblur=20:5[blur{i}];"
-            f"[{input_label if i == 0 else last_output}][blur{i}]overlay={x}:{y}:"
-            f"enable='between(t,{t_start:.3f},{t_end:.3f})'[{output_label}]"
-        )
-        last_output = output_label
-
-    # For many face boxes, FFmpeg filter chains get complex.
-    # Use a simpler approach: process frame by frame with OpenCV
-    if len(face_boxes) > 50:
-        return _blur_with_opencv(video_path, face_boxes, output_path)
-
-    filter_complex = ";".join(filters)
-
-    cmd = [
-        "ffmpeg", "-y", "-i", str(video_path),
-        "-filter_complex", filter_complex,
-        "-map", f"[{last_output}]",
-        "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "copy",
-        str(output_path),
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            print(f"    FFmpeg failed, falling back to OpenCV: {result.stderr[-200:]}")
-            return _blur_with_opencv(video_path, face_boxes, output_path)
-        return True
-    except subprocess.TimeoutExpired:
-        print("    FFmpeg timed out, falling back to OpenCV")
-        return _blur_with_opencv(video_path, face_boxes, output_path)
-
-
-def _blur_with_opencv(video_path: Path, face_boxes: list[dict], output_path: Path) -> bool:
-    """Fallback: re-encode with OpenCV, applying blur frame by frame."""
-    cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return False
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    # Pre-compute: for each frame, which blur regions are active
+    # We'll do a forward pass with trackers
 
-    # Index face boxes by frame_ms for fast lookup
-    faces_by_ms: dict[int, list[dict]] = {}
-    for fb in face_boxes:
-        faces_by_ms.setdefault(fb["frame_ms"], []).append(fb)
+    # Group detections by frame index
+    det_by_frame: dict[int, list[tuple]] = {}
+    for bb in blur_boxes:
+        frame_idx = int(bb["frame_ms"] * fps / 1000)
+        frame_idx = max(0, min(frame_idx, total_frames - 1))
+        x, y, w, h = bb["x"], bb["y"], bb["w"], bb["h"]
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+        det_by_frame.setdefault(frame_idx, []).append((x, y, w, h))
 
-    frame_idx = 0
-    while True:
+    # Build per-frame blur map using trackers
+    # Each active tracker produces a bbox for each frame until it loses track
+    TRACKER_MAX_FRAMES = int(fps * 3)  # track for up to 3 seconds after detection
+
+    # Store blur rects per frame: frame_idx -> list of (x, y, w, h)
+    blur_per_frame: dict[int, list[tuple]] = {}
+
+    # Active trackers: list of (tracker, remaining_frames, last_bbox)
+    active_trackers: list[list] = []
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    for fi in range(total_frames):
         ret, frame = cap.read()
         if not ret:
             break
 
-        current_ms = int(frame_idx * 1000 / fps)
+        # Initialize new trackers for detections on this frame
+        if fi in det_by_frame:
+            for (x, y, w, h) in det_by_frame[fi]:
+                try:
+                    tracker = cv2.TrackerCSRT_create()
+                    tracker.init(frame, (x, y, w, h))
+                    active_trackers.append([tracker, TRACKER_MAX_FRAMES, (x, y, w, h)])
+                except Exception:
+                    # CSRT not available, store static bbox
+                    active_trackers.append([None, TRACKER_MAX_FRAMES, (x, y, w, h)])
 
-        # Find faces active at this time (within 500ms of a detection)
-        for det_ms, faces in faces_by_ms.items():
-            if abs(current_ms - det_ms) <= 500:
-                for face in faces:
-                    x, y, w, h = face["x"], face["y"], face["w"], face["h"]
-                    x = max(0, min(x, width - 1))
-                    y = max(0, min(y, height - 1))
-                    w = max(1, min(w, width - x))
-                    h = max(1, min(h, height - y))
-                    roi = frame[y:y+h, x:x+w]
-                    # Scale blur kernel to face size
+        # Update all active trackers
+        frame_blurs = []
+        still_active = []
+        for entry in active_trackers:
+            tracker, remaining, last_bbox = entry
+            if remaining <= 0:
+                continue
+
+            if tracker is not None:
+                ok, bbox = tracker.update(frame)
+                if ok:
+                    bx, by, bw, bh = [int(v) for v in bbox]
+                    bx = max(0, min(bx, width - 1))
+                    by = max(0, min(by, height - 1))
+                    bw = max(1, min(bw, width - bx))
+                    bh = max(1, min(bh, height - by))
+                    frame_blurs.append((bx, by, bw, bh))
+                    entry[1] = remaining - 1
+                    entry[2] = (bx, by, bw, bh)
+                    still_active.append(entry)
+                # else: tracker lost, drop it
+            else:
+                # No tracker available, use static bbox
+                frame_blurs.append(last_bbox)
+                entry[1] = remaining - 1
+                still_active.append(entry)
+
+        active_trackers = still_active
+
+        if frame_blurs:
+            blur_per_frame[fi] = frame_blurs
+
+    cap.release()
+
+    # Now re-encode with blur applied per frame
+    cap = cv2.VideoCapture(str(video_path))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    for fi in range(total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if fi in blur_per_frame:
+            for (x, y, w, h) in blur_per_frame[fi]:
+                roi = frame[y:y+h, x:x+w]
+                if roi.size > 0:
                     k = max(15, min(99, (w + h) // 2 | 1))
-                    blurred = cv2.GaussianBlur(roi, (k, k), k // 3)
-                    frame[y:y+h, x:x+w] = blurred
+                    frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (k, k), k // 3)
 
         writer.write(frame)
-        frame_idx += 1
 
     cap.release()
     writer.release()
@@ -592,7 +588,7 @@ def process_video(s3, conn, video_id: str) -> bool:
 
         # Blur faces + plates and re-encode
         output_path = video_path.with_suffix(".blurred.mp4")
-        ok = build_ffmpeg_blur(video_path, all_blur_boxes, output_path)
+        ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
         if not ok or not output_path.exists():
             raise RuntimeError("Blur encoding failed")
 
