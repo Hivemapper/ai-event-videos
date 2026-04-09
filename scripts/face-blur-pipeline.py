@@ -490,7 +490,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
 
 def upload_to_s3(s3, video_id: str, file_path: Path) -> str:
     """Upload blurred video to S3. Returns the S3 URL."""
-    key = f"{video_id}-blurred.mp4"
+    key = f"{video_id}.mp4"
     with open(file_path, "rb") as f:
         s3.put_object(
             Bucket=S3_BUCKET, Key=key,
@@ -591,11 +591,6 @@ def process_video(s3, conn, video_id: str) -> bool:
         ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
         if not ok or not output_path.exists():
             raise RuntimeError("Blur encoding failed")
-
-        # Upload original to S3 for comparison
-        with open(video_path, "rb") as f:
-            s3.put_object(Bucket=S3_BUCKET, Key=f"{video_id}-original.mp4", Body=f, ContentType="video/mp4")
-        print(f"    Uploaded {video_id}-original.mp4")
 
         # Upload blurred to S3
         s3_url = upload_to_s3(s3, video_id, output_path)
