@@ -218,6 +218,11 @@ def detect_faces(video_path: Path) -> list[dict]:
                 if fh < 15:
                     continue
 
+                # Skip non-face-shaped detections (faces are roughly square)
+                aspect = fh / fw if fw > 0 else 99
+                if aspect > 2.0 or aspect < 0.4:
+                    continue
+
                 pad_x = fw * FACE_BOX_PADDING
                 pad_y = fh * FACE_BOX_PADDING
                 bx = max(0, x1 - pad_x)
