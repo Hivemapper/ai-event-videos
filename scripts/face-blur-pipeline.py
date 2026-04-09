@@ -40,6 +40,13 @@ except ImportError:
     sys.exit(1)
 
 try:
+    from ultralytics import YOLO as _YOLO
+    HAS_YOLO = True
+except ImportError:
+    HAS_YOLO = False
+    print("Warning: ultralytics not installed. License plate detection disabled. Run: pip install ultralytics")
+
+try:
     import boto3
 except ImportError:
     print("boto3 not installed. Run: pip install boto3")
@@ -64,6 +71,11 @@ FACE_MIN_CONFIDENCE = 0.4
 
 # Expand face box by this factor for better coverage
 FACE_BOX_PADDING = 0.1
+
+# License plate detection
+PLATE_MODEL_NAME = "keremberke/yolov8s-license-plate-detection"
+PLATE_MIN_CONFIDENCE = 0.25
+PLATE_BOX_PADDING = 0.05
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -271,6 +283,68 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
     else:
         detector.close()
     return face_boxes
+
+
+# Cache YOLO plate model globally so it loads once
+_plate_model = None
+
+
+def _get_plate_model():
+    global _plate_model
+    if _plate_model is None and HAS_YOLO:
+        print(f"    Loading license plate model...")
+        _plate_model = _YOLO(PLATE_MODEL_NAME)
+    return _plate_model
+
+
+def detect_license_plates(video_path: Path, num_frames: int = 30) -> list[dict]:
+    """Run YOLO license plate detection on sampled frames. Returns blur boxes."""
+    model = _get_plate_model()
+    if model is None:
+        return []
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return []
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, total_frames // num_frames)
+
+    plate_boxes = []
+
+    for i in range(0, total_frames, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        h, w = frame.shape[:2]
+        frame_ms = int(i * 1000 / fps)
+
+        results = model.predict(frame, conf=PLATE_MIN_CONFIDENCE, imgsz=640, verbose=False)
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                pw = x2 - x1
+                ph = y2 - y1
+
+                # Add padding
+                pad_x = pw * PLATE_BOX_PADDING
+                pad_y = ph * PLATE_BOX_PADDING
+                x1 = max(0, x1 - pad_x)
+                y1 = max(0, y1 - pad_y)
+                pw = min(w - x1, pw + 2 * pad_x)
+                ph = min(h - y1, ph + 2 * pad_y)
+
+                plate_boxes.append({
+                    "frame_ms": frame_ms,
+                    "x": int(x1), "y": int(y1),
+                    "w": int(pw), "h": int(ph),
+                })
+
+    cap.release()
+    return plate_boxes
 
 
 def build_ffmpeg_blur(video_path: Path, face_boxes: list[dict], output_path: Path) -> bool:
@@ -500,8 +574,15 @@ def process_video(s3, conn, video_id: str) -> bool:
         face_boxes = detect_faces_in_persons(video_path, detections)
         print(f"    {len(face_boxes)} faces detected")
 
-        if not face_boxes:
-            # No faces found — mark complete, no upload needed
+        # Detect license plates
+        plate_boxes = detect_license_plates(video_path)
+        print(f"    {len(plate_boxes)} license plates detected")
+
+        # Combine all blur regions
+        all_blur_boxes = face_boxes + plate_boxes
+
+        if not all_blur_boxes:
+            # Nothing to blur — mark complete, no upload needed
             conn.execute(
                 "UPDATE blur_runs SET status='completed', face_count=0, completed_at=? WHERE video_id=?",
                 (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
@@ -509,9 +590,9 @@ def process_video(s3, conn, video_id: str) -> bool:
             conn.commit()
             return True
 
-        # Blur faces and re-encode
+        # Blur faces + plates and re-encode
         output_path = video_path.with_suffix(".blurred.mp4")
-        ok = build_ffmpeg_blur(video_path, face_boxes, output_path)
+        ok = build_ffmpeg_blur(video_path, all_blur_boxes, output_path)
         if not ok or not output_path.exists():
             raise RuntimeError("Blur encoding failed")
 
@@ -527,7 +608,7 @@ def process_video(s3, conn, video_id: str) -> bool:
         # Mark complete
         conn.execute(
             "UPDATE blur_runs SET status='completed', face_count=?, s3_url=?, completed_at=? WHERE video_id=?",
-            (len(face_boxes), s3_url, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
+            (len(all_blur_boxes), s3_url, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
         )
         conn.commit()
         return True
