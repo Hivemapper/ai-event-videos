@@ -68,8 +68,8 @@ FACE_BOX_PADDING = 0.15
 MIN_PERSON_HEIGHT_PX = 100
 
 # License plate detection
-PLATE_MIN_CONFIDENCE = 0.25
-PLATE_BOX_PADDING = 0.05
+PLATE_MIN_CONFIDENCE = 0.15
+PLATE_BOX_PADDING = 0.1
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -346,7 +346,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     # We'll do a forward pass with trackers
 
     # Group blur boxes by frame index, extending to neighboring frames
-    BLUR_SPREAD = 3  # blur N frames before and after each detection
+    BLUR_SPREAD = 5  # blur N frames before and after each detection
     blur_per_frame: dict[int, list[tuple]] = {}
     for bb in blur_boxes:
         frame_idx = int(bb["frame_ms"] * fps / 1000)
