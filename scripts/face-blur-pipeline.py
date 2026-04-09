@@ -268,7 +268,7 @@ def _get_plate_model():
 
 
 def detect_license_plates(video_path: Path) -> list[dict]:
-    """Run YOLO license plate detection on every frame. Returns blur boxes."""
+    """Detect plates with YOLO on sampled frames, then CSRT-track across all frames."""
     model = _get_plate_model()
     if model is None:
         return []
@@ -279,43 +279,124 @@ def detect_license_plates(video_path: Path) -> list[dict]:
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-    plate_boxes = []
+    # Phase 1: Detect plates on sampled frames (~every 10th frame)
+    sample_step = max(1, total_frames // 90)
+    detections_by_frame: dict[int, list[tuple]] = {}
 
-    for i in range(total_frames):
+    for i in range(0, total_frames, sample_step):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
             continue
 
-        h, w = frame.shape[:2]
-        frame_ms = int(i * 1000 / fps)
-
         results = model.predict(frame, conf=PLATE_MIN_CONFIDENCE, imgsz=640, verbose=False)
         for result in results:
             for box in result.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-                # Skip detections in upper 40% of frame (signs, not plates)
                 if (y1 + y2) / 2 < h * 0.4:
                     continue
-
-                pw = x2 - x1
-                ph = y2 - y1
-
-                # Add padding
+                pw, ph = x2 - x1, y2 - y1
                 pad_x = pw * PLATE_BOX_PADDING
                 pad_y = ph * PLATE_BOX_PADDING
-                x1 = max(0, x1 - pad_x)
-                y1 = max(0, y1 - pad_y)
-                pw = min(w - x1, pw + 2 * pad_x)
-                ph = min(h - y1, ph + 2 * pad_y)
+                bx = max(0, x1 - pad_x)
+                by = max(0, y1 - pad_y)
+                bw = min(w - bx, pw + 2 * pad_x)
+                bh = min(h - by, ph + 2 * pad_y)
+                detections_by_frame.setdefault(i, []).append(
+                    (int(bx), int(by), int(bw), int(bh))
+                )
 
+    if not detections_by_frame:
+        cap.release()
+        return []
+
+    # Phase 2: Track plates forward through every frame using CSRT
+    plate_boxes = []
+    active_trackers: list[list] = []  # [tracker, lost_count, last_bbox]
+    MAX_LOST = int(fps * 2)  # re-init if lost for 2 seconds
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    for fi in range(total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame_ms = int(fi * 1000 / fps)
+
+        # Re-initialize trackers from new detections on sampled frames
+        if fi in detections_by_frame:
+            for bbox in detections_by_frame[fi]:
+                # Check if a tracker is already near this detection
+                already_tracked = False
+                for entry in active_trackers:
+                    tx, ty, tw, th = entry[2]
+                    cx1, cy1 = tx + tw / 2, ty + th / 2
+                    cx2, cy2 = bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2
+                    if abs(cx1 - cx2) < w * 0.1 and abs(cy1 - cy2) < h * 0.1:
+                        # Re-init existing tracker with fresh detection
+                        try:
+                            entry[0] = cv2.TrackerCSRT_create()
+                            entry[0].init(frame, bbox)
+                            entry[1] = 0
+                            entry[2] = bbox
+                        except Exception:
+                            pass
+                        already_tracked = True
+                        break
+
+                if not already_tracked:
+                    try:
+                        tracker = cv2.TrackerCSRT_create()
+                        tracker.init(frame, bbox)
+                        active_trackers.append([tracker, 0, bbox])
+                    except Exception:
+                        active_trackers.append([None, 0, bbox])
+
+        # Update all trackers
+        still_active = []
+        for entry in active_trackers:
+            tracker, lost_count, last_bbox = entry
+
+            if tracker is not None:
+                ok, tracked_bbox = tracker.update(frame)
+                if ok:
+                    bx, by, bw, bh = [int(v) for v in tracked_bbox]
+                    bx = max(0, min(bx, w - 1))
+                    by = max(0, min(by, h - 1))
+                    bw = max(1, min(bw, w - bx))
+                    bh = max(1, min(bh, h - by))
+                    plate_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": bx, "y": by, "w": bw, "h": bh,
+                    })
+                    entry[1] = 0
+                    entry[2] = (bx, by, bw, bh)
+                    still_active.append(entry)
+                else:
+                    entry[1] += 1
+                    if entry[1] < MAX_LOST:
+                        # Use last known position
+                        lx, ly, lw, lh = entry[2]
+                        plate_boxes.append({
+                            "frame_ms": frame_ms,
+                            "x": lx, "y": ly, "w": lw, "h": lh,
+                        })
+                        still_active.append(entry)
+            else:
+                # No tracker, use static bbox
+                lx, ly, lw, lh = last_bbox
                 plate_boxes.append({
                     "frame_ms": frame_ms,
-                    "x": int(x1), "y": int(y1),
-                    "w": int(pw), "h": int(ph),
+                    "x": lx, "y": ly, "w": lw, "h": lh,
                 })
+                entry[1] += 1
+                if entry[1] < MAX_LOST:
+                    still_active.append(entry)
+
+        active_trackers = still_active
 
     cap.release()
     return plate_boxes
