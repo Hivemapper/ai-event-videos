@@ -34,17 +34,12 @@ import numpy as np
 import requests
 
 try:
-    import mediapipe as mp
-except ImportError:
-    print("mediapipe not installed. Run: pip install mediapipe")
-    sys.exit(1)
-
-try:
     from ultralytics import YOLO as _YOLO
     HAS_YOLO = True
 except ImportError:
     HAS_YOLO = False
-    print("Warning: ultralytics not installed. License plate detection disabled. Run: pip install ultralytics")
+    print("ultralytics not installed. Run: pip install ultralytics")
+    sys.exit(1)
 
 try:
     import boto3
@@ -69,11 +64,11 @@ PERSON_LABELS = {"person", "construction worker", "pedestrian"}
 # Face detection confidence threshold
 FACE_MIN_CONFIDENCE = 0.4
 
-# Expand face box by this factor for better coverage
-FACE_BOX_PADDING = 0.1
+# Face detection
+FACE_MIN_CONFIDENCE = 0.3
+FACE_BOX_PADDING = 0.15
 
 # License plate detection
-PLATE_MODEL_NAME = "keremberke/yolov8s-license-plate-detection"
 PLATE_MIN_CONFIDENCE = 0.25
 PLATE_BOX_PADDING = 0.05
 
@@ -152,52 +147,48 @@ def get_person_detections(conn, video_id: str) -> list[dict]:
     ]
 
 
-def _create_face_detector():
-    """Create a MediaPipe face detector, handling both old and new API."""
-    # New API (mediapipe >= 0.10.8)
-    try:
-        BaseOptions = mp.tasks.BaseOptions
-        FaceDetector = mp.tasks.vision.FaceDetector
-        FaceDetectorOptions = mp.tasks.vision.FaceDetectorOptions
-        VisionRunningMode = mp.tasks.vision.RunningMode
-
-        options = FaceDetectorOptions(
-            base_options=BaseOptions(model_asset_path=_download_face_model()),
-            running_mode=VisionRunningMode.IMAGE,
-            min_detection_confidence=FACE_MIN_CONFIDENCE,
-        )
-        return "new", FaceDetector.create_from_options(options)
-    except Exception as e:
-        print(f"    [!] New MediaPipe API failed: {e}")
-        pass
-
-    # Old API (mediapipe < 0.10.8)
-    try:
-        detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=1,
-            min_detection_confidence=FACE_MIN_CONFIDENCE,
-        )
-        return "old", detector
-    except AttributeError:
-        raise RuntimeError("Cannot initialize MediaPipe face detection. Try: pip install mediapipe>=0.10.14")
+# Cache YOLO models globally so they load once
+_face_model = None
+_face_model_failed = False
+_plate_model = None
+_plate_model_failed = False
 
 
-def _download_face_model() -> str:
-    """Download the MediaPipe face detection model if not cached."""
+def _download_yolo_face_model() -> str:
+    """Download YOLO face detection model."""
     import urllib.request
     model_dir = PROJECT_ROOT / "data" / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "blaze_face_short_range.tflite"
+    model_path = model_dir / "yolov8n-face.pt"
     if not model_path.exists():
-        url = "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite"
-        print(f"    Downloading face detection model...")
+        # Public YOLO face model trained on WIDERFace
+        url = "https://github.com/akanametov/yolo-face/releases/download/v0.0.0/yolov8n-face.pt"
+        print(f"    Downloading YOLO face model...")
         urllib.request.urlretrieve(url, str(model_path))
     return str(model_path)
 
 
+def _get_face_model():
+    global _face_model, _face_model_failed
+    if _face_model_failed:
+        return None
+    if _face_model is None:
+        try:
+            model_path = _download_yolo_face_model()
+            print(f"    Loading YOLO face model...")
+            _face_model = _YOLO(model_path)
+        except Exception as e:
+            print(f"    {YELLOW}YOLO face model failed: {e}{RESET}")
+            _face_model_failed = True
+            return None
+    return _face_model
+
+
 def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[dict]:
-    """Run MediaPipe face detection on person crops, return face bounding boxes in video coords."""
-    api_version, detector = _create_face_detector()
+    """Run YOLO face detection on person crops, return face bounding boxes in video coords."""
+    model = _get_face_model()
+    if model is None:
+        return []
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -226,68 +217,47 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
             if px2 <= px1 or py2 <= py1:
                 continue
 
+            # Run YOLO face detection on the person crop
             crop = frame[py1:py2, px1:px2]
-            crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            crop_h, crop_w = crop.shape[:2]
+            results = model.predict(crop, conf=FACE_MIN_CONFIDENCE, imgsz=320, verbose=False)
 
-            faces = []
-            if api_version == "new":
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=crop_rgb)
-                result = detector.detect(mp_image)
-                for face in result.detections:
-                    bb = face.bounding_box
-                    faces.append((bb.origin_x / crop_w, bb.origin_y / crop_h,
-                                  bb.width / crop_w, bb.height / crop_h))
-            else:
-                result = detector.process(crop_rgb)
-                if result.detections:
-                    for face in result.detections:
-                        bb = face.location_data.relative_bounding_box
-                        faces.append((bb.xmin, bb.ymin, bb.width, bb.height))
-
-            # Person box dimensions
             person_w = px2 - px1
             person_h = py2 - py1
 
-            for (rx, ry, rw, rh) in faces:
-                fx = px1 + rx * crop_w
-                fy = py1 + ry * crop_h
-                fw = rw * crop_w
-                fh = rh * crop_h
+            for result in results:
+                for box in result.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    # Convert crop coords to video coords
+                    fx = px1 + x1
+                    fy = py1 + y1
+                    fw = x2 - x1
+                    fh = y2 - y1
 
-                pad_x = fw * FACE_BOX_PADDING
-                pad_y = fh * FACE_BOX_PADDING
-                fx = max(0, fx - pad_x)
-                fy = max(0, fy - pad_y)
-                fw = min(w - fx, fw + 2 * pad_x)
-                fh = min(h - fy, fh + 2 * pad_y)
+                    # Add padding
+                    pad_x = fw * FACE_BOX_PADDING
+                    pad_y = fh * FACE_BOX_PADDING
+                    fx = max(0, fx - pad_x)
+                    fy = max(0, fy - pad_y)
+                    fw = min(w - fx, fw + 2 * pad_x)
+                    fh = min(h - fy, fh + 2 * pad_y)
 
-                # Cap: blur box should not exceed upper 40% of person box
-                max_fw = person_w * 0.8
-                max_fh = person_h * 0.4
-                if fw > max_fw:
-                    fx = fx + (fw - max_fw) / 2
-                    fw = max_fw
-                if fh > max_fh:
-                    fh = max_fh
+                    # Cap: blur should not exceed upper 40% of person box
+                    max_fw = person_w * 0.8
+                    max_fh = person_h * 0.4
+                    if fw > max_fw:
+                        fx = fx + (fw - max_fw) / 2
+                        fw = max_fw
+                    if fh > max_fh:
+                        fh = max_fh
 
-                face_boxes.append({
-                    "frame_ms": frame_ms,
-                    "x": int(fx), "y": int(fy),
-                    "w": int(fw), "h": int(fh),
-                })
+                    face_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": int(fx), "y": int(fy),
+                        "w": int(fw), "h": int(fh),
+                    })
 
     cap.release()
-    if api_version == "old":
-        detector.close()
-    else:
-        detector.close()
     return face_boxes
-
-
-# Cache YOLO plate model globally so it loads once
-_plate_model = None
-_plate_model_failed = False
 
 
 def _download_plate_model() -> str:
