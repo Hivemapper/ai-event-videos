@@ -184,12 +184,8 @@ def _get_face_model():
     return _face_model
 
 
-def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[dict]:
-    """Run YOLO face detection on full frames at detection timestamps.
-
-    Only keeps faces that overlap with a person bounding box.
-    Running on full frame gives YOLO better context for small/distant faces.
-    """
+def detect_faces(video_path: Path) -> list[dict]:
+    """Run YOLO face detection on every frame of the video."""
     model = _get_face_model()
     if model is None:
         return []
@@ -198,62 +194,42 @@ def detect_faces_in_persons(video_path: Path, detections: list[dict]) -> list[di
     if not cap.isOpened():
         return []
 
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     face_boxes = []
 
-    # Group detections by frame_ms
-    by_frame: dict[int, list[dict]] = {}
-    for det in detections:
-        by_frame.setdefault(det["frame_ms"], []).append(det)
-
-    for frame_ms, frame_dets in sorted(by_frame.items()):
-        cap.set(cv2.CAP_PROP_POS_MSEC, frame_ms)
+    for i in range(total_frames):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
-            continue
+            break
 
         h, w = frame.shape[:2]
+        frame_ms = int(i * 1000 / fps)
 
-        # Run YOLO face detection on the full frame
         results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
-
-        # Collect all detected faces
-        detected_faces = []
         for result in results:
             for box in result.boxes:
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                detected_faces.append((x1, y1, x2, y2))
+                fw = x2 - x1
+                fh = y2 - y1
 
-        if not detected_faces:
-            continue
+                # Skip tiny faces (< ~15px, too small to identify)
+                if fh < 15:
+                    continue
 
-        # Only keep faces that overlap with a close/medium-range person
-        for det in frame_dets:
-            px1 = max(0, int(det["x_min"]))
-            py1 = max(0, int(det["y_min"]))
-            px2 = min(w, int(det["x_max"]))
-            py2 = min(h, int(det["y_max"]))
+                pad_x = fw * FACE_BOX_PADDING
+                pad_y = fh * FACE_BOX_PADDING
+                bx = max(0, x1 - pad_x)
+                by = max(0, y1 - pad_y)
+                bw = min(w - bx, fw + 2 * pad_x)
+                bh = min(h - by, fh + 2 * pad_y)
 
-            # Skip small/distant persons
-            if (py2 - py1) < MIN_PERSON_HEIGHT_PX:
-                continue
-
-            for (fx1, fy1, fx2, fy2) in detected_faces:
-                face_cx = (fx1 + fx2) / 2
-                face_cy = (fy1 + fy2) / 2
-                if px1 <= face_cx <= px2 and py1 <= face_cy <= py2:
-                    fw = fx2 - fx1
-                    fh = fy2 - fy1
-                    pad_x = fw * FACE_BOX_PADDING
-                    pad_y = fh * FACE_BOX_PADDING
-                    bx = max(0, fx1 - pad_x)
-                    by = max(0, fy1 - pad_y)
-                    bw = min(w - bx, fw + 2 * pad_x)
-                    bh = min(h - by, fh + 2 * pad_y)
-                    face_boxes.append({
-                        "frame_ms": frame_ms,
-                        "x": int(bx), "y": int(by),
-                        "w": int(bw), "h": int(bh),
-                    })
+                face_boxes.append({
+                    "frame_ms": frame_ms,
+                    "x": int(bx), "y": int(by),
+                    "w": int(bw), "h": int(bh),
+                })
 
     cap.release()
     return face_boxes
@@ -369,8 +345,8 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     # Pre-compute: for each frame, which blur regions are active
     # We'll do a forward pass with trackers
 
-    # Group detections by frame index
-    det_by_frame: dict[int, list[tuple]] = {}
+    # Group blur boxes by frame index
+    blur_per_frame: dict[int, list[tuple]] = {}
     for bb in blur_boxes:
         frame_idx = int(bb["frame_ms"] * fps / 1000)
         frame_idx = max(0, min(frame_idx, total_frames - 1))
@@ -379,74 +355,13 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
         y = max(0, min(y, height - 1))
         w = max(1, min(w, width - x))
         h = max(1, min(h, height - y))
-        det_by_frame.setdefault(frame_idx, []).append((x, y, w, h))
+        blur_per_frame.setdefault(frame_idx, []).append((x, y, w, h))
 
-    # Build per-frame blur map using trackers
-    # Each active tracker produces a bbox for each frame until it loses track
-    TRACKER_MAX_FRAMES = int(fps * 3)  # track for up to 3 seconds after detection
-
-    # Store blur rects per frame: frame_idx -> list of (x, y, w, h)
-    blur_per_frame: dict[int, list[tuple]] = {}
-
-    # Active trackers: list of (tracker, remaining_frames, last_bbox)
-    active_trackers: list[list] = []
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-    for fi in range(total_frames):
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        # Initialize new trackers for detections on this frame
-        if fi in det_by_frame:
-            for (x, y, w, h) in det_by_frame[fi]:
-                try:
-                    tracker = cv2.TrackerCSRT_create()
-                    tracker.init(frame, (x, y, w, h))
-                    active_trackers.append([tracker, TRACKER_MAX_FRAMES, (x, y, w, h)])
-                except Exception:
-                    # CSRT not available, store static bbox
-                    active_trackers.append([None, TRACKER_MAX_FRAMES, (x, y, w, h)])
-
-        # Update all active trackers
-        frame_blurs = []
-        still_active = []
-        for entry in active_trackers:
-            tracker, remaining, last_bbox = entry
-            if remaining <= 0:
-                continue
-
-            if tracker is not None:
-                ok, bbox = tracker.update(frame)
-                if ok:
-                    bx, by, bw, bh = [int(v) for v in bbox]
-                    bx = max(0, min(bx, width - 1))
-                    by = max(0, min(by, height - 1))
-                    bw = max(1, min(bw, width - bx))
-                    bh = max(1, min(bh, height - by))
-                    frame_blurs.append((bx, by, bw, bh))
-                    entry[1] = remaining - 1
-                    entry[2] = (bx, by, bw, bh)
-                    still_active.append(entry)
-                # else: tracker lost, drop it
-            else:
-                # No tracker available, use static bbox
-                frame_blurs.append(last_bbox)
-                entry[1] = remaining - 1
-                still_active.append(entry)
-
-        active_trackers = still_active
-
-        if frame_blurs:
-            blur_per_frame[fi] = frame_blurs
-
-    cap.release()
-
-    # Now re-encode with blur applied per frame
-    cap = cv2.VideoCapture(str(video_path))
+    # Re-encode with blur applied per frame
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for fi in range(total_frames):
         ret, frame = cap.read()
         if not ret:
@@ -562,10 +477,8 @@ def process_video(s3, conn, video_id: str) -> bool:
         if not video_path:
             raise RuntimeError("Video download failed")
 
-        print(f"    {len(detections)} person detections across {len(set(d['frame_ms'] for d in detections))} frames")
-
-        # Detect faces in person crops
-        face_boxes = detect_faces_in_persons(video_path, detections)
+        # Detect faces on every frame
+        face_boxes = detect_faces(video_path)
         print(f"    {len(face_boxes)} faces detected")
 
         # Detect license plates
