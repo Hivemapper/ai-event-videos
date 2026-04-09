@@ -495,13 +495,7 @@ def main():
 
     s3 = get_s3_client()
 
-    # Verify S3 access
-    try:
-        s3.head_bucket(Bucket=S3_BUCKET)
-        print(f"  {GREEN}S3 bucket accessible{RESET}")
-    except Exception as e:
-        print(f"  {RED}S3 bucket not accessible: {e}{RESET}")
-        sys.exit(1)
+    print(f"  {GREEN}S3 target: s3://{S3_BUCKET}/{RESET}")
 
     print(f"  Polling for videos with person detections...")
     print(f"  Press Ctrl+C to stop\n")
