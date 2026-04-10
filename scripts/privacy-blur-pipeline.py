@@ -76,6 +76,10 @@ MIN_PERSON_HEIGHT_PX = 100
 PLATE_MIN_CONFIDENCE = 0.15
 PLATE_BOX_PADDING = 0.1
 
+# Privacy blur skip thresholds (speeds in mph)
+SKIP_SPEED_MIN_ANY_MPH = 50      # skip blur if min speed >= 50 mph (any time)
+SKIP_SPEED_MIN_NIGHT_MPH = 40    # skip blur if min speed >= 40 mph at night
+
 BOLD = "\033[1m"
 DIM = "\033[2m"
 GREEN = "\033[32m"
@@ -159,6 +163,46 @@ def get_person_detections(conn, video_id: str) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def get_triage_info(conn, video_id: str) -> dict | None:
+    """Get triage data for a video (speed, location, timestamp)."""
+    row = conn.execute(
+        """SELECT speed_min, lat, lon, event_timestamp
+           FROM triage_results WHERE id = ?""",
+        (video_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "speed_min": row[0], "lat": row[1], "lon": row[2],
+        "event_timestamp": row[3],
+    }
+
+
+def check_skip_reason(conn, video_id: str) -> str | None:
+    """Check if a video can skip privacy blurring based on speed/time-of-day.
+    Returns a skip reason string, or None if blurring is needed."""
+    triage = get_triage_info(conn, video_id)
+    if not triage or triage["speed_min"] is None:
+        return None
+
+    speed_min_mph = triage["speed_min"]
+
+    # Rule 1: Any video with continuous speed >= 50 mph
+    if speed_min_mph >= SKIP_SPEED_MIN_ANY_MPH:
+        return f"speed_min={speed_min_mph:.0f}mph >= {SKIP_SPEED_MIN_ANY_MPH}mph"
+
+    # Rule 2: Night-time video with continuous speed >= 40 mph
+    if speed_min_mph >= SKIP_SPEED_MIN_NIGHT_MPH:
+        lat, lon, ts = triage["lat"], triage["lon"], triage["event_timestamp"]
+        if lat is not None and lon is not None and ts:
+            mod = _get_export_metadata_module()
+            tod_info = mod.get_time_of_day(ts, lat, lon)
+            if tod_info and tod_info.get("timeOfDay") == "Night":
+                return f"night + speed_min={speed_min_mph:.0f}mph >= {SKIP_SPEED_MIN_NIGHT_MPH}mph"
+
+    return None
 
 
 # Cache models globally so they load once
@@ -549,6 +593,7 @@ def ensure_blur_runs_table(conn):
             status TEXT NOT NULL DEFAULT 'queued',
             face_count INTEGER,
             s3_url TEXT,
+            skip_reason TEXT,
             machine_id TEXT,
             started_at TEXT,
             completed_at TEXT,
@@ -556,6 +601,12 @@ def ensure_blur_runs_table(conn):
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
+    # Add skip_reason column to existing tables
+    try:
+        conn.execute("ALTER TABLE blur_runs ADD COLUMN skip_reason TEXT")
+        conn.commit()
+    except Exception:
+        pass  # column already exists
     conn.commit()
 
 
@@ -605,6 +656,21 @@ def process_video(s3, conn, video_id: str) -> bool:
         )
         conn.commit()
 
+        # Check speed/time-of-day skip criteria (before downloading video)
+        skip_reason = check_skip_reason(conn, video_id)
+        if skip_reason:
+            print(f"    Skipping blur: {skip_reason}")
+            api_key = load_api_key()
+            meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
+            print(f"    Metadata uploaded: {meta_url}")
+            conn.execute(
+                """UPDATE blur_runs SET status='completed', face_count=0,
+                   skip_reason=?, completed_at=? WHERE video_id=?""",
+                (skip_reason, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
+            )
+            conn.commit()
+            return True
+
         # Check if VRU pipeline found persons
         vru_has_persons = bool(get_person_detections(conn, video_id))
 
@@ -637,7 +703,8 @@ def process_video(s3, conn, video_id: str) -> bool:
             meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
             print(f"    Metadata uploaded: {meta_url}")
             conn.execute(
-                "UPDATE blur_runs SET status='completed', face_count=0, completed_at=? WHERE video_id=?",
+                """UPDATE blur_runs SET status='completed', face_count=0,
+                   skip_reason='prescan_no_persons_or_vehicles', completed_at=? WHERE video_id=?""",
                 (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
             )
             conn.commit()
