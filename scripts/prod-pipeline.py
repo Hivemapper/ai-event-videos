@@ -617,6 +617,11 @@ def ensure_production_runs_table(conn):
         CREATE INDEX IF NOT EXISTS idx_production_runs_status
         ON production_runs (status)
     """)
+    # Add skip_reason column if table already existed without it
+    try:
+        conn.execute("ALTER TABLE production_runs ADD COLUMN skip_reason TEXT")
+    except Exception:
+        pass  # column already exists
     conn.commit()
 
 
