@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 import cv2
@@ -131,13 +132,13 @@ def get_videos_needing_blur(conn, limit: int = 100) -> list[str]:
                SELECT DISTINCT dr.video_id, dr.completed_at AS sort_date
                FROM detection_runs dr
                WHERE dr.status = 'completed'
-                 AND dr.video_id NOT IN (SELECT video_id FROM blur_runs)
+                 AND dr.video_id NOT IN (SELECT video_id FROM production_runs)
                UNION
                -- Signal-triaged videos without any detection run
                SELECT tr.id AS video_id, tr.created_at AS sort_date
                FROM triage_results tr
                WHERE tr.triage_result = 'signal'
-                 AND tr.id NOT IN (SELECT video_id FROM blur_runs)
+                 AND tr.id NOT IN (SELECT video_id FROM production_runs)
                  AND tr.id NOT IN (SELECT video_id FROM detection_runs)
            )
            ORDER BY sort_date DESC
@@ -591,29 +592,31 @@ def upload_to_s3(s3, video_id: str, file_path: Path) -> str:
     return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
 
-def ensure_blur_runs_table(conn):
-    """Create blur_runs tracking table if it doesn't exist."""
+def ensure_production_runs_table(conn):
+    """Create production_runs tracking table if it doesn't exist."""
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS blur_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT EXISTS production_runs (
+            id TEXT PRIMARY KEY,
             video_id TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'queued',
-            face_count INTEGER,
-            s3_url TEXT,
+            privacy_status TEXT NOT NULL DEFAULT 'pending',
+            metadata_status TEXT NOT NULL DEFAULT 'pending',
+            upload_status TEXT NOT NULL DEFAULT 'pending',
             skip_reason TEXT,
+            s3_video_key TEXT,
+            s3_metadata_key TEXT,
             machine_id TEXT,
             started_at TEXT,
             completed_at TEXT,
+            last_heartbeat_at TEXT,
             last_error TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
-    # Add skip_reason column to existing tables
-    try:
-        conn.execute("ALTER TABLE blur_runs ADD COLUMN skip_reason TEXT")
-        conn.commit()
-    except Exception:
-        pass  # column already exists
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_production_runs_status
+        ON production_runs (status)
+    """)
     conn.commit()
 
 
@@ -659,13 +662,14 @@ def process_video(s3, conn, video_id: str) -> bool:
     output_path = None
 
     try:
-        # Mark as running
+        # Mark as processing
+        run_id = str(uuid.uuid4())
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         conn.execute(
-            """INSERT INTO blur_runs (video_id, status, machine_id, started_at)
-               VALUES (?, 'running', ?, ?)
-               ON CONFLICT(video_id) DO UPDATE SET status='running', started_at=?, machine_id=?""",
-            (video_id, MACHINE_ID, now, now, MACHINE_ID),
+            """INSERT INTO production_runs (id, video_id, status, machine_id, started_at, created_at)
+               VALUES (?, ?, 'processing', ?, ?, ?)
+               ON CONFLICT(video_id) DO UPDATE SET status='processing', started_at=?, machine_id=?""",
+            (run_id, video_id, MACHINE_ID, now, now, now, MACHINE_ID),
         )
         conn.commit()
 
@@ -676,10 +680,12 @@ def process_video(s3, conn, video_id: str) -> bool:
             api_key = load_api_key()
             meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
             print(f"    Metadata uploaded: {meta_url}")
+            meta_key = f"{video_id}.json"
             conn.execute(
-                """UPDATE blur_runs SET status='completed', face_count=0,
-                   skip_reason=?, completed_at=? WHERE video_id=?""",
-                (skip_reason, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
+                """UPDATE production_runs SET status='completed', privacy_status='skipped',
+                   metadata_status='completed', upload_status='completed',
+                   skip_reason=?, s3_metadata_key=?, completed_at=? WHERE video_id=?""",
+                (skip_reason, meta_key, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
             )
             conn.commit()
             return True
@@ -715,10 +721,13 @@ def process_video(s3, conn, video_id: str) -> bool:
             # Still generate and upload metadata
             meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
             print(f"    Metadata uploaded: {meta_url}")
+            meta_key = f"{video_id}.json"
             conn.execute(
-                """UPDATE blur_runs SET status='completed', face_count=0,
-                   skip_reason='prescan_no_persons_or_vehicles', completed_at=? WHERE video_id=?""",
-                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
+                """UPDATE production_runs SET status='completed', privacy_status='skipped',
+                   metadata_status='completed', upload_status='completed',
+                   skip_reason='prescan_no_persons_or_vehicles', s3_metadata_key=?,
+                   completed_at=? WHERE video_id=?""",
+                (meta_key, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
             )
             conn.commit()
             return True
@@ -759,9 +768,13 @@ def process_video(s3, conn, video_id: str) -> bool:
         print(f"    Metadata uploaded: {meta_url}")
 
         # Mark complete
+        video_key = f"{video_id}.mp4" if s3_url else None
+        meta_key = f"{video_id}.json"
         conn.execute(
-            "UPDATE blur_runs SET status='completed', face_count=?, s3_url=?, completed_at=? WHERE video_id=?",
-            (len(all_blur_boxes), s3_url, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
+            """UPDATE production_runs SET status='completed',
+               privacy_status='completed', metadata_status='completed', upload_status='completed',
+               s3_video_key=?, s3_metadata_key=?, completed_at=? WHERE video_id=?""",
+            (video_key, meta_key, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
         )
         conn.commit()
         return True
@@ -770,7 +783,7 @@ def process_video(s3, conn, video_id: str) -> bool:
         print(f"    {RED}Error: {exc}{RESET}")
         traceback.print_exc()
         conn.execute(
-            "UPDATE blur_runs SET status='failed', last_error=? WHERE video_id=?",
+            "UPDATE production_runs SET status='failed', last_error=? WHERE video_id=?",
             (str(exc)[:1000], video_id),
         )
         conn.commit()
@@ -790,19 +803,19 @@ def main():
     args = parser.parse_args()
 
     print(f"{BOLD}{'═' * 60}{RESET}")
-    print(f"  Face Blur Pipeline")
+    print(f"  Production Pipeline")
     print(f"  Machine: {MACHINE_ID}")
     print(f"  S3 Bucket: {S3_BUCKET}")
     print(f"{BOLD}{'═' * 60}{RESET}")
 
     conn = get_db()
-    ensure_blur_runs_table(conn)
+    ensure_production_runs_table(conn)
 
     s3 = get_s3_client()
 
     print(f"  {GREEN}S3 target: s3://{S3_BUCKET}/{RESET}")
 
-    print(f"  Polling for videos with person detections...")
+    print(f"  Polling for videos needing production processing...")
     print(f"  Press Ctrl+C to stop\n")
 
     running = True
@@ -833,15 +846,16 @@ def main():
             # Skip if already in S3 (unless --event-id forces reprocess)
             if not args.event_id and video_already_blurred(s3, video_id):
                 conn.execute(
-                    """INSERT INTO blur_runs (video_id, status, completed_at)
-                       VALUES (?, 'completed', ?)
+                    """INSERT INTO production_runs (id, video_id, status, completed_at, created_at)
+                       VALUES (?, ?, 'completed', ?, ?)
                        ON CONFLICT(video_id) DO UPDATE SET status='completed'""",
-                    (video_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
+                    (str(uuid.uuid4()), video_id, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())),
                 )
                 conn.commit()
                 continue
 
-            print(f"\n{CYAN}Blur {video_id[:20]}…{RESET}")
+            print(f"\n{CYAN}Process {video_id[:20]}…{RESET}")
             t0 = time.time()
             ok = process_video(s3, conn, video_id)
             elapsed = time.time() - t0
