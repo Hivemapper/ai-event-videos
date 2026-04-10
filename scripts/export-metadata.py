@@ -466,6 +466,65 @@ def get_clip_summary(conn, video_id: str) -> str | None:
         return None
 
 
+def generate_summary(meta: dict) -> str:
+    """Generate a deterministic summary from metadata fields."""
+    parts = []
+
+    # Event type
+    event_block = meta.get("event") or {}
+    event_type = event_block.get("type") or meta.get("event", {}).get("type")
+    if event_type:
+        parts.append(event_type.replace("_", " ").capitalize() + " event")
+    else:
+        parts.append("Driving event")
+
+    # Road class
+    road_class = event_block.get("roadClass")
+    if road_class:
+        parts.append(f"on a {road_class.replace('_', ' ')} road")
+
+    # Country
+    country = event_block.get("country")
+    if country:
+        parts[-1] = parts[-1] + f" in {country}" if len(parts) > 1 else f"in {country}"
+
+    # Speed
+    speed_min = event_block.get("speedMin")
+    speed_max = event_block.get("speedMax")
+    if speed_min is not None and speed_max is not None:
+        if abs(speed_max - speed_min) < 3:
+            parts.append(f"at {round(speed_min)} mph")
+        else:
+            parts.append(f"at {round(speed_min)}-{round(speed_max)} mph")
+
+    # Time of day
+    tod = event_block.get("timeOfDay")
+    if isinstance(tod, dict):
+        tod = tod.get("timeOfDay")
+    if tod:
+        parts.append(f"during {tod.lower()}")
+
+    # VRU detections
+    vru_labels = meta.get("vruLabelsDetected") or []
+    if vru_labels:
+        segments = meta.get("detectionSegments") or []
+        label_counts = {}
+        for seg in segments:
+            label = seg.get("label", "")
+            label_counts[label] = label_counts.get(label, 0) + 1
+
+        det_parts = []
+        for label in vru_labels:
+            count = label_counts.get(label, 1)
+            if count > 1:
+                det_parts.append(f"{count} {label}s")
+            else:
+                det_parts.append(f"{count} {label}")
+        parts.append(f"with {', '.join(det_parts)} detected")
+
+    return ". ".join(". ".join(parts).split(". ")).rstrip(".") + "."
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -580,12 +639,12 @@ def build_metadata(conn, api_key: str, video_id: str) -> dict:
     # 9. Blur status
     meta["blur"] = get_blur_status(conn, video_id)
 
-    # 10. Summary
-    meta["summary"] = get_clip_summary(conn, video_id)
-
-    # 11. VRU summary (unique labels detected)
+    # 10. VRU summary (before summary so generate_summary can use it)
     vru_labels = sorted(set(d["label"] for d in meta["detectionSegments"]))
     meta["vruLabelsDetected"] = vru_labels
+
+    # 11. Summary — use DB if available, otherwise generate from metadata
+    meta["summary"] = get_clip_summary(conn, video_id) or generate_summary(meta)
 
     # 13. Export timestamp
     meta["exportedAt"] = datetime.now(timezone.utc).isoformat()
@@ -688,11 +747,11 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
     # 5. Blur status
     meta["blur"] = get_blur_status(conn, video_id)
 
-    # 6. Summary
-    meta["summary"] = get_clip_summary(conn, video_id)
-
-    # 7. VRU summary
+    # 6. VRU summary (before summary so generate_summary can use it)
     meta["vruLabelsDetected"] = sorted(set(d["label"] for d in meta["detectionSegments"]))
+
+    # 7. Summary — use DB if available, otherwise generate from metadata
+    meta["summary"] = get_clip_summary(conn, video_id) or generate_summary(meta)
 
     # 8. Export timestamp
     meta["exportedAt"] = datetime.now(timezone.utc).isoformat()
