@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   Settings,
@@ -52,6 +53,8 @@ import { cn } from "@/lib/utils";
 import { LabelDefinition } from "@/types/pipeline";
 
 function SettingsContent() {
+  const searchParams = useSearchParams();
+  const defaultTab = searchParams.get("tab") || "general";
   const { theme, setTheme } = useTheme();
 
   // Beemaps API Key state
@@ -303,7 +306,7 @@ function SettingsContent() {
             </p>
           </div>
 
-          <Tabs defaultValue="general" className="w-full">
+          <Tabs defaultValue={defaultTab} className="w-full">
             <TabsList className="w-full">
               <TabsTrigger value="general" className="flex-1">
                 <Settings className="w-4 h-4 mr-2" />
@@ -318,6 +321,10 @@ function SettingsContent() {
               }}>
                 <Tag className="w-4 h-4 mr-2" />
                 Labels
+              </TabsTrigger>
+              <TabsTrigger value="pipeline" className="flex-1">
+                <CloudUpload className="w-4 h-4 mr-2" />
+                Pipeline
               </TabsTrigger>
               <TabsTrigger value="claude-md" className="flex-1" onClick={() => {
                 if (!claudeMdLoaded) handleLoadClaudeMd();
@@ -380,44 +387,6 @@ function SettingsContent() {
                     km/h
                   </Button>
                 </div>
-              </div>
-
-              {/* S3 Bucket */}
-              <div className="space-y-2">
-                <label className="text-sm font-medium flex items-center gap-2">
-                  <CloudUpload className="w-4 h-4" />
-                  Production S3 Bucket
-                </label>
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="hivemapper-blurred-ai-event-videos"
-                    value={s3BucketInput}
-                    onChange={(e) => setS3BucketInput(e.target.value)}
-                    className="flex-1"
-                  />
-                  <Button
-                    onClick={() => {
-                      if (s3BucketInput.trim()) {
-                        setS3Bucket(s3BucketInput.trim());
-                        setS3BucketSaved(true);
-                        setTimeout(() => setS3BucketSaved(false), 2000);
-                      }
-                    }}
-                    disabled={!s3BucketInput.trim()}
-                  >
-                    {s3BucketSaved ? (
-                      <>
-                        <Check className="w-4 h-4 mr-1" />
-                        Saved
-                      </>
-                    ) : (
-                      "Save"
-                    )}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  S3 destination for blurred videos and metadata. Default: hivemapper-blurred-ai-event-videos
-                </p>
               </div>
 
               {/* Beemaps API Key */}
@@ -794,6 +763,46 @@ function SettingsContent() {
                   <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                   <p>System labels are owned by the VRU pipeline. Custom labels are stored in the local SQLite database and can be removed here.</p>
                 </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="pipeline" className="space-y-6 py-4">
+              {/* S3 Bucket */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <CloudUpload className="w-4 h-4" />
+                  Production S3 Bucket
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="hivemapper-blurred-ai-event-videos"
+                    value={s3BucketInput}
+                    onChange={(e) => setS3BucketInput(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={() => {
+                      if (s3BucketInput.trim()) {
+                        setS3Bucket(s3BucketInput.trim());
+                        setS3BucketSaved(true);
+                        setTimeout(() => setS3BucketSaved(false), 2000);
+                      }
+                    }}
+                    disabled={!s3BucketInput.trim()}
+                  >
+                    {s3BucketSaved ? (
+                      <>
+                        <Check className="w-4 h-4 mr-1" />
+                        Saved
+                      </>
+                    ) : (
+                      "Save"
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  S3 destination for blurred videos and metadata. Default: hivemapper-blurred-ai-event-videos
+                </p>
               </div>
             </TabsContent>
 

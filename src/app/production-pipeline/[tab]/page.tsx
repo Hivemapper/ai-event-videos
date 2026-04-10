@@ -6,6 +6,7 @@ import useSWR from "swr";
 import {
   ChevronLeft,
   ChevronRight,
+  Pencil,
   CircleAlert,
   CircleCheck,
   Clock,
@@ -140,8 +141,11 @@ export default function ProductionPipelineTabPage({
               Privacy blur, metadata generation, and S3 upload
             </p>
             {s3Bucket && (
-              <p className="text-xs text-muted-foreground mt-0.5 font-mono">
+              <p className="text-xs text-muted-foreground mt-0.5 font-mono flex items-center gap-1.5">
                 s3://{s3Bucket}/
+                <Link href="/settings?tab=pipeline" className="text-primary hover:text-primary/80">
+                  <Pencil className="w-3 h-3" />
+                </Link>
               </p>
             )}
           </div>
