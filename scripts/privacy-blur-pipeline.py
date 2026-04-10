@@ -227,7 +227,7 @@ def detect_faces(video_path: Path) -> list[dict]:
                     continue
 
                 # Skip oversized detections — real faces in dashcam are small
-                if fw > w * 0.12 or fh > h * 0.12:
+                if fw > w * 0.07 or fh > h * 0.07:
                     continue
 
                 # Skip non-face-shaped detections (faces are roughly square)
@@ -275,8 +275,8 @@ def _get_gdino():
 
 
 PLATE_TEXT_PROMPT = "license plate."
-PLATE_GDINO_BOX_THRESHOLD = 0.3
-PLATE_GDINO_TEXT_THRESHOLD = 0.25
+PLATE_GDINO_BOX_THRESHOLD = 0.35
+PLATE_GDINO_TEXT_THRESHOLD = 0.3
 
 
 def detect_license_plates(video_path: Path) -> list[dict]:
@@ -339,8 +339,8 @@ def detect_license_plates(video_path: Path) -> list[dict]:
                 if pw < 40 or ph < 12:
                     continue
 
-                # Skip oversized detections — plates are small (max ~12% of frame width)
-                if pw > w * 0.12 or ph > h * 0.08:
+                # Skip oversized detections — plates are small
+                if pw > w * 0.10 or ph > h * 0.05:
                     continue
 
                 # Plates are wider than tall — at least 1.3:1 ratio
