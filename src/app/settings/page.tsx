@@ -19,6 +19,7 @@ import {
   Tag,
   Plus,
   X,
+  CloudUpload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +44,9 @@ import {
   getSpeedUnit,
   setSpeedUnit,
   SpeedUnit,
+  getS3Bucket,
+  setS3Bucket,
+  clearS3Bucket,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { LabelDefinition } from "@/types/pipeline";
@@ -72,6 +76,10 @@ function SettingsContent() {
 
   // Speed unit state
   const [speedUnitValue, setSpeedUnitValue] = useState<SpeedUnit>("mph");
+
+  // S3 bucket state
+  const [s3BucketInput, setS3BucketInput] = useState("");
+  const [s3BucketSaved, setS3BucketSaved] = useState(false);
 
   // CLAUDE.md state
   const [claudeMdContent, setClaudeMdContent] = useState("");
@@ -107,6 +115,9 @@ function SettingsContent() {
 
     // Load speed unit
     setSpeedUnitValue(getSpeedUnit());
+
+    // Load S3 bucket
+    setS3BucketInput(getS3Bucket());
   }, []);
 
   // API key handlers
@@ -369,6 +380,44 @@ function SettingsContent() {
                     km/h
                   </Button>
                 </div>
+              </div>
+
+              {/* S3 Bucket */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <CloudUpload className="w-4 h-4" />
+                  Production S3 Bucket
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="hivemapper-blurred-ai-event-videos"
+                    value={s3BucketInput}
+                    onChange={(e) => setS3BucketInput(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={() => {
+                      if (s3BucketInput.trim()) {
+                        setS3Bucket(s3BucketInput.trim());
+                        setS3BucketSaved(true);
+                        setTimeout(() => setS3BucketSaved(false), 2000);
+                      }
+                    }}
+                    disabled={!s3BucketInput.trim()}
+                  >
+                    {s3BucketSaved ? (
+                      <>
+                        <Check className="w-4 h-4 mr-1" />
+                        Saved
+                      </>
+                    ) : (
+                      "Save"
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  S3 destination for blurred videos and metadata. Default: hivemapper-blurred-ai-event-videos
+                </p>
               </div>
 
               {/* Beemaps API Key */}
