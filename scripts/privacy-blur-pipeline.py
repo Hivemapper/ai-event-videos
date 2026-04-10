@@ -77,8 +77,10 @@ PLATE_MIN_CONFIDENCE = 0.15
 PLATE_BOX_PADDING = 0.1
 
 # Privacy blur skip thresholds (speeds in mph)
-SKIP_SPEED_MIN_ANY_MPH = 50      # skip blur if min speed >= 50 mph (any time)
-SKIP_SPEED_MIN_NIGHT_MPH = 40    # skip blur if min speed >= 40 mph at night
+SKIP_SPEED_MIN_ANY_MPH = 50         # skip blur if min speed >= 50 mph (any time)
+SKIP_SPEED_MIN_NIGHT_MPH = 40       # skip blur if min speed >= 40 mph at night
+SKIP_SPEED_MIN_MOTORWAY_MPH = 40    # skip blur if min speed >= 40 mph on motorway
+SKIP_MOTORWAY_ROAD_CLASSES = {"motorway", "trunk"}
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -168,7 +170,7 @@ def get_person_detections(conn, video_id: str) -> list[dict]:
 def get_triage_info(conn, video_id: str) -> dict | None:
     """Get triage data for a video (speed, location, timestamp)."""
     row = conn.execute(
-        """SELECT speed_min, lat, lon, event_timestamp
+        """SELECT speed_min, lat, lon, event_timestamp, road_class
            FROM triage_results WHERE id = ?""",
         (video_id,),
     ).fetchone()
@@ -176,7 +178,7 @@ def get_triage_info(conn, video_id: str) -> dict | None:
         return None
     return {
         "speed_min": row[0], "lat": row[1], "lon": row[2],
-        "event_timestamp": row[3],
+        "event_timestamp": row[3], "road_class": row[4],
     }
 
 
@@ -193,7 +195,12 @@ def check_skip_reason(conn, video_id: str) -> str | None:
     if speed_min_mph >= SKIP_SPEED_MIN_ANY_MPH:
         return f"speed_min={speed_min_mph:.0f}mph >= {SKIP_SPEED_MIN_ANY_MPH}mph"
 
-    # Rule 2: Night-time video with continuous speed >= 40 mph
+    # Rule 2: Motorway/trunk with continuous speed >= 40 mph
+    road_class = triage.get("road_class") or ""
+    if speed_min_mph >= SKIP_SPEED_MIN_MOTORWAY_MPH and road_class in SKIP_MOTORWAY_ROAD_CLASSES:
+        return f"{road_class} + speed_min={speed_min_mph:.0f}mph >= {SKIP_SPEED_MIN_MOTORWAY_MPH}mph"
+
+    # Rule 3: Night-time video with continuous speed >= 40 mph
     if speed_min_mph >= SKIP_SPEED_MIN_NIGHT_MPH:
         lat, lon, ts = triage["lat"], triage["lon"], triage["event_timestamp"]
         if lat is not None and lon is not None and ts:
