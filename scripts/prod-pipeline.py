@@ -7,9 +7,9 @@ on person crops, and re-encodes the video with FFmpeg blur filters.
 Uploads blurred video to S3.
 
 Usage:
-    python3 scripts/privacy-blur-pipeline.py
-    python3 scripts/privacy-blur-pipeline.py --workers 2
-    python3 scripts/privacy-blur-pipeline.py --limit 10   # process 10 videos then stop
+    python3 scripts/prod-pipeline.py
+    python3 scripts/prod-pipeline.py --workers 2
+    python3 scripts/prod-pipeline.py --limit 10   # process 10 videos then stop
 
 Requires:
     pip install mediapipe boto3
