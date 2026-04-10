@@ -12,8 +12,11 @@ import {
   Clock,
   Loader2,
   Play,
+  Server,
   Shield,
   FileJson,
+  Timer,
+  TrendingUp,
   Upload,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -100,6 +103,21 @@ export default function ProductionPipelineTabPage({
   useEffect(() => {
     setOffset(0);
   }, [tab]);
+
+  const { data: stats } = useSWR<{
+    machines: string[];
+    machineCount: number;
+    ratePerHour: number;
+    last10m: number;
+    last30m: number;
+    last60m: number;
+    queued: number;
+    etaHours: number | null;
+    avgSecs: number;
+  }>("/api/production-pipeline/stats", fetcher, {
+    refreshInterval: 10000,
+    revalidateOnFocus: false,
+  });
 
   const url = `/api/production-pipeline?tab=${tab}&limit=${PAGE_SIZE}&offset=${offset}`;
   const { data, isLoading, mutate } = useSWR<{
@@ -213,6 +231,65 @@ export default function ProductionPipelineTabPage({
             );
           })}
         </div>
+
+        {/* Processing stats */}
+        {stats && (
+          <div className="mb-4 grid grid-cols-4 gap-3">
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <Server className={cn("w-5 h-5", stats.machineCount > 0 ? "text-green-600" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Active Servers</p>
+                <p className="text-lg font-semibold tabular-nums">{stats.machineCount}</p>
+                {stats.machines.length > 0 && (
+                  <p className="text-xs text-muted-foreground truncate max-w-[200px]">
+                    {stats.machines.map((m: string) => m.replace("ip-", "")).join(", ")}
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <TrendingUp className={cn("w-5 h-5", stats.ratePerHour > 0 ? "text-blue-600" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Processing Rate</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {stats.ratePerHour.toLocaleString()}<span className="text-sm font-normal text-muted-foreground">/hr</span>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.last10m} last 10m · {stats.last30m} last 30m
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <Timer className={cn("w-5 h-5", stats.etaHours ? "text-orange-500" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Est. Time Remaining</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {stats.etaHours != null && stats.ratePerHour > 0
+                    ? stats.etaHours < 24
+                      ? `${stats.etaHours.toFixed(1)} hrs`
+                      : `${(stats.etaHours / 24).toFixed(1)} days`
+                    : "—"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {stats.queued.toLocaleString()} remaining
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 rounded-lg border px-4 py-3">
+              <Clock className={cn("w-5 h-5", stats.avgSecs > 0 ? "text-purple-500" : "text-muted-foreground")} />
+              <div>
+                <p className="text-xs text-muted-foreground">Avg. Time / Video</p>
+                <p className="text-lg font-semibold tabular-nums">
+                  {stats.avgSecs > 0
+                    ? stats.avgSecs < 60
+                      ? `${stats.avgSecs}s`
+                      : `${Math.floor(stats.avgSecs / 60)}m ${stats.avgSecs % 60}s`
+                    : "—"}
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Table */}
         {isLoading ? (
