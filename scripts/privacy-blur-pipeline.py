@@ -328,23 +328,23 @@ def detect_license_plates(video_path: Path) -> list[dict]:
             for box, score in zip(boxes, scores):
                 x1, y1, x2, y2 = box.cpu().tolist()
 
-                # Skip detections in upper half of frame — too far away
-                if (y1 + y2) / 2 < h * 0.50:
+                # Skip detections in upper 40% of frame — too far away
+                if (y1 + y2) / 2 < h * 0.40:
                     continue
 
                 pw = x2 - x1
                 ph = y2 - y1
 
                 # Skip tiny plates on distant vehicles — not readable anyway
-                if pw < 50 or ph < 15:
+                if pw < 40 or ph < 12:
                     continue
 
-                # Skip oversized detections — plates are small (max ~10% of frame width)
-                if pw > w * 0.10 or ph > h * 0.06:
+                # Skip oversized detections — plates are small (max ~12% of frame width)
+                if pw > w * 0.12 or ph > h * 0.08:
                     continue
 
-                # Plates are rectangular (wider than tall), at least 2:1 ratio
-                if pw <= 0 or pw / ph < 2.0:
+                # Plates are wider than tall — at least 1.3:1 ratio
+                if pw <= 0 or pw / ph < 1.3:
                     continue
 
                 pad_x = pw * PLATE_BOX_PADDING
