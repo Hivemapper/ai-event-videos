@@ -741,13 +741,7 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
         for seg in get_detection_segments(conn, video_id, run_id)
     ]
 
-    # 4. Scene attributes
-    meta["sceneAttributes"] = get_scene_attributes(conn, video_id)
-
-    # 5. Blur status
-    meta["blur"] = get_blur_status(conn, video_id)
-
-    # 6. VRU summary (before summary so generate_summary can use it)
+    # 4. VRU summary (before summary so generate_summary can use it)
     meta["vruLabelsDetected"] = sorted(set(d["label"] for d in meta["detectionSegments"]))
 
     # 7. Summary — use DB if available, otherwise generate from metadata
