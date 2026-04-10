@@ -114,17 +114,27 @@ def video_already_blurred(s3, video_id: str) -> bool:
 
 
 def get_videos_needing_blur(conn, limit: int = 100) -> list[str]:
-    """Get video IDs with completed detection runs but no blur run yet.
-    Includes all videos (with or without person detections) since vehicles
-    may still need plate blurring."""
+    """Get video IDs that need privacy blurring but don't have a blur run yet.
+    Includes:
+    - Videos with completed detection runs (from VRU pipeline)
+    - Signal-triaged videos that were never queued for VRU detection
+    """
     rows = conn.execute(
-        """SELECT DISTINCT dr.video_id
-           FROM detection_runs dr
-           WHERE dr.status = 'completed'
-             AND dr.video_id NOT IN (
-               SELECT video_id FROM blur_runs
-             )
-           ORDER BY dr.completed_at DESC
+        """SELECT video_id FROM (
+               -- Videos with completed VRU detection runs
+               SELECT DISTINCT dr.video_id, dr.completed_at AS sort_date
+               FROM detection_runs dr
+               WHERE dr.status = 'completed'
+                 AND dr.video_id NOT IN (SELECT video_id FROM blur_runs)
+               UNION
+               -- Signal-triaged videos without any detection run
+               SELECT tr.id AS video_id, tr.created_at AS sort_date
+               FROM triage_results tr
+               WHERE tr.triage_result = 'signal'
+                 AND tr.id NOT IN (SELECT video_id FROM blur_runs)
+                 AND tr.id NOT IN (SELECT video_id FROM detection_runs)
+           )
+           ORDER BY sort_date DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
