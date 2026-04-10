@@ -4,12 +4,15 @@ import { useState, useCallback, useEffect, use } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Pencil,
   CircleAlert,
   CircleCheck,
   Clock,
+  ExternalLink,
   Loader2,
   Play,
   Server,
@@ -92,6 +95,7 @@ export default function ProductionPipelineTabPage({
     : "queued";
 
   const [offset, setOffset] = useState(0);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
   const [isEnqueuing, setIsEnqueuing] = useState(false);
   const [enqueueResult, setEnqueueResult] = useState<{ enqueued: number; remaining: number } | null>(null);
   const [s3Bucket, setS3BucketState] = useState("");
@@ -329,6 +333,9 @@ export default function ProductionPipelineTabPage({
                       <th className="text-left font-medium px-4 py-2.5 text-muted-foreground">Machine</th>
                     )}
                     <th className="text-right font-medium px-4 py-2.5 text-muted-foreground">Date</th>
+                    {tab === "completed" && (
+                      <th className="text-left font-medium px-4 py-2.5 text-muted-foreground"></th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -390,7 +397,69 @@ export default function ProductionPipelineTabPage({
                             : (r.event_timestamp as string)
                         )}
                       </td>
+                      {tab === "completed" && (
+                        <td className="px-4 py-2.5">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs text-muted-foreground"
+                            onClick={() => setExpandedRow(expandedRow === String(r.id) ? null : String(r.id))}
+                          >
+                            {expandedRow === String(r.id) ? (
+                              <ChevronUp className="w-3 h-3 mr-1" />
+                            ) : (
+                              <ChevronDown className="w-3 h-3 mr-1" />
+                            )}
+                            Details
+                          </Button>
+                        </td>
+                      )}
                     </tr>
+                    {tab === "completed" && expandedRow === String(r.id) && (
+                      <tr className="bg-muted/30">
+                        <td colSpan={8} className="px-4 py-3">
+                          <div className="space-y-1.5 text-xs font-mono">
+                            {r.s3_video_key && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground w-16">Video:</span>
+                                <a
+                                  href={`https://${s3Bucket}.s3.us-west-2.amazonaws.com/${r.s3_video_key}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary hover:underline flex items-center gap-1"
+                                >
+                                  s3://{s3Bucket}/{String(r.s3_video_key)}
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              </div>
+                            )}
+                            {r.s3_metadata_key && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground w-16">Metadata:</span>
+                                <a
+                                  href={`https://${s3Bucket}.s3.us-west-2.amazonaws.com/${r.s3_metadata_key}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-primary hover:underline flex items-center gap-1"
+                                >
+                                  s3://{s3Bucket}/{String(r.s3_metadata_key)}
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              </div>
+                            )}
+                            {!r.s3_video_key && !r.s3_metadata_key && (
+                              <span className="text-muted-foreground">No S3 files (privacy blur skipped)</span>
+                            )}
+                            {r.skip_reason && (
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground w-16">Skipped:</span>
+                                <span>{String(r.skip_reason)}</span>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
                   ))}
                 </tbody>
               </table>
