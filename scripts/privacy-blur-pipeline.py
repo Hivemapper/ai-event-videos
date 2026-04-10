@@ -78,7 +78,7 @@ PLATE_BOX_PADDING = 0.1
 
 # Privacy blur skip thresholds (speeds in mph)
 SKIP_SPEED_MIN_ANY_MPH = 50         # skip blur if min speed >= 50 mph (any time)
-SKIP_SPEED_MIN_NIGHT_MPH = 40       # skip blur if min speed >= 40 mph at night
+SKIP_SPEED_MIN_NIGHT_MPH = 20       # skip blur if min speed >= 20 mph at night
 SKIP_SPEED_MIN_MOTORWAY_MPH = 40    # skip blur if min speed >= 40 mph on motorway
 SKIP_MOTORWAY_ROAD_CLASSES = {"motorway", "trunk"}
 
