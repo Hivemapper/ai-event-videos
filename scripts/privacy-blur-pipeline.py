@@ -113,19 +113,18 @@ def video_already_blurred(s3, video_id: str) -> bool:
         return False
 
 
-def get_videos_with_persons(conn, limit: int = 100) -> list[str]:
-    """Get video IDs that have person detections but no blurred video yet."""
+def get_videos_needing_blur(conn, limit: int = 100) -> list[str]:
+    """Get video IDs with completed detection runs but no blur run yet.
+    Includes all videos (with or without person detections) since vehicles
+    may still need plate blurring."""
     rows = conn.execute(
-        """SELECT fd.video_id, COUNT(*) as det_count
-           FROM frame_detections fd
-           JOIN detection_runs dr ON dr.id = fd.run_id
-           WHERE fd.label IN ('person', 'construction worker', 'pedestrian')
-             AND dr.status = 'completed'
-             AND fd.video_id NOT IN (
+        """SELECT DISTINCT dr.video_id
+           FROM detection_runs dr
+           WHERE dr.status = 'completed'
+             AND dr.video_id NOT IN (
                SELECT video_id FROM blur_runs
              )
-           GROUP BY fd.video_id
-           ORDER BY det_count DESC
+           ORDER BY dr.completed_at DESC
            LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -191,6 +190,29 @@ def _get_face_model():
     return _face_model
 
 
+# COCO YOLO model for quick pre-scan (persons + vehicles)
+_coco_model = None
+_coco_model_failed = False
+
+PRESCAN_PERSON_LABELS = {"person"}
+PRESCAN_VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle", "bicycle"}
+
+
+def _get_coco_model():
+    global _coco_model, _coco_model_failed
+    if _coco_model_failed:
+        return None
+    if _coco_model is None:
+        try:
+            print(f"    Loading YOLO COCO model for pre-scan...")
+            _coco_model = _YOLO("yolov8n.pt")  # auto-downloads from ultralytics
+        except Exception as e:
+            print(f"    {YELLOW}YOLO COCO model failed: {e}{RESET}")
+            _coco_model_failed = True
+            return None
+    return _coco_model
+
+
 def detect_faces(video_path: Path) -> list[dict]:
     """Run YOLO face detection on sampled frames (every 3rd frame)."""
     model = _get_face_model()
@@ -250,6 +272,52 @@ def detect_faces(video_path: Path) -> list[dict]:
 
     cap.release()
     return face_boxes
+
+
+def quick_yolo_prescan(video_path: Path, num_samples: int = 5) -> tuple:
+    """Quick YOLO scan on sampled frames to check for persons/vehicles.
+    Returns (has_persons, has_vehicles). Takes ~1-2 seconds."""
+    model = _get_coco_model()
+    if model is None:
+        # If model fails, assume both present (safe fallback)
+        return (True, True)
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return (True, True)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        cap.release()
+        return (True, True)
+
+    has_persons = False
+    has_vehicles = False
+
+    # Sample evenly spaced frames
+    step = max(1, total_frames // num_samples)
+    for i in range(0, total_frames, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        results = model.predict(frame, conf=0.3, imgsz=640, verbose=False)
+        for result in results:
+            for box in result.boxes:
+                cls_id = int(box.cls[0])
+                label = model.names.get(cls_id, "")
+                if label in PRESCAN_PERSON_LABELS:
+                    has_persons = True
+                if label in PRESCAN_VEHICLE_LABELS:
+                    has_vehicles = True
+
+        # Early exit if both found
+        if has_persons and has_vehicles:
+            break
+
+    cap.release()
+    return (has_persons, has_vehicles)
 
 
 def _get_gdino():
@@ -481,8 +549,38 @@ def ensure_blur_runs_table(conn):
     conn.commit()
 
 
+_export_metadata_mod = None
+
+
+def _get_export_metadata_module():
+    global _export_metadata_mod
+    if _export_metadata_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "export_metadata", Path(__file__).resolve().parent / "export-metadata.py"
+        )
+        _export_metadata_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_export_metadata_mod)
+    return _export_metadata_mod
+
+
+def generate_and_upload_metadata(s3, conn, api_key: str, video_id: str) -> str | None:
+    """Generate production metadata JSON and upload to S3. Returns S3 URL."""
+    mod = _get_export_metadata_module()
+    build_production_metadata = mod.build_production_metadata
+
+    meta = build_production_metadata(conn, api_key, video_id)
+    json_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
+    key = f"{video_id}.json"
+    s3.put_object(
+        Bucket=S3_BUCKET, Key=key,
+        Body=json_bytes, ContentType="application/json",
+    )
+    return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
+
+
 def process_video(s3, conn, video_id: str) -> bool:
-    """Process a single video: detect faces, blur, upload. Returns True on success."""
+    """Process a single video: pre-scan, detect faces/plates, blur, upload. Returns True on success."""
     video_path = None
     output_path = None
 
@@ -497,16 +595,8 @@ def process_video(s3, conn, video_id: str) -> bool:
         )
         conn.commit()
 
-        # Get person detections
-        detections = get_person_detections(conn, video_id)
-        if not detections:
-            conn.execute(
-                "UPDATE blur_runs SET status='completed', face_count=0, completed_at=? WHERE video_id=?",
-                (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
-            )
-            conn.commit()
-            print(f"    No person detections, skipping")
-            return True
+        # Check if VRU pipeline found persons
+        vru_has_persons = bool(get_person_detections(conn, video_id))
 
         # Fetch event to get video URL
         api_key = load_api_key()
@@ -527,19 +617,15 @@ def process_video(s3, conn, video_id: str) -> bool:
         if not video_path:
             raise RuntimeError("Video download failed")
 
-        # Detect faces on every frame
-        face_boxes = detect_faces(video_path)
-        print(f"    {len(face_boxes)} faces detected")
+        # Quick YOLO pre-scan to check for persons/vehicles
+        has_persons, has_vehicles = quick_yolo_prescan(video_path)
+        print(f"    Pre-scan: persons={has_persons}, vehicles={has_vehicles}")
 
-        # Detect license plates
-        plate_boxes = detect_license_plates(video_path)
-        print(f"    {len(plate_boxes)} license plates detected")
-
-        # Combine all blur regions
-        all_blur_boxes = face_boxes + plate_boxes
-
-        if not all_blur_boxes:
-            # Nothing to blur — mark complete, no upload needed
+        if not has_persons and not has_vehicles:
+            print(f"    No persons or vehicles detected, skipping blur")
+            # Still generate and upload metadata
+            meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
+            print(f"    Metadata uploaded: {meta_url}")
             conn.execute(
                 "UPDATE blur_runs SET status='completed', face_count=0, completed_at=? WHERE video_id=?",
                 (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
@@ -547,15 +633,40 @@ def process_video(s3, conn, video_id: str) -> bool:
             conn.commit()
             return True
 
-        # Blur faces + plates and re-encode
-        output_path = video_path.with_suffix(".blurred.mp4")
-        ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
-        if not ok or not output_path.exists():
-            raise RuntimeError("Blur encoding failed")
+        # Detect faces — only if persons present (from VRU or pre-scan)
+        face_boxes = []
+        if vru_has_persons or has_persons:
+            face_boxes = detect_faces(video_path)
+            print(f"    {len(face_boxes)} faces detected")
+        else:
+            print(f"    Skipping face detection (no persons)")
 
-        # Upload blurred to S3
-        s3_url = upload_to_s3(s3, video_id, output_path)
-        print(f"    Uploaded to S3: {s3_url}")
+        # Detect license plates — only if vehicles present
+        plate_boxes = []
+        if has_vehicles:
+            plate_boxes = detect_license_plates(video_path)
+            print(f"    {len(plate_boxes)} license plates detected")
+        else:
+            print(f"    Skipping plate detection (no vehicles)")
+
+        # Combine all blur regions
+        all_blur_boxes = face_boxes + plate_boxes
+        s3_url = None
+
+        if all_blur_boxes:
+            # Blur faces + plates and re-encode
+            output_path = video_path.with_suffix(".blurred.mp4")
+            ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
+            if not ok or not output_path.exists():
+                raise RuntimeError("Blur encoding failed")
+
+            # Upload blurred video to S3
+            s3_url = upload_to_s3(s3, video_id, output_path)
+            print(f"    Video uploaded: {s3_url}")
+
+        # Generate and upload metadata
+        meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
+        print(f"    Metadata uploaded: {meta_url}")
 
         # Mark complete
         conn.execute(
@@ -618,7 +729,7 @@ def main():
         if args.event_id:
             video_ids = [args.event_id]
         else:
-            video_ids = get_videos_with_persons(conn, limit=10)
+            video_ids = get_videos_needing_blur(conn, limit=10)
         if not video_ids:
             if args.limit > 0 or args.event_id:
                 break
