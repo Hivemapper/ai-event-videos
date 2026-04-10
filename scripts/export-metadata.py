@@ -466,17 +466,6 @@ def get_clip_summary(conn, video_id: str) -> str | None:
         return None
 
 
-def get_timeline(conn, video_id: str) -> list | None:
-    try:
-        row = conn.execute(
-            "SELECT timeline_json FROM clip_timelines WHERE video_id = ? ORDER BY created_at DESC LIMIT 1",
-            (video_id,),
-        ).fetchone()
-        if row and row[0]:
-            return json.loads(row[0])
-    except Exception:
-        pass
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -594,10 +583,7 @@ def build_metadata(conn, api_key: str, video_id: str) -> dict:
     # 10. Summary
     meta["summary"] = get_clip_summary(conn, video_id)
 
-    # 11. Timeline
-    meta["timeline"] = get_timeline(conn, video_id)
-
-    # 12. VRU summary (unique labels detected)
+    # 11. VRU summary (unique labels detected)
     vru_labels = sorted(set(d["label"] for d in meta["detectionSegments"]))
     meta["vruLabelsDetected"] = vru_labels
 
@@ -702,9 +688,8 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
     # 5. Blur status
     meta["blur"] = get_blur_status(conn, video_id)
 
-    # 6. Summary + timeline
+    # 6. Summary
     meta["summary"] = get_clip_summary(conn, video_id)
-    meta["timeline"] = get_timeline(conn, video_id)
 
     # 7. VRU summary
     meta["vruLabelsDetected"] = sorted(set(d["label"] for d in meta["detectionSegments"]))
