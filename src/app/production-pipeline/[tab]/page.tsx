@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, use } from "react";
+import React, { useState, useCallback, useEffect, use } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
@@ -340,8 +340,8 @@ export default function ProductionPipelineTabPage({
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
+                    <React.Fragment key={String(r.id) + String(r.run_id ?? i)}>
                     <tr
-                      key={String(r.id) + String(r.run_id ?? i)}
                       className="border-b last:border-0 hover:bg-muted/20 transition-colors"
                     >
                       <td className="px-4 py-2.5 text-muted-foreground tabular-nums">
@@ -460,6 +460,7 @@ export default function ProductionPipelineTabPage({
                         </td>
                       </tr>
                     )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
