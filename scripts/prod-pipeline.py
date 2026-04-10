@@ -624,11 +624,17 @@ def _get_export_metadata_module():
     global _export_metadata_mod
     if _export_metadata_mod is None:
         import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "export_metadata", Path(__file__).resolve().parent / "export-metadata.py"
-        )
-        _export_metadata_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_export_metadata_mod)
+        mod_path = Path(__file__).resolve().parent / "export-metadata.py"
+        spec = importlib.util.spec_from_file_location("export_metadata", mod_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if not hasattr(mod, "build_production_metadata"):
+            raise RuntimeError(
+                f"export-metadata.py loaded from {mod_path} but "
+                f"build_production_metadata not found. "
+                f"Available: {[a for a in dir(mod) if not a.startswith('_')]}"
+            )
+        _export_metadata_mod = mod
     return _export_metadata_mod
 
 
