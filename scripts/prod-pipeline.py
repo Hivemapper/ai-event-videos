@@ -661,6 +661,90 @@ def generate_and_upload_metadata(s3, conn, api_key: str, video_id: str) -> str |
     return f"https://{S3_BUCKET}.s3.{S3_REGION}.amazonaws.com/{key}"
 
 
+def generate_summary_from_db(conn, video_id: str) -> str | None:
+    """Generate a deterministic summary from triage + detection data in DB.
+    No API calls needed — uses only local DB data."""
+    triage = get_triage_info(conn, video_id)
+    if not triage:
+        return None
+
+    parts = []
+
+    # Event type
+    row = conn.execute(
+        "SELECT event_type FROM triage_results WHERE id = ?", (video_id,)
+    ).fetchone()
+    event_type = row[0] if row else None
+    if event_type:
+        parts.append(event_type.replace("_", " ").capitalize() + " event")
+    else:
+        parts.append("Driving event")
+
+    # Road class
+    road_class = triage.get("road_class")
+    if road_class:
+        parts.append(f"on a {road_class.replace('_', ' ')} road")
+
+    # Country (from triage lat/lon)
+    lat, lon = triage.get("lat"), triage.get("lon")
+    if lat is not None and lon is not None:
+        try:
+            mod = _get_export_metadata_module()
+            country = mod.get_country_cached(lat, lon)
+            if country:
+                parts[-1] = parts[-1] + f" in {country}" if len(parts) > 1 else f"in {country}"
+        except Exception:
+            pass
+
+    # Speed
+    speed_min = triage.get("speed_min")
+    row2 = conn.execute(
+        "SELECT speed_max FROM triage_results WHERE id = ?", (video_id,)
+    ).fetchone()
+    speed_max = row2[0] if row2 else None
+    if speed_min is not None and speed_max is not None:
+        if abs(speed_max - speed_min) < 3:
+            parts.append(f"at {round(speed_min)} mph")
+        else:
+            parts.append(f"at {round(speed_min)}-{round(speed_max)} mph")
+
+    # Time of day
+    ts = triage.get("event_timestamp")
+    if lat is not None and lon is not None and ts:
+        try:
+            mod = _get_export_metadata_module()
+            tod_info = mod.get_time_of_day(ts, lat, lon)
+            if tod_info:
+                tod = tod_info.get("timeOfDay")
+                if tod:
+                    parts.append(f"during {tod.lower()}")
+        except Exception:
+            pass
+
+    # VRU detections
+    try:
+        det_rows = conn.execute(
+            """SELECT label, COUNT(*) as cnt
+               FROM frame_detections fd
+               JOIN detection_runs dr ON dr.id = fd.run_id
+               WHERE fd.video_id = ? AND dr.status = 'completed'
+               GROUP BY label""",
+            (video_id,),
+        ).fetchall()
+        if det_rows:
+            det_parts = []
+            for dr in det_rows:
+                label, cnt = dr[0], dr[1]
+                # Summarize by unique label presence, not frame count
+                det_parts.append(label)
+            if det_parts:
+                parts.append(f"with {', '.join(det_parts)} detected")
+    except Exception:
+        pass
+
+    return " ".join(parts).rstrip(".") + "."
+
+
 def process_video(s3, conn, video_id: str) -> bool:
     """Process a single video: pre-scan, detect faces/plates, blur, upload. Returns True on success."""
     video_path = None
@@ -678,7 +762,22 @@ def process_video(s3, conn, video_id: str) -> bool:
         )
         conn.commit()
 
-        # Check speed/time-of-day skip criteria (before downloading video)
+        # Step 1: Generate summary if missing (from DB data only, no API call)
+        existing = conn.execute(
+            "SELECT 1 FROM clip_summaries WHERE video_id = ?", (video_id,)
+        ).fetchone()
+        if not existing:
+            summary_text = generate_summary_from_db(conn, video_id)
+            if summary_text:
+                conn.execute(
+                    """INSERT INTO clip_summaries (video_id, summary) VALUES (?, ?)
+                       ON CONFLICT(video_id) DO UPDATE SET summary=?, updated_at=datetime('now')""",
+                    (video_id, summary_text, summary_text),
+                )
+                conn.commit()
+                print(f"    Summary: {summary_text}")
+
+        # Step 2: Check speed/time-of-day skip criteria (before downloading video)
         skip_reason = check_skip_reason(conn, video_id)
         if skip_reason:
             print(f"    Skipping blur: {skip_reason}")
