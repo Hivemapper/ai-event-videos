@@ -311,8 +311,54 @@ export function FilterBar({
               </DialogTitle>
             </DialogHeader>
 
+            {/* Location search — full width, horizontal */}
+            <div className="flex items-center gap-3 py-3 border-b">
+              <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide shrink-0">
+                <MapPin className="w-4 h-4" />
+                Location
+              </label>
+              <div className="relative flex-1">
+                <Input
+                  type="text"
+                  placeholder="lat,lon"
+                  value={draftCoordsInput}
+                  onChange={(e) => handleCoordsInputChange(e.target.value)}
+                  className={cn(
+                    draftCoordinates && "pr-8 border-primary"
+                  )}
+                />
+                {draftCoordinates && (
+                  <button
+                    type="button"
+                    onClick={handleClearCoordinates}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-full hover:bg-muted"
+                  >
+                    <X className="w-4 h-4 text-muted-foreground" />
+                  </button>
+                )}
+              </div>
+              <Select
+                value={draftRadius.toString()}
+                onValueChange={(value) => setDraftRadius(parseInt(value))}
+              >
+                <SelectTrigger className="w-32 shrink-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {RADIUS_OPTIONS.map((option) => (
+                    <SelectItem
+                      key={option.value}
+                      value={option.value.toString()}
+                    >
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             <div className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] gap-6 py-4">
-              {/* Column 1: Date Range + Coordinate Search */}
+              {/* Column 1: Date Range */}
               <div className="space-y-6">
                 {/* Date range */}
                 <div className="space-y-3">
@@ -366,53 +412,6 @@ export function FilterBar({
                   </div>
                 </div>
 
-                {/* Coordinate search */}
-                <div className="space-y-3">
-                  <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide">
-                    <MapPin className="w-4 h-4" />
-                    Location
-                  </label>
-                  <div className="space-y-2">
-                    <div className="relative">
-                      <Input
-                        type="text"
-                        placeholder="lat,lon"
-                        value={draftCoordsInput}
-                        onChange={(e) => handleCoordsInputChange(e.target.value)}
-                        className={cn(
-                          draftCoordinates && "pr-8 border-primary"
-                        )}
-                      />
-                      {draftCoordinates && (
-                        <button
-                          type="button"
-                          onClick={handleClearCoordinates}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-full hover:bg-muted"
-                        >
-                          <X className="w-4 h-4 text-muted-foreground" />
-                        </button>
-                      )}
-                    </div>
-                    <Select
-                      value={draftRadius.toString()}
-                      onValueChange={(value) => setDraftRadius(parseInt(value))}
-                    >
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {RADIUS_OPTIONS.map((option) => (
-                          <SelectItem
-                            key={option.value}
-                            value={option.value.toString()}
-                          >
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
               </div>
 
               {/* Column 2: Event Types */}

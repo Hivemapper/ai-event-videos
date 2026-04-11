@@ -6,6 +6,7 @@ import {
   getDetectionSegmentsByRunId,
   getSceneAttributesByRunId,
   getTimelineByRunId,
+  deleteVideoDetectionSegment,
 } from "@/lib/pipeline-store";
 
 export async function GET(
@@ -36,4 +37,21 @@ export async function GET(
   ]);
 
   return NextResponse.json({ detections, timestamps, models, segments, sceneAttributes, timeline });
+}
+
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ videoId: string }> }
+) {
+  const { videoId } = await params;
+  const { searchParams } = new URL(request.url);
+  const label = searchParams.get("label");
+  const startMs = searchParams.get("startMs");
+  const endMs = searchParams.get("endMs");
+  if (!label || startMs === null || endMs === null) {
+    return NextResponse.json({ error: "label, startMs, and endMs are required" }, { status: 400 });
+  }
+  const runId = searchParams.get("runId") ?? undefined;
+  const deleted = await deleteVideoDetectionSegment(videoId, label, parseInt(startMs, 10), parseInt(endMs, 10), runId);
+  return NextResponse.json({ deleted });
 }

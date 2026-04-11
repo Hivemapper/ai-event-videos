@@ -26,6 +26,9 @@ import type {
   PipelineRunRecord,
   PipelineRunStatus,
   PipelineRunTotals,
+  ProductionRun,
+  ProductionRunStatus,
+  ProductionStepStatus,
   VideoDetectionSegment,
   VideoPipelineState,
   VideoPipelineStatus,
@@ -811,5 +814,196 @@ export async function setDetectionRunWorkerPid(
   await db.run(
     `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`,
     [pid, id]
+  );
+}
+
+export async function deleteVideoDetectionSegment(
+  videoId: string,
+  label: string,
+  startMs: number,
+  endMs: number,
+  runId?: string
+): Promise<number> {
+  const db = await getDb();
+  const params: unknown[] = [videoId, label, startMs, endMs];
+  let runClause = "";
+  if (runId) {
+    runClause = " AND run_id = ?";
+    params.push(runId);
+  }
+  await db.run(
+    `DELETE FROM frame_detections WHERE video_id = ? AND label = ? AND frame_ms >= ? AND frame_ms <= ?${runClause}`,
+    params
+  );
+  const result = await db.run(
+    `DELETE FROM video_detection_segments WHERE video_id = ? AND label = ? AND start_ms = ? AND end_ms = ?${runClause}`,
+    [videoId, label, startMs, endMs, ...(runId ? [runId] : [])]
+  );
+  return result.changes ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Production Runs
+// ---------------------------------------------------------------------------
+
+interface DbProductionRunRow {
+  id: string;
+  video_id: string;
+  status: ProductionRunStatus;
+  privacy_status: ProductionStepStatus;
+  metadata_status: ProductionStepStatus;
+  upload_status: ProductionStepStatus;
+  s3_video_key: string | null;
+  s3_metadata_key: string | null;
+  worker_pid: number | null;
+  machine_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  last_heartbeat_at: string | null;
+  last_error: string | null;
+  created_at: string;
+}
+
+function mapProductionRun(row: DbProductionRunRow): ProductionRun {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    status: row.status,
+    privacyStatus: row.privacy_status,
+    metadataStatus: row.metadata_status,
+    uploadStatus: row.upload_status,
+    s3VideoKey: row.s3_video_key,
+    s3MetadataKey: row.s3_metadata_key,
+    workerPid: row.worker_pid,
+    machineId: row.machine_id,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+  };
+}
+
+export async function createProductionRun(
+  videoId: string
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const id = randomUUID();
+  const result = await db.run(
+    `INSERT OR IGNORE INTO production_runs (id, video_id, created_at)
+     VALUES (?, ?, datetime('now'))`,
+    [id, videoId]
+  );
+  if (result.changes === 0) return null;
+  return (await getProductionRun(id))!;
+}
+
+export async function getProductionRun(
+  id: string
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM production_runs WHERE id = ?",
+    [id]
+  );
+  const row = result.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function getProductionRunByVideoId(
+  videoId: string
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM production_runs WHERE video_id = ?",
+    [videoId]
+  );
+  const row = result.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function claimNextProductionRun(
+  machineId: string,
+  workerPid: number
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+
+  // Atomic claim: UPDATE with subquery + status guard
+  const result = await db.run(
+    `UPDATE production_runs
+     SET status = 'processing',
+         machine_id = ?,
+         worker_pid = ?,
+         started_at = datetime('now'),
+         last_heartbeat_at = datetime('now')
+     WHERE id = (
+       SELECT id FROM production_runs
+       WHERE status = 'queued'
+       ORDER BY created_at ASC
+       LIMIT 1
+     ) AND status = 'queued'`,
+    [machineId, workerPid]
+  );
+
+  if (result.changes === 0) return null;
+
+  // Fetch the row we just claimed
+  const claimed = await db.query(
+    `SELECT * FROM production_runs
+     WHERE machine_id = ? AND worker_pid = ? AND status = 'processing'
+     ORDER BY started_at DESC LIMIT 1`,
+    [machineId, workerPid]
+  );
+  const row = claimed.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function updateProductionRunStatus(
+  id: string,
+  status: ProductionRunStatus,
+  extra?: { lastError?: string; s3VideoKey?: string; s3MetadataKey?: string }
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `UPDATE production_runs
+     SET status = ?,
+         last_error = COALESCE(?, last_error),
+         s3_video_key = COALESCE(?, s3_video_key),
+         s3_metadata_key = COALESCE(?, s3_metadata_key),
+         started_at = CASE WHEN ? = 'processing' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+         completed_at = CASE WHEN ? IN ('completed', 'failed') THEN datetime('now') ELSE completed_at END
+     WHERE id = ?`,
+    [
+      status,
+      extra?.lastError ?? null,
+      extra?.s3VideoKey ?? null,
+      extra?.s3MetadataKey ?? null,
+      status,
+      status,
+      id,
+    ]
+  );
+}
+
+export async function updateProductionStepStatus(
+  id: string,
+  step: "privacy" | "metadata" | "upload",
+  stepStatus: ProductionStepStatus
+): Promise<void> {
+  const db = await getDb();
+  const column = `${step}_status`;
+  await db.run(
+    `UPDATE production_runs SET ${column} = ? WHERE id = ?`,
+    [stepStatus, id]
+  );
+}
+
+export async function updateProductionRunHeartbeat(
+  id: string
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `UPDATE production_runs SET last_heartbeat_at = datetime('now') WHERE id = ?`,
+    [id]
   );
 }

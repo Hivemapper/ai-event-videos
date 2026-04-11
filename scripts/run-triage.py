@@ -28,6 +28,43 @@ import requests
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 EVENT_CACHE_DIR = PROJECT_ROOT / "data" / "event-cache"
+GEO_CACHE_PATH = PROJECT_ROOT / "data" / "geo-cache.json"
+CITY_CACHE_PATH = PROJECT_ROOT / "data" / "city-cache.json"
+
+_GEO_CACHE: dict[str, str] | None = None
+_CITY_CACHE: dict[str, str] | None = None
+
+
+class _TursoCursor:
+    def __init__(self, result_set):
+        self._rows = result_set.rows if result_set else []
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _TursoDb:
+    """HTTP wrapper around libsql_client with a sqlite3-like interface."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def execute(self, sql, params=None):
+        import libsql_client
+        if params:
+            rs = self._client.execute(libsql_client.Statement(sql, list(params)))
+        else:
+            rs = self._client.execute(sql)
+        return _TursoCursor(rs)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        self._client.close()
 
 
 def get_db_conn():
@@ -46,6 +83,17 @@ def get_db_conn():
                     turso_token = line.split("=", 1)[1].strip()
 
     if turso_url and turso_token:
+        # Prefer HTTP mode (no local replica file, avoids WAL corruption on crash)
+        try:
+            import libsql_client
+            http_url = turso_url.replace("libsql://", "https://")
+            client = libsql_client.create_client_sync(url=http_url, auth_token=turso_token)
+            conn = _TursoDb(client)
+            print(f"  {CYAN}Connected to Turso HTTP: {turso_url.split('//')[1][:40]}…{RESET}")
+            return conn
+        except ImportError:
+            pass
+        # Fall back to embedded replica
         import libsql_experimental as libsql  # type: ignore
         conn = libsql.connect("local.db", sync_url=turso_url, auth_token=turso_token)
         conn.sync()
@@ -61,6 +109,12 @@ def get_db_conn():
 MS_TO_MPH = 2.237
 G = 9.81  # m/s²
 MIN_VIDEO_SIZE = 500 * 1024  # 500KB — files at or below this aren't real videos
+
+# US-sanctioned countries — events from these are rejected at triage
+SANCTIONED_COUNTRIES = {
+    "Cuba", "Iran", "North Korea", "Belarus", "Russia",
+    "Yemen", "Nicaragua", "Libya", "Crimea",
+}
 
 # Event types that imply speed change
 SPEED_CHANGE_TYPES = {
@@ -123,7 +177,7 @@ def query_road_class(lat: float, lon: float, token: str) -> str | None:
     try:
         url = (
             f"https://api.mapbox.com/v4/mapbox.mapbox-streets-v8/tilequery/"
-            f"{lon},{lat}.json?layers=road&radius=15&limit=5&access_token={token}"
+            f"{lon},{lat}.json?layers=road&radius=25&limit=5&access_token={token}"
         )
         resp = requests.get(url, timeout=10)
         if not resp.ok:
@@ -149,6 +203,49 @@ def query_road_class(lat: float, lon: float, token: str) -> str | None:
         return best_class
     except Exception:
         return None
+
+
+def lookup_location(lat: float, lon: float, token: str | None) -> tuple[str | None, str | None]:
+    """Look up country and city from caches, with Mapbox reverse geocode fallback."""
+    global _GEO_CACHE, _CITY_CACHE
+    if _GEO_CACHE is None:
+        _GEO_CACHE = json.load(open(GEO_CACHE_PATH)) if GEO_CACHE_PATH.exists() else {}
+    if _CITY_CACHE is None:
+        _CITY_CACHE = json.load(open(CITY_CACHE_PATH)) if CITY_CACHE_PATH.exists() else {}
+
+    key = f"{round(lat, 2)},{round(lon, 2)}"
+    country = _GEO_CACHE.get(key)
+    if country == "Unknown":
+        country = None
+    city = _CITY_CACHE.get(key)
+
+    # If both cached, return early
+    if country and city:
+        return country, city
+
+    # Mapbox reverse geocode fallback
+    if token:
+        try:
+            resp = requests.get(
+                f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
+                f"?types=place,country&access_token={token}",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                for f in resp.json().get("features", []):
+                    place_type = f.get("place_type", [])
+                    if "country" in place_type and not country:
+                        country = f.get("place_name") or f.get("text")
+                        if country:
+                            _GEO_CACHE[key] = country
+                    elif "place" in place_type and not city:
+                        city = f.get("text") or f.get("place_name")
+                        if city:
+                            _CITY_CACHE[key] = city
+        except Exception:
+            pass
+
+    return country, city
 
 
 def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -597,6 +694,8 @@ def ensure_table(conn):
         ("lat", "REAL"),
         ("lon", "REAL"),
         ("road_class", "TEXT"),
+        ("country", "TEXT"),
+        ("city", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE triage_results ADD COLUMN {col} {defn}")
@@ -676,7 +775,9 @@ def main():
         counts[result] += 1
 
         # Color code
-        if result in ("missing_video", "missing_metadata"):
+        if result == "sanctioned":
+            color = RED
+        elif result in ("missing_video", "missing_metadata"):
             color = BLUE
         elif result == "ghost":
             color = RED
@@ -702,10 +803,28 @@ def main():
         if mapbox_token and evt_lat and evt_lon:
             road_class = query_road_class(evt_lat, evt_lon, mapbox_token)
 
+        # Look up country and city
+        country = None
+        city = None
+        if evt_lat and evt_lon:
+            country, city = lookup_location(evt_lat, evt_lon, mapbox_token)
+
+        # Reject events from sanctioned countries
+        if country and country in SANCTIONED_COUNTRIES:
+            result = "sanctioned"
+            rules = details.get("rules", [])
+            rules.append(f"sanctioned_country:{country}")
+            details["rules"] = rules
+
         road_info = f" {road_class}" if road_class else ""
+        location_info = ""
+        if city and country:
+            location_info = f" [{city}, {country}]"
+        elif country:
+            location_info = f" [{country}]"
         print(
             f"  [{i+1}/{len(to_triage)}] {color}{result:>14}{RESET}  "
-            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}{road_info}  "
+            f"{etype:<25} {eid[:16]}…{speed_info}{size_info}{road_info}{location_info}  "
             f"{DIM}{', '.join(rules)}{RESET}"
         )
 
@@ -714,8 +833,8 @@ def main():
             """INSERT OR REPLACE INTO triage_results
                (id, event_type, triage_result, rules_triggered,
                 speed_min, speed_max, speed_mean, speed_stddev,
-                gnss_displacement_m, video_size, event_timestamp, lat, lon, road_class, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+                gnss_displacement_m, video_size, event_timestamp, lat, lon, road_class, country, city, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
             (
                 eid, etype, result, json.dumps(rules),
                 details.get("speed_min"), details.get("speed_max"),
@@ -723,7 +842,7 @@ def main():
                 details.get("gnss_displacement_m"),
                 details.get("video_size"),
                 event_timestamp,
-                evt_lat, evt_lon, road_class,
+                evt_lat, evt_lon, road_class, country, city,
             ),
         )
         if (i + 1) % 10 == 0:

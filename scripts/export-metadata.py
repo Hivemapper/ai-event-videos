@@ -326,6 +326,38 @@ def get_country_cached(lat: float, lon: float) -> str | None:
     return None
 
 
+_CITY_CACHE: dict[str, str | None] = {}
+
+
+def get_city_cached(lat: float, lon: float) -> str | None:
+    """Reverse geocode city/place name via Mapbox."""
+    key = f"{round(lat, 2)},{round(lon, 2)}"
+    if key in _CITY_CACHE:
+        return _CITY_CACHE[key]
+
+    token = _load_env_var("MAPBOX_TOKEN") or _load_env_var("NEXT_PUBLIC_MAPBOX_TOKEN")
+    if not token:
+        return None
+
+    try:
+        resp = requests.get(
+            f"https://api.mapbox.com/geocoding/v5/mapbox.places/{lon},{lat}.json"
+            f"?types=place&limit=1&access_token={token}",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            features = resp.json().get("features", [])
+            if features:
+                city = features[0].get("text")
+                _CITY_CACHE[key] = city
+                return city
+    except Exception:
+        pass
+
+    _CITY_CACHE[key] = None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # DB queries
 # ---------------------------------------------------------------------------
@@ -483,10 +515,12 @@ def generate_summary(meta: dict) -> str:
     if road_class:
         parts.append(f"on a {road_class.replace('_', ' ')} road")
 
-    # Country
+    # Location (city, country)
+    city = event_block.get("city")
     country = event_block.get("country")
-    if country:
-        parts[-1] = parts[-1] + f" in {country}" if len(parts) > 1 else f"in {country}"
+    location_str = ", ".join(filter(None, [city, country]))
+    if location_str:
+        parts[-1] = parts[-1] + f" in {location_str}" if len(parts) > 1 else f"in {location_str}"
 
     # Speed
     speed_min = event_block.get("speedMin")
@@ -728,6 +762,12 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
     else:
         event_block["country"] = None
 
+    # City
+    if lat and lon:
+        event_block["city"] = get_city_cached(lat, lon)
+    else:
+        event_block["city"] = None
+
     meta["event"] = event_block
 
     # 2. Detection run (internal — not included in output, but needed for run_id)
@@ -744,7 +784,7 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
     # 4. VRU summary (before summary so generate_summary can use it)
     meta["vruLabelsDetected"] = sorted(set(d["label"] for d in meta["detectionSegments"]))
 
-    # 7. Summary — use DB if available, otherwise generate from metadata
+    # 5. Summary — placed after country/city so generate_summary can use them
     meta["summary"] = get_clip_summary(conn, video_id) or generate_summary(meta)
 
     # 8. Export timestamp

@@ -205,6 +205,27 @@ const SCHEMA_SQL = `
     road_class TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS production_runs (
+    id TEXT PRIMARY KEY,
+    video_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'queued',
+    privacy_status TEXT NOT NULL DEFAULT 'pending',
+    metadata_status TEXT NOT NULL DEFAULT 'pending',
+    upload_status TEXT NOT NULL DEFAULT 'pending',
+    s3_video_key TEXT,
+    s3_metadata_key TEXT,
+    worker_pid INTEGER,
+    machine_id TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    last_heartbeat_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_production_runs_status
+    ON production_runs (status);
 `;
 
 // ---------------------------------------------------------------------------

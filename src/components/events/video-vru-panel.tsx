@@ -49,6 +49,7 @@ interface VideoVruPanelProps {
   sceneAttributes?: Record<string, { value: string; confidence: number | null }>;
   logs?: string;
   onSeek: (time: number) => void;
+  onRemoveSegment?: (label: string, startMs: number, endMs: number) => void;
 }
 
 function parseTimestamp(dateStr: string): number {
@@ -103,6 +104,7 @@ export function VideoVruPanel({
   sceneAttributes,
   logs,
   onSeek,
+  onRemoveSegment,
 }: VideoVruPanelProps) {
   const [selectedRunModel, setSelectedRunModel] = useState(
     AVAILABLE_DETECTION_MODELS[0].id
@@ -481,15 +483,26 @@ export function VideoVruPanel({
                           {label}
                         </Badge>
                         {segs.map((seg) => (
-                          <button
-                            key={`${seg.startMs}-${seg.endMs}`}
-                            type="button"
-                            className="text-xs px-1.5 py-0.5 rounded bg-muted hover:bg-accent transition-colors tabular-nums"
-                            onClick={() => onSeek(seg.startMs / 1000)}
-                            title={`Confidence: ${Math.round(seg.maxConfidence * 100)}%`}
-                          >
-                            {fmtTime(seg.startMs)}-{fmtTime(seg.endMs)}
-                          </button>
+                          <span key={`${seg.startMs}-${seg.endMs}`} className="inline-flex items-center gap-0.5">
+                            <button
+                              type="button"
+                              className="text-xs px-1.5 py-0.5 rounded-l bg-muted hover:bg-accent transition-colors tabular-nums"
+                              onClick={() => onSeek(seg.startMs / 1000)}
+                              title={`Confidence: ${Math.round(seg.maxConfidence * 100)}%`}
+                            >
+                              {fmtTime(seg.startMs)}-{fmtTime(seg.endMs)} ({Math.round(seg.maxConfidence * 100)}%)
+                            </button>
+                            {onRemoveSegment && (
+                              <button
+                                type="button"
+                                className="text-xs px-1 py-0.5 rounded-r bg-muted text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                                onClick={() => onRemoveSegment(label, seg.startMs, seg.endMs)}
+                                title={`Remove ${label} ${fmtTime(seg.startMs)}-${fmtTime(seg.endMs)}`}
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            )}
+                          </span>
                         ))}
                       </div>
                     ))}

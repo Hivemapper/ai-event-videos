@@ -754,21 +754,6 @@ export default function EventDetailPage({
               </div>
             </div>
 
-            <ClipSummary
-              videoId={id}
-              event={event}
-              countryName={countryName}
-              roadType={roadType?.classLabel ?? null}
-              roadName={roadType?.name ?? null}
-              timeOfDay={sunInfo?.timeOfDay ?? "Day"}
-              duration={videoDuration}
-              detections={detectionSummary}
-              speedLimit={nearestSpeedLimit}
-              exceedsSpeedLimit={exceedsSpeedLimit}
-              weather={sceneAttributes?.weather?.value ?? null}
-              timeline={timeline}
-            />
-
             <VideoVruPanel
               videoId={id}
               currentTime={videoCurrentTime}
@@ -787,11 +772,32 @@ export default function EventDetailPage({
               segments={detectionSegments}
               sceneAttributes={sceneAttributes}
               logs={logs}
+              onRemoveSegment={async (label, startMs, endMs) => {
+                const params = new URLSearchParams({ label, startMs: String(startMs), endMs: String(endMs) });
+                if (selectedRunId) params.set("runId", selectedRunId);
+                await fetch(`/api/videos/${id}/detections?${params}`, { method: "DELETE" });
+                mutateDetections();
+              }}
               onSeek={(time) => {
                 if (videoRef.current) {
                   videoRef.current.currentTime = time;
                 }
               }}
+            />
+
+            <ClipSummary
+              videoId={id}
+              event={event}
+              countryName={countryName}
+              roadType={roadType?.classLabel ?? null}
+              roadName={roadType?.name ?? null}
+              timeOfDay={sunInfo?.timeOfDay ?? "Day"}
+              duration={videoDuration}
+              detections={detectionSummary}
+              speedLimit={nearestSpeedLimit}
+              exceedsSpeedLimit={exceedsSpeedLimit}
+              weather={sceneAttributes?.weather?.value ?? null}
+              timeline={timeline}
             />
 
             {/* Speed Profile */}
@@ -872,6 +878,7 @@ export default function EventDetailPage({
                     path={event.gnssData}
                     currentTime={videoCurrentTime}
                     videoDuration={videoDuration}
+                    detectionSegments={detectionSegments}
                     className={videoContainerHeight ? "h-full" : "aspect-video"}
                     onSeek={(time) => {
                       if (videoRef.current) videoRef.current.currentTime = time;

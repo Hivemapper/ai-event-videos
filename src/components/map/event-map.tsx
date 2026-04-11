@@ -6,6 +6,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { getMapboxToken, getApiKey } from "@/lib/api";
 import { DetectedActor } from "@/types/actors";
 import { ActorTrack } from "@/types/actors";
+import { VideoDetectionSegment } from "@/types/pipeline";
 import { calculateBearing } from "@/lib/geo-projection";
 import { MAKI_ICONS, getActorIcon } from "@/lib/actor-icons";
 
@@ -52,6 +53,7 @@ interface EventMapProps {
   showMapFeatures?: boolean;
   detectedActors?: DetectedActor[];
   actorTracks?: ActorTrack[];
+  detectionSegments?: VideoDetectionSegment[];
   onSeek?: (time: number) => void;
 }
 
@@ -109,7 +111,7 @@ function interpolatePathPosition(path: PathPoint[], fracIdx: number): [number, n
   ];
 }
 
-export function EventMap({ location, path, currentTime, videoDuration, className = "", style, showMapFeatures = true, detectedActors, actorTracks, onSeek }: EventMapProps) {
+export function EventMap({ location, path, currentTime, videoDuration, className = "", style, showMapFeatures = true, detectedActors, actorTracks, detectionSegments, onSeek }: EventMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const movingMarkerRef = useRef<mapboxgl.Marker | null>(null);
@@ -620,6 +622,86 @@ export function EventMap({ location, path, currentTime, videoDuration, className
       }
     }
   }, [currentTime, actorTracks, mapLoaded]);
+
+  // Add detection segment dots on the map
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance || !mapLoaded || !detectionSegments || detectionSegments.length === 0 || !path || path.length < 2 || !videoDuration) return;
+
+    const markers: mapboxgl.Marker[] = [];
+
+    detectionSegments.forEach((seg) => {
+      // Map segment midpoint time to a position on the GNSS path
+      const midMs = (seg.startMs + seg.endMs) / 2;
+      const midSec = midMs / 1000;
+      const progress = Math.max(0, Math.min(1, midSec / videoDuration));
+      const fracIdx = progress * (path.length - 1);
+      const [lon, lat] = interpolatePathPosition(path, fracIdx);
+
+      const { path: iconPath, color } = getActorIcon(seg.label);
+
+      const markerEl = document.createElement("div");
+      markerEl.className = "detection-segment-marker";
+      markerEl.style.cursor = "pointer";
+      markerEl.innerHTML = `
+        <div style="
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          filter: drop-shadow(0 1px 3px rgba(0,0,0,0.4));
+        ">
+          <div style="
+            width: 26px;
+            height: 26px;
+            background: ${color};
+            border: 2px solid white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 15 15" style="fill: white;">
+              <path d="${iconPath}"/>
+            </svg>
+          </div>
+        </div>
+      `;
+
+      const marker = new mapboxgl.Marker({ element: markerEl, anchor: "center" })
+        .setLngLat([lon, lat])
+        .addTo(mapInstance);
+
+      // Click to seek video to segment start
+      markerEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (onSeekRef.current) {
+          onSeekRef.current(seg.startMs / 1000);
+        }
+      });
+
+      // Tooltip on hover
+      const popup = new mapboxgl.Popup({
+        offset: 16,
+        closeButton: false,
+        closeOnClick: false,
+      }).setHTML(`
+        <div style="font-size: 12px;">
+          <strong>${seg.label}</strong>
+          <div style="color: #666;">${(seg.startMs / 1000).toFixed(1)}s – ${(seg.endMs / 1000).toFixed(1)}s</div>
+          <div style="color: #666;">confidence: ${(seg.maxConfidence * 100).toFixed(0)}%</div>
+        </div>
+      `);
+
+      markerEl.addEventListener("mouseenter", () => marker.getPopup() ? marker.togglePopup() : marker.setPopup(popup).togglePopup());
+      markerEl.addEventListener("mouseleave", () => { if (marker.getPopup()?.isOpen()) marker.togglePopup(); });
+
+      markers.push(marker);
+    });
+
+    return () => {
+      markers.forEach((m) => m.remove());
+    };
+  }, [detectionSegments, path, videoDuration, mapLoaded]);
 
   // Calculate smoothed bearing by looking ahead a few points
   const calculateSmoothedBearing = (pathData: PathPoint[], currentIndex: number): number => {
