@@ -23,18 +23,55 @@ ROAD_CLASS_RANK = {
 }
 
 
-def load_mapbox_token() -> str:
-    token = os.environ.get("NEXT_PUBLIC_MAPBOX_TOKEN")
-    if token:
-        return token
+def _load_env_var(name: str) -> str | None:
+    val = os.environ.get(name)
+    if val:
+        return val
     env_local = PROJECT_ROOT / ".env.local"
     if env_local.exists():
         for line in env_local.read_text().splitlines():
-            if line.startswith("NEXT_PUBLIC_MAPBOX_TOKEN="):
-                val = line.split("=", 1)[1].strip()
-                if val and val != "your_mapbox_token_here":
-                    return val
-    raise RuntimeError("NEXT_PUBLIC_MAPBOX_TOKEN not found")
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+def get_db_conn():
+    """Connect to Turso if configured, otherwise local SQLite."""
+    turso_url = _load_env_var("TURSO_DATABASE_URL")
+    turso_token = _load_env_var("TURSO_AUTH_TOKEN")
+
+    if turso_url and turso_token:
+        try:
+            import libsql_experimental as libsql
+            http_url = turso_url.replace("libsql://", "https://")
+            conn = libsql.connect("backfill-road-class.db", sync_url=http_url, auth_token=turso_token)
+            conn.sync()
+            print(f"  DB: Turso (embedded replica)")
+            return conn, True
+        except ImportError:
+            pass
+        try:
+            import libsql_client
+            http_url = turso_url.replace("libsql://", "https://")
+            conn = libsql_client.create_client_sync(url=http_url, auth_token=turso_token)
+            print(f"  DB: Turso (HTTP)")
+            return conn, True
+        except ImportError:
+            print("Warning: No libsql library found, falling back to local SQLite")
+
+    print(f"  DB: Local SQLite ({DB_PATH})")
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn, False
+
+
+def load_mapbox_token() -> str:
+    for var in ("MAPBOX_TOKEN", "NEXT_PUBLIC_MAPBOX_TOKEN"):
+        token = _load_env_var(var)
+        if token and token != "your_mapbox_token_here":
+            return token
+    raise RuntimeError("MAPBOX_TOKEN / NEXT_PUBLIC_MAPBOX_TOKEN not found")
 
 
 def query_road_class(lat: float, lon: float, token: str) -> str | None:
@@ -69,15 +106,14 @@ def query_road_class(lat: float, lon: float, token: str) -> str | None:
 
 def main():
     token = load_mapbox_token()
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn, is_turso = get_db_conn()
 
-    # Add column if missing
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
-    if "road_class" not in cols:
-        conn.execute("ALTER TABLE triage_results ADD COLUMN road_class TEXT")
-        conn.commit()
+    # Add column if missing (skip for Turso — column already exists)
+    if not is_turso:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
+        if "road_class" not in cols:
+            conn.execute("ALTER TABLE triage_results ADD COLUMN road_class TEXT")
+            conn.commit()
 
     rows = conn.execute(
         """SELECT id, lat, lon FROM triage_results
@@ -96,7 +132,11 @@ def main():
 
     pending_updates: list[tuple[str, str]] = []
 
-    for i, (eid, lat, lon) in enumerate(rows):
+    for i, row in enumerate(rows):
+        eid = row[0] if isinstance(row, tuple) else row["id"]
+        lat = row[1] if isinstance(row, tuple) else row["lat"]
+        lon = row[2] if isinstance(row, tuple) else row["lon"]
+
         road_class = query_road_class(lat, lon, token)
         if road_class:
             pending_updates.append((road_class, eid))
@@ -105,35 +145,21 @@ def main():
             errors += 1
 
         if (i + 1) % 50 == 0 or i == len(rows) - 1:
-            # Batch write with retry on lock
-            for attempt in range(5):
-                try:
-                    for rc, eid_ in pending_updates:
-                        conn.execute(
-                            "UPDATE triage_results SET road_class = ? WHERE id = ?",
-                            (rc, eid_),
-                        )
-                    conn.commit()
-                    pending_updates.clear()
-                    break
-                except sqlite3.OperationalError as e:
-                    if "locked" in str(e) and attempt < 4:
-                        time.sleep(5 * (attempt + 1))
-                    elif "locked" in str(e):
-                        # Last resort: reconnect
-                        conn.close()
-                        conn = sqlite3.connect(str(DB_PATH))
-                        conn.execute("PRAGMA journal_mode=WAL")
-                        conn.execute("PRAGMA busy_timeout=30000")
-                    else:
-                        raise
+            for rc, eid_ in pending_updates:
+                conn.execute(
+                    "UPDATE triage_results SET road_class = ? WHERE id = ?",
+                    (rc, eid_),
+                )
+            conn.commit()
+            if is_turso:
+                conn.sync()
+            pending_updates.clear()
 
             elapsed = time.time() - t0
             rate = (i + 1) / elapsed
             remaining = (len(rows) - i - 1) / rate if rate > 0 else 0
             print(f"  {i+1}/{len(rows)} — {updated} updated, {errors} no data — {rate:.0f} req/s, ~{remaining/60:.0f}m remaining    ", end="\r", flush=True)
 
-    conn.close()
     elapsed = time.time() - t0
     print(f"\nDone: {updated} updated, {errors} no data in {elapsed:.0f}s ({len(rows)/elapsed:.0f} req/s)")
 

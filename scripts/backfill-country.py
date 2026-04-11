@@ -15,6 +15,49 @@ GEO_CACHE_PATH = PROJECT_ROOT / "data" / "geo-cache.json"
 CITY_CACHE_PATH = PROJECT_ROOT / "data" / "city-cache.json"
 
 
+def _load_env_var(name: str) -> str | None:
+    val = os.environ.get(name)
+    if val:
+        return val
+    env_local = PROJECT_ROOT / ".env.local"
+    if env_local.exists():
+        for line in env_local.read_text().splitlines():
+            if line.startswith(f"{name}="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+def get_db_conn():
+    """Connect to Turso if configured, otherwise local SQLite."""
+    turso_url = _load_env_var("TURSO_DATABASE_URL")
+    turso_token = _load_env_var("TURSO_AUTH_TOKEN")
+
+    if turso_url and turso_token:
+        try:
+            import libsql_experimental as libsql
+            http_url = turso_url.replace("libsql://", "https://")
+            conn = libsql.connect("backfill-country.db", sync_url=http_url, auth_token=turso_token)
+            conn.sync()
+            print(f"  DB: Turso (embedded replica)")
+            return conn, True
+        except ImportError:
+            pass
+        try:
+            import libsql_client
+            http_url = turso_url.replace("libsql://", "https://")
+            conn = libsql_client.create_client_sync(url=http_url, auth_token=turso_token)
+            print(f"  DB: Turso (HTTP)")
+            return conn, True
+        except ImportError:
+            print("Warning: No libsql library found, falling back to local SQLite")
+
+    print(f"  DB: Local SQLite ({DB_PATH})")
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn, False
+
+
 def load_mapbox_token() -> str | None:
     for var in ("MAPBOX_TOKEN", "NEXT_PUBLIC_MAPBOX_TOKEN"):
         token = os.environ.get(var)
@@ -73,19 +116,21 @@ def main():
     if not mapbox_token:
         print("Warning: No Mapbox token — will only use caches (no API fallback)")
 
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
+    conn, is_turso = get_db_conn()
 
-    # Add columns if missing
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
-    for col in ("country", "city"):
-        if col not in cols:
-            conn.execute(f"ALTER TABLE triage_results ADD COLUMN {col} TEXT")
-            conn.commit()
-            print(f"Added '{col}' column to triage_results")
+    # Reconnect threshold — Turso streams die after ~30k writes
+    RECONNECT_EVERY = 15000
 
-    # --- Phase 1: Country from geo-cache (already done for most) ---
+    # Add columns if missing (skip for Turso — columns already exist)
+    if not is_turso:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(triage_results)").fetchall()}
+        for col in ("country", "city"):
+            if col not in cols:
+                conn.execute(f"ALTER TABLE triage_results ADD COLUMN {col} TEXT")
+                conn.commit()
+                print(f"Added '{col}' column to triage_results")
+
+    # --- Phase 1: Country from geo-cache ---
     rows_no_country = conn.execute(
         """SELECT id, lat, lon FROM triage_results
            WHERE country IS NULL AND lat IS NOT NULL AND lon IS NOT NULL"""
@@ -94,16 +139,28 @@ def main():
 
     if rows_no_country:
         updated = 0
+        writes_since_reconnect = 0
         for i in range(0, len(rows_no_country), 500):
             batch = rows_no_country[i : i + 500]
-            for eid, lat, lon in batch:
+            for row in batch:
+                eid = row[0] if isinstance(row, tuple) else row["id"]
+                lat = row[1] if isinstance(row, tuple) else row["lat"]
+                lon = row[2] if isinstance(row, tuple) else row["lon"]
                 key = f"{round(lat, 2)},{round(lon, 2)}"
                 country = geo_cache.get(key)
                 if country and country != "Unknown":
                     conn.execute("UPDATE triage_results SET country = ? WHERE id = ?", (country, eid))
                     updated += 1
+                    writes_since_reconnect += 1
             conn.commit()
-        print(f"  Set country from geo-cache: {updated}")
+            if is_turso:
+                conn.sync()
+                if writes_since_reconnect >= RECONNECT_EVERY:
+                    conn, is_turso = get_db_conn()
+                    writes_since_reconnect = 0
+            if (i // 500) % 10 == 0:
+                print(f"  Country: {updated} updated so far ({i + len(batch)}/{len(rows_no_country)})...", end="\r", flush=True)
+        print(f"  Set country from geo-cache: {updated}                          ")
 
     # --- Phase 2: City from city-cache ---
     rows_no_city = conn.execute(
@@ -114,16 +171,28 @@ def main():
 
     if rows_no_city:
         updated = 0
+        writes_since_reconnect = 0
         for i in range(0, len(rows_no_city), 500):
             batch = rows_no_city[i : i + 500]
-            for eid, lat, lon in batch:
+            for row in batch:
+                eid = row[0] if isinstance(row, tuple) else row["id"]
+                lat = row[1] if isinstance(row, tuple) else row["lat"]
+                lon = row[2] if isinstance(row, tuple) else row["lon"]
                 key = f"{round(lat, 2)},{round(lon, 2)}"
                 city = city_cache.get(key)
                 if city:
                     conn.execute("UPDATE triage_results SET city = ? WHERE id = ?", (city, eid))
                     updated += 1
+                    writes_since_reconnect += 1
             conn.commit()
-        print(f"  Set city from city-cache: {updated}")
+            if is_turso:
+                conn.sync()
+                if writes_since_reconnect >= RECONNECT_EVERY:
+                    conn, is_turso = get_db_conn()
+                    writes_since_reconnect = 0
+            if (i // 500) % 10 == 0:
+                print(f"  City: {updated} updated so far ({i + len(batch)}/{len(rows_no_city)})...", end="\r", flush=True)
+        print(f"  Set city from city-cache: {updated}                          ")
 
     # --- Phase 3: Query Mapbox for unique coords still missing city or country ---
     missing = conn.execute(
@@ -140,7 +209,9 @@ def main():
         new_countries = 0
         new_cities = 0
 
-        for i, (rlat, rlon) in enumerate(missing):
+        for i, row in enumerate(missing):
+            rlat = row[0] if isinstance(row, tuple) else row["rlat"]
+            rlon = row[1] if isinstance(row, tuple) else row["rlon"]
             key = f"{rlat},{rlon}"
             country, city = reverse_geocode(rlat, rlon, mapbox_token)
 
@@ -171,6 +242,8 @@ def main():
             queried += 1
             if queried % 50 == 0 or i == len(missing) - 1:
                 conn.commit()
+                if is_turso:
+                    conn.sync()
                 elapsed = time.time() - t0
                 rate = queried / elapsed if elapsed > 0 else 0
                 remaining = (len(missing) - queried) / rate if rate > 0 else 0
@@ -181,6 +254,8 @@ def main():
                 )
 
         conn.commit()
+        if is_turso:
+            conn.sync()
         print()
 
         # Save updated caches
@@ -201,8 +276,10 @@ def main():
              COUNT(city) as has_city
            FROM triage_results WHERE lat IS NOT NULL"""
     ).fetchone()
-    conn.close()
-    print(f"\nFinal: {stats[0]} events with coords — {stats[1]} have country, {stats[2]} have city")
+    total = stats[0] if isinstance(stats, tuple) else stats["total"]
+    has_country = stats[1] if isinstance(stats, tuple) else stats["has_country"]
+    has_city = stats[2] if isinstance(stats, tuple) else stats["has_city"]
+    print(f"\nFinal: {total} events with coords — {has_country} have country, {has_city} have city")
 
 
 if __name__ == "__main__":

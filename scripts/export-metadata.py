@@ -206,6 +206,8 @@ def _load_country_data():
         return
     geo_path = PROJECT_ROOT / "data" / "countries-110m.json"
     if not geo_path.exists():
+        geo_path = PROJECT_ROOT / "public" / "data" / "countries-110m.json"
+    if not geo_path.exists():
         geo_path = PROJECT_ROOT / "public" / "countries-110m.json"
     if geo_path.exists():
         _COUNTRY_DATA = json.loads(geo_path.read_text())
@@ -378,7 +380,7 @@ def get_triage(conn, video_id: str) -> dict | None:
         """SELECT event_type, triage_result, rules_triggered,
                   speed_min, speed_max, speed_mean, speed_stddev,
                   gnss_displacement_m, video_size, event_timestamp,
-                  lat, lon, road_class
+                  lat, lon, road_class, country, city
            FROM triage_results WHERE id = ?""",
         (video_id,),
     ).fetchone()
@@ -392,6 +394,7 @@ def get_triage(conn, video_id: str) -> dict | None:
         "gnssDisplacementM": row[7], "videoSize": row[8],
         "eventTimestamp": row[9],
         "lat": row[10], "lon": row[11], "roadClass": row[12],
+        "country": row[13], "city": row[14],
     }
 
 
@@ -756,17 +759,15 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
     else:
         event_block["timeOfDay"] = None
 
-    # Country
-    if lat and lon:
+    # Country — prefer triage DB value, fall back to geocoding
+    event_block["country"] = (triage or {}).get("country") or None
+    if not event_block["country"] and lat and lon:
         event_block["country"] = get_country_cached(lat, lon)
-    else:
-        event_block["country"] = None
 
-    # City
-    if lat and lon:
+    # City — prefer triage DB value, fall back to geocoding
+    event_block["city"] = (triage or {}).get("city") or None
+    if not event_block["city"] and lat and lon:
         event_block["city"] = get_city_cached(lat, lon)
-    else:
-        event_block["city"] = None
 
     meta["event"] = event_block
 
