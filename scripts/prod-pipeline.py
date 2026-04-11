@@ -503,18 +503,19 @@ def generate_summary_from_db(conn, video_id: str) -> str | None:
     if road_class:
         parts.append(f"on a {road_class.replace('_', ' ')} road")
 
-    # Location (city, country from triage lat/lon)
+    # Location — use DB columns if available (from backfill), no geocoding API calls
     lat, lon = triage.get("lat"), triage.get("lon")
-    if lat is not None and lon is not None:
-        try:
-            mod = _get_export_metadata_module()
-            city = mod.get_city_cached(lat, lon)
-            country = mod.get_country_cached(lat, lon)
+    try:
+        loc_row = conn.execute(
+            "SELECT country, city FROM triage_results WHERE id = ?", (video_id,)
+        ).fetchone()
+        if loc_row:
+            country, city = loc_row[0], loc_row[1]
             location_str = ", ".join(filter(None, [city, country]))
             if location_str:
                 parts[-1] = parts[-1] + f" in {location_str}" if len(parts) > 1 else f"in {location_str}"
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     # Speed
     speed_min = triage.get("speed_min")
