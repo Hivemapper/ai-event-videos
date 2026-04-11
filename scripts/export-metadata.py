@@ -781,26 +781,32 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
         for seg in get_detection_segments(conn, video_id, run_id)
     ]
 
-    # 4. VRU summary (before summary so generate_summary can use it)
+    # 4. VRU labels detected
     meta["vruLabelsDetected"] = sorted(set(d["label"] for d in meta["detectionSegments"]))
 
-    # 5. Summary — placed after country/city so generate_summary can use them
+    # 5. Summary — generate early so it appears near top of output
     meta["summary"] = get_clip_summary(conn, video_id) or generate_summary(meta)
 
-    # 8. Export timestamp
-    meta["exportedAt"] = datetime.now(timezone.utc).isoformat()
+    # Reorder: put summary right after id, before event
+    ordered: dict = {"id": meta["id"], "summary": meta["summary"]}
+    for k, v in meta.items():
+        if k not in ("id", "summary"):
+            ordered[k] = v
 
-    # 9. GNSS + IMU (last — large arrays)
+    # 6. Export timestamp
+    ordered["exportedAt"] = datetime.now(timezone.utc).isoformat()
+
+    # 7. GNSS + IMU (last — large arrays)
     if event and event.get("gnssData"):
-        meta["gnssData"] = event["gnssData"]
+        ordered["gnssData"] = event["gnssData"]
     else:
-        meta["gnssData"] = []
+        ordered["gnssData"] = []
     if event and event.get("imuData"):
-        meta["imuData"] = event["imuData"]
+        ordered["imuData"] = event["imuData"]
     else:
-        meta["imuData"] = []
+        ordered["imuData"] = []
 
-    return meta
+    return ordered
 
 
 # ---------------------------------------------------------------------------
