@@ -41,11 +41,9 @@ except ImportError:
     HAS_YOLO = False
 
 try:
-    from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
     import torch
-    HAS_GDINO = True
 except ImportError:
-    HAS_GDINO = False
+    pass
 
 try:
     import boto3
@@ -78,7 +76,7 @@ PLATE_MIN_CONFIDENCE = 0.15
 PLATE_BOX_PADDING = 0.1
 
 # Privacy blur skip thresholds (speeds in mph)
-SKIP_SPEED_MIN_ANY_MPH = 40         # skip blur if min speed >= 40 mph (any time)
+SKIP_SPEED_MIN_ANY_MPH = 35         # skip blur if min speed >= 35 mph (any time)
 SKIP_SPEED_MIN_NIGHT_MPH = 20       # skip blur if min speed >= 20 mph at night
 SKIP_SPEED_MIN_MOTORWAY_MPH = 30    # skip blur if min speed >= 30 mph on motorway
 SKIP_MOTORWAY_ROAD_CLASSES = {"motorway", "trunk"}
@@ -213,84 +211,54 @@ def check_skip_reason(conn, video_id: str) -> str | None:
     return None
 
 
-# Cache models globally so they load once
-_face_model = None
-_face_model_failed = False
-_gdino_model = None
-_gdino_processor = None
-_gdino_device = None
-_gdino_failed = False
+# Privacy detection model (faces + license plates in one pass)
+_privacy_model = None
+_privacy_model_failed = False
+
+PRIVACY_MODEL_PATH = PROJECT_ROOT / "data" / "models" / "privacy_v8_all.pt"
+# Class IDs in the privacy model: 0=face, 2=license-plate
+PRIVACY_FACE_CLS = 0
+PRIVACY_PLATE_CLS = 2
 
 
-def _download_yolo_face_model() -> str:
-    """Download YOLO face detection model."""
-    import urllib.request
-    model_dir = PROJECT_ROOT / "data" / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-    model_path = model_dir / "yolov8n-face-lindevs.pt"
-    if not model_path.exists():
-        # lindevs YOLOv8 face model trained on WIDERFace
-        url = "https://github.com/lindevs/yolov8-face/releases/download/1.0.1/yolov8n-face-lindevs.pt"
-        print(f"    Downloading YOLO face model...")
-        urllib.request.urlretrieve(url, str(model_path))
-    return str(model_path)
-
-
-def _get_face_model():
-    global _face_model, _face_model_failed
-    if _face_model_failed:
+def _get_privacy_model():
+    global _privacy_model, _privacy_model_failed
+    if _privacy_model_failed:
         return None
-    if _face_model is None:
-        try:
-            model_path = _download_yolo_face_model()
-            print(f"    Loading YOLO face model...")
-            _face_model = _YOLO(model_path)
-        except Exception as e:
-            print(f"    {YELLOW}YOLO face model failed: {e}{RESET}")
-            _face_model_failed = True
+    if _privacy_model is None:
+        if not PRIVACY_MODEL_PATH.exists():
+            print(f"    {YELLOW}Privacy model not found: {PRIVACY_MODEL_PATH}{RESET}")
+            _privacy_model_failed = True
             return None
-    return _face_model
-
-
-# COCO YOLO model for quick pre-scan (persons + vehicles)
-_coco_model = None
-_coco_model_failed = False
-
-PRESCAN_PERSON_LABELS = {"person"}
-PRESCAN_VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle", "bicycle"}
-
-
-def _get_coco_model():
-    global _coco_model, _coco_model_failed
-    if _coco_model_failed:
-        return None
-    if _coco_model is None:
         try:
-            print(f"    Loading YOLO COCO model for pre-scan...")
-            _coco_model = _YOLO("yolov8n.pt")  # auto-downloads from ultralytics
+            print(f"    Loading privacy model (face + plate)...")
+            _privacy_model = _YOLO(str(PRIVACY_MODEL_PATH))
+            print(f"    Privacy model loaded")
         except Exception as e:
-            print(f"    {YELLOW}YOLO COCO model failed: {e}{RESET}")
-            _coco_model_failed = True
+            print(f"    {YELLOW}Privacy model failed: {e}{RESET}")
+            _privacy_model_failed = True
             return None
-    return _coco_model
+    return _privacy_model
 
 
-def detect_faces(video_path: Path) -> list[dict]:
-    """Run YOLO face detection on sampled frames (every 3rd frame)."""
-    model = _get_face_model()
+def detect_faces_and_plates(video_path: Path) -> tuple[list[dict], list[dict]]:
+    """Run privacy model on every other frame to detect faces and license plates.
+    Returns (face_boxes, plate_boxes)."""
+    model = _get_privacy_model()
     if model is None:
-        return []
+        return [], []
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        return []
+        return [], []
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     face_boxes = []
+    plate_boxes = []
 
-    # Sample every 3rd frame — BLUR_SPREAD covers the gaps
-    for i in range(0, total_frames, 3):
+    # Every other frame — BLUR_SPREAD covers gaps
+    for i in range(0, total_frames, 2):
         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
         ret, frame = cap.read()
         if not ret:
@@ -302,196 +270,45 @@ def detect_faces(video_path: Path) -> list[dict]:
         results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
         for result in results:
             for box in result.boxes:
+                cls = int(box.cls[0]) if box.cls is not None else -1
+                if cls not in (PRIVACY_FACE_CLS, PRIVACY_PLATE_CLS):
+                    continue
+
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                fw = x2 - x1
-                fh = y2 - y1
+                bw = x2 - x1
+                bh = y2 - y1
 
-                # Skip tiny faces (< ~15px, too small to identify)
-                if fh < 15:
-                    continue
+                if cls == PRIVACY_FACE_CLS:
+                    # Skip tiny faces (< ~15px)
+                    if bh < 15:
+                        continue
+                    pad_x = bw * FACE_BOX_PADDING
+                    pad_y = bh * FACE_BOX_PADDING
+                    bx = max(0, x1 - pad_x)
+                    by = max(0, y1 - pad_y)
+                    pw = min(w - bx, bw + 2 * pad_x)
+                    ph = min(h - by, bh + 2 * pad_y)
+                    face_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": int(bx), "y": int(by),
+                        "w": int(pw), "h": int(ph),
+                    })
 
-                # Skip oversized detections — real faces in dashcam are small
-                if fw > w * 0.07 or fh > h * 0.07:
-                    continue
-
-                # Skip non-face-shaped detections (faces are roughly square)
-                aspect = fh / fw if fw > 0 else 99
-                if aspect > 2.0 or aspect < 0.4:
-                    continue
-
-                pad_x = fw * FACE_BOX_PADDING
-                pad_y = fh * FACE_BOX_PADDING
-                bx = max(0, x1 - pad_x)
-                by = max(0, y1 - pad_y)
-                bw = min(w - bx, fw + 2 * pad_x)
-                bh = min(h - by, fh + 2 * pad_y)
-
-                face_boxes.append({
-                    "frame_ms": frame_ms,
-                    "x": int(bx), "y": int(by),
-                    "w": int(bw), "h": int(bh),
-                })
-
-    cap.release()
-    return face_boxes
-
-
-def quick_yolo_prescan(video_path: Path, num_samples: int = 5) -> tuple:
-    """Quick YOLO scan on sampled frames to check for persons/vehicles.
-    Returns (has_persons, has_vehicles). Takes ~1-2 seconds."""
-    model = _get_coco_model()
-    if model is None:
-        # If model fails, assume both present (safe fallback)
-        return (True, True)
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return (True, True)
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total_frames <= 0:
-        cap.release()
-        return (True, True)
-
-    has_persons = False
-    has_vehicles = False
-
-    # Sample evenly spaced frames
-    step = max(1, total_frames // num_samples)
-    for i in range(0, total_frames, step):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        results = model.predict(frame, conf=0.3, imgsz=640, verbose=False)
-        for result in results:
-            for box in result.boxes:
-                cls_id = int(box.cls[0])
-                label = model.names.get(cls_id, "")
-                if label in PRESCAN_PERSON_LABELS:
-                    has_persons = True
-                if label in PRESCAN_VEHICLE_LABELS:
-                    has_vehicles = True
-
-        # Early exit if both found
-        if has_persons and has_vehicles:
-            break
+                elif cls == PRIVACY_PLATE_CLS:
+                    pad_x = bw * PLATE_BOX_PADDING
+                    pad_y = bh * PLATE_BOX_PADDING
+                    bx = max(0, x1 - pad_x)
+                    by = max(0, y1 - pad_y)
+                    pw = min(w - bx, bw + 2 * pad_x)
+                    ph = min(h - by, bh + 2 * pad_y)
+                    plate_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": int(bx), "y": int(by),
+                        "w": int(pw), "h": int(ph),
+                    })
 
     cap.release()
-    return (has_persons, has_vehicles)
-
-
-def _get_gdino():
-    """Load GDINO model for license plate detection."""
-    global _gdino_model, _gdino_processor, _gdino_device, _gdino_failed
-    if _gdino_failed:
-        return None, None, None
-    if _gdino_model is None and HAS_GDINO:
-        try:
-            print(f"    Loading GDINO for plate detection...")
-            model_id = "IDEA-Research/grounding-dino-base"
-            _gdino_processor = AutoProcessor.from_pretrained(model_id)
-            _gdino_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
-            _gdino_model.eval()
-            _gdino_device = "cuda" if torch.cuda.is_available() else "cpu"
-            _gdino_model = _gdino_model.to(_gdino_device)
-            print(f"    GDINO loaded on {_gdino_device.upper()}")
-        except Exception as e:
-            print(f"    {YELLOW}GDINO failed: {e}{RESET}")
-            _gdino_failed = True
-            return None, None, None
-    return _gdino_model, _gdino_processor, _gdino_device
-
-
-PLATE_TEXT_PROMPT = "license plate."
-PLATE_GDINO_BOX_THRESHOLD = 0.35
-PLATE_GDINO_TEXT_THRESHOLD = 0.3
-
-
-def detect_license_plates(video_path: Path) -> list[dict]:
-    """Run GDINO license plate detection on sampled frames."""
-    model, processor, device = _get_gdino()
-    if model is None:
-        return []
-
-    from PIL import Image as PILImage
-
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        return []
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    plate_boxes = []
-
-    # Sample every ~3 frames — GDINO is slower but more accurate
-    sample_step = max(1, total_frames // 300)
-
-    for i in range(0, total_frames, sample_step):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        h, w = frame.shape[:2]
-        frame_ms = int(i * 1000 / fps)
-
-        pil_img = PILImage.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        inputs = processor(images=pil_img, text=PLATE_TEXT_PROMPT, return_tensors="pt")
-        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model(**inputs)
-
-        results = processor.post_process_grounded_object_detection(
-            outputs, inputs["input_ids"],
-            threshold=PLATE_GDINO_BOX_THRESHOLD,
-            text_threshold=PLATE_GDINO_TEXT_THRESHOLD,
-            target_sizes=[(h, w)],
-        )
-
-        if results:
-            r = results[0]
-            boxes = r.get("boxes", torch.tensor([]))
-            scores = r.get("scores", torch.tensor([]))
-            for box, score in zip(boxes, scores):
-                x1, y1, x2, y2 = box.cpu().tolist()
-
-                # Skip detections in upper 40% of frame — too far away
-                if (y1 + y2) / 2 < h * 0.40:
-                    continue
-
-                pw = x2 - x1
-                ph = y2 - y1
-
-                # Skip tiny plates on distant vehicles — not readable anyway
-                if pw < 40 or ph < 12:
-                    continue
-
-                # Skip oversized detections — plates are small
-                if pw > w * 0.10 or ph > h * 0.05:
-                    continue
-
-                # Plates are wider than tall — at least 1.3:1 ratio
-                if pw <= 0 or pw / ph < 1.3:
-                    continue
-
-                pad_x = pw * PLATE_BOX_PADDING
-                pad_y = ph * PLATE_BOX_PADDING
-                x1 = max(0, x1 - pad_x)
-                y1 = max(0, y1 - pad_y)
-                pw = min(w - x1, pw + 2 * pad_x)
-                ph = min(h - y1, ph + 2 * pad_y)
-
-                plate_boxes.append({
-                    "frame_ms": frame_ms,
-                    "x": int(x1), "y": int(y1),
-                    "w": int(pw), "h": int(ph),
-                })
-
-    cap.release()
-    return plate_boxes
+    return face_boxes, plate_boxes
 
 
 def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Path) -> bool:
@@ -685,14 +502,16 @@ def generate_summary_from_db(conn, video_id: str) -> str | None:
     if road_class:
         parts.append(f"on a {road_class.replace('_', ' ')} road")
 
-    # Country (from triage lat/lon)
+    # Location (city, country from triage lat/lon)
     lat, lon = triage.get("lat"), triage.get("lon")
     if lat is not None and lon is not None:
         try:
             mod = _get_export_metadata_module()
+            city = mod.get_city_cached(lat, lon)
             country = mod.get_country_cached(lat, lon)
-            if country:
-                parts[-1] = parts[-1] + f" in {country}" if len(parts) > 1 else f"in {country}"
+            location_str = ", ".join(filter(None, [city, country]))
+            if location_str:
+                parts[-1] = parts[-1] + f" in {location_str}" if len(parts) > 1 else f"in {location_str}"
         except Exception:
             pass
 
@@ -795,8 +614,6 @@ def process_video(s3, conn, video_id: str) -> bool:
             return True
 
         # Check if VRU pipeline found persons
-        vru_has_persons = bool(get_person_detections(conn, video_id))
-
         # Fetch event to get video URL
         api_key = load_api_key()
         resp = api_request(
@@ -816,41 +633,9 @@ def process_video(s3, conn, video_id: str) -> bool:
         if not video_path:
             raise RuntimeError("Video download failed")
 
-        # Quick YOLO pre-scan to check for persons/vehicles
-        has_persons, has_vehicles = quick_yolo_prescan(video_path)
-        print(f"    Pre-scan: persons={has_persons}, vehicles={has_vehicles}")
-
-        if not has_persons and not has_vehicles:
-            print(f"    No persons or vehicles detected, skipping blur")
-            # Still generate and upload metadata
-            meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
-            print(f"    Metadata uploaded: {meta_url}")
-            meta_key = f"{video_id}.json"
-            conn.execute(
-                """UPDATE production_runs SET status='completed', privacy_status='skipped',
-                   metadata_status='completed', upload_status='completed',
-                   skip_reason='prescan_no_persons_or_vehicles', s3_metadata_key=?,
-                   completed_at=? WHERE video_id=?""",
-                (meta_key, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), video_id),
-            )
-            conn.commit()
-            return True
-
-        # Detect faces — only if persons present (from VRU or pre-scan)
-        face_boxes = []
-        if vru_has_persons or has_persons:
-            face_boxes = detect_faces(video_path)
-            print(f"    {len(face_boxes)} faces detected")
-        else:
-            print(f"    Skipping face detection (no persons)")
-
-        # Detect license plates — only if vehicles present
-        plate_boxes = []
-        if has_vehicles:
-            plate_boxes = detect_license_plates(video_path)
-            print(f"    {len(plate_boxes)} license plates detected")
-        else:
-            print(f"    Skipping plate detection (no vehicles)")
+        # Detect faces + license plates in a single pass (every other frame)
+        face_boxes, plate_boxes = detect_faces_and_plates(video_path)
+        print(f"    {len(face_boxes)} faces, {len(plate_boxes)} plates detected")
 
         # Combine all blur regions
         all_blur_boxes = face_boxes + plate_boxes
