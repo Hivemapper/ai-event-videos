@@ -583,6 +583,7 @@ def process_video(s3, conn, video_id: str) -> bool:
         conn.commit()
 
         # Step 1: Generate summary if missing (from DB data only, no API call)
+        t_step = time.time()
         existing = conn.execute(
             "SELECT 1 FROM clip_summaries WHERE video_id = ?", (video_id,)
         ).fetchone()
@@ -595,9 +596,14 @@ def process_video(s3, conn, video_id: str) -> bool:
                     (video_id, summary_text, summary_text),
                 )
                 conn.commit()
-                print(f"    Summary: {summary_text}")
+                print(f"    Summary ({time.time() - t_step:.1f}s): {summary_text}")
+        else:
+            row = conn.execute("SELECT summary FROM clip_summaries WHERE video_id = ?", (video_id,)).fetchone()
+            if row:
+                print(f"    Summary ({time.time() - t_step:.1f}s): {row[0]}")
 
         # Step 2: Check speed/time-of-day skip criteria (before downloading video)
+        t_step = time.time()
         skip_reason = check_skip_reason(conn, video_id)
         if skip_reason:
             print(f"    Skipping blur: {skip_reason}")
@@ -614,7 +620,8 @@ def process_video(s3, conn, video_id: str) -> bool:
             conn.commit()
             return True
 
-        # Check if VRU pipeline found persons
+        print(f"    Skip check: {time.time() - t_step:.1f}s")
+
         # Fetch event to get video URL
         api_key = load_api_key()
         resp = api_request(
