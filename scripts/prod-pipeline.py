@@ -684,6 +684,11 @@ def process_video(s3, conn, video_id: str) -> bool:
             t_step = time.time()
             s3_url = upload_to_s3(s3, video_id, output_path)
             print(f"    Upload: {time.time() - t_step:.1f}s — {s3_url}")
+        else:
+            # No blur needed — upload original video as-is
+            t_step = time.time()
+            s3_url = upload_to_s3(s3, video_id, video_path)
+            print(f"    Upload (no blur): {time.time() - t_step:.1f}s — {s3_url}")
 
         # Generate and upload metadata
         t_step = time.time()
