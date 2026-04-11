@@ -488,7 +488,7 @@ def generate_and_upload_metadata(s3, conn, api_key: str, video_id: str) -> str |
     build_production_metadata = mod.build_production_metadata
 
     meta = build_production_metadata(conn, api_key, video_id)
-    json_bytes = json.dumps(meta, indent=2, default=str).encode("utf-8")
+    json_bytes = json.dumps(meta, indent=2, default=str, ensure_ascii=False).encode("utf-8")
     key = f"{video_id}.json"
     s3.put_object(
         Bucket=S3_BUCKET, Key=key,
