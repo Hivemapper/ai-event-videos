@@ -312,13 +312,29 @@ def detect_faces_and_plates(video_path: Path) -> tuple[list[dict], list[dict]]:
     return face_boxes, plate_boxes
 
 
-def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Path) -> bool:
-    """Re-encode video with tracked blur regions.
+def _has_nvenc() -> bool:
+    """Check if NVENC hardware encoder is available."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
 
-    Uses OpenCV CSRT trackers: initializes a tracker at each detection frame,
-    then tracks the region forward (and backward) through all frames so blur
-    follows faces/plates smoothly.
+
+_nvenc_available: bool | None = None
+
+
+def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Path) -> bool:
+    """Re-encode video with blur regions, piping frames directly to ffmpeg.
+
+    Uses NVENC hardware encoding on GPU if available, otherwise libx264.
+    Single-pass: read frames with OpenCV, apply blur, pipe raw to ffmpeg.
     """
+    global _nvenc_available
+
     if not blur_boxes:
         import shutil
         shutil.copy2(video_path, output_path)
@@ -334,9 +350,6 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # Pre-compute: for each frame, which blur regions are active
-    # We'll do a forward pass with trackers
-
-    # Group blur boxes by frame index, extending to neighboring frames
     BLUR_SPREAD = 5  # blur N frames before and after each detection
     blur_per_frame: dict[int, list[tuple]] = {}
     for bb in blur_boxes:
@@ -352,12 +365,35 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
             if 0 <= fi < total_frames:
                 blur_per_frame.setdefault(fi, []).append(rect)
 
-    # Re-encode with blur applied per frame
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    # Detect NVENC once
+    if _nvenc_available is None:
+        _nvenc_available = _has_nvenc()
+        print(f"    NVENC: {'available' if _nvenc_available else 'not available, using libx264'}")
+
+    # Build ffmpeg command — pipe raw BGR frames in, encode directly to output
+    if _nvenc_available:
+        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+    else:
+        encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        # Raw video input from pipe
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}", "-r", str(fps),
+        "-i", "pipe:0",
+        # Audio from original
+        "-i", str(video_path),
+        "-map", "0:v", "-map", "1:a?",
+        *encoder_args,
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     blurred_frame_count = 0
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     for fi in range(total_frames):
         ret, frame = cap.read()
         if not ret:
@@ -371,32 +407,14 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
                     k = max(15, min(99, (w + h) // 2 | 1))
                     frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (k, k), k // 3)
 
-        writer.write(frame)
+        proc.stdin.write(frame.tobytes())
 
     cap.release()
-    writer.release()
-    print(f"    Blurred {blurred_frame_count}/{total_frames} frames, {len(blur_per_frame)} unique frames in map")
+    proc.stdin.close()
+    proc.wait(timeout=300)
 
-    # Re-mux with ffmpeg for proper mp4 container + copy audio
-    final_path = output_path.with_suffix(".final.mp4")
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", str(output_path),
-        "-i", str(video_path),
-        "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-        "-c:a", "copy",
-        str(final_path),
-    ]
-    try:
-        subprocess.run(cmd, capture_output=True, timeout=300)
-        if final_path.exists():
-            final_path.rename(output_path)
-            return True
-    except Exception:
-        pass
-
-    return output_path.exists()
+    print(f"    Blurred {blurred_frame_count}/{total_frames} frames")
+    return output_path.exists() and proc.returncode == 0
 
 
 def upload_to_s3(s3, video_id: str, file_path: Path) -> str:
