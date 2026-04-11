@@ -257,12 +257,13 @@ def detect_faces_and_plates(video_path: Path) -> tuple[list[dict], list[dict]]:
     face_boxes = []
     plate_boxes = []
 
-    # Every other frame — BLUR_SPREAD covers gaps
-    for i in range(0, total_frames, 2):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+    # Read sequentially, process every other frame (seeking is slow on HEVC)
+    for i in range(total_frames):
         ret, frame = cap.read()
         if not ret:
             break
+        if i % 2 != 0:
+            continue
 
         h, w = frame.shape[:2]
         frame_ms = int(i * 1000 / fps)
