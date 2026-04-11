@@ -630,13 +630,16 @@ def process_video(s3, conn, video_id: str) -> bool:
             raise RuntimeError("No video URL")
 
         # Download video
+        t_step = time.time()
         video_path = download_video(video_url)
         if not video_path:
             raise RuntimeError("Video download failed")
+        print(f"    Download: {time.time() - t_step:.1f}s")
 
         # Detect faces + license plates in a single pass (every other frame)
+        t_step = time.time()
         face_boxes, plate_boxes = detect_faces_and_plates(video_path)
-        print(f"    {len(face_boxes)} faces, {len(plate_boxes)} plates detected")
+        print(f"    Detection: {time.time() - t_step:.1f}s — {len(face_boxes)} faces, {len(plate_boxes)} plates")
 
         # Combine all blur regions
         all_blur_boxes = face_boxes + plate_boxes
@@ -644,18 +647,22 @@ def process_video(s3, conn, video_id: str) -> bool:
 
         if all_blur_boxes:
             # Blur faces + plates and re-encode
+            t_step = time.time()
             output_path = video_path.with_suffix(".blurred.mp4")
             ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
             if not ok or not output_path.exists():
                 raise RuntimeError("Blur encoding failed")
+            print(f"    Blur+encode: {time.time() - t_step:.1f}s")
 
             # Upload blurred video to S3
+            t_step = time.time()
             s3_url = upload_to_s3(s3, video_id, output_path)
-            print(f"    Video uploaded: {s3_url}")
+            print(f"    Upload: {time.time() - t_step:.1f}s — {s3_url}")
 
         # Generate and upload metadata
+        t_step = time.time()
         meta_url = generate_and_upload_metadata(s3, conn, api_key, video_id)
-        print(f"    Metadata uploaded: {meta_url}")
+        print(f"    Metadata: {time.time() - t_step:.1f}s — {meta_url}")
 
         # Mark complete
         video_key = f"{video_id}.mp4" if s3_url else None
