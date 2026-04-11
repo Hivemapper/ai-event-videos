@@ -536,8 +536,6 @@ def generate_summary(meta: dict) -> str:
 
     # Time of day
     tod = event_block.get("timeOfDay")
-    if isinstance(tod, dict):
-        tod = tod.get("timeOfDay")
     if tod:
         parts.append(f"during {tod.lower()}")
 
@@ -753,9 +751,10 @@ def build_production_metadata(conn, api_key: str, video_id: str) -> dict:
         if token:
             event_block["roadClass"] = _query_road_class(lon, lat, token)
 
-    # Time of day
+    # Time of day (just the label: "Day", "Night", "Dawn", or "Dusk")
     if lat and lon and timestamp:
-        event_block["timeOfDay"] = get_time_of_day(timestamp, lat, lon)
+        tod_info = get_time_of_day(timestamp, lat, lon)
+        event_block["timeOfDay"] = tod_info.get("timeOfDay") if tod_info else None
     else:
         event_block["timeOfDay"] = None
 
