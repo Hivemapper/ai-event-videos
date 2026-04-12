@@ -241,6 +241,77 @@ def _get_privacy_model():
     return _privacy_model
 
 
+def detect_faces_and_plates(video_path: Path) -> tuple[list[dict], list[dict]]:
+    """Run privacy model on every other frame to detect faces and license plates.
+    Returns (face_boxes, plate_boxes)."""
+    model = _get_privacy_model()
+    if model is None:
+        return [], []
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        return [], []
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    face_boxes = []
+    plate_boxes = []
+
+    # Read sequentially, process every other frame (seeking is slow on HEVC)
+    for i in range(total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if i % 2 != 0:
+            continue
+
+        h, w = frame.shape[:2]
+        frame_ms = int(i * 1000 / fps)
+
+        results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
+        for result in results:
+            for box in result.boxes:
+                cls = int(box.cls[0]) if box.cls is not None else -1
+                if cls not in (PRIVACY_FACE_CLS, PRIVACY_PLATE_CLS):
+                    continue
+
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                bw = x2 - x1
+                bh = y2 - y1
+
+                if cls == PRIVACY_FACE_CLS:
+                    # Skip tiny faces (< ~15px)
+                    if bh < 15:
+                        continue
+                    pad_x = bw * FACE_BOX_PADDING
+                    pad_y = bh * FACE_BOX_PADDING
+                    bx = max(0, x1 - pad_x)
+                    by = max(0, y1 - pad_y)
+                    pw = min(w - bx, bw + 2 * pad_x)
+                    ph = min(h - by, bh + 2 * pad_y)
+                    face_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": int(bx), "y": int(by),
+                        "w": int(pw), "h": int(ph),
+                    })
+
+                elif cls == PRIVACY_PLATE_CLS:
+                    pad_x = bw * PLATE_BOX_PADDING
+                    pad_y = bh * PLATE_BOX_PADDING
+                    bx = max(0, x1 - pad_x)
+                    by = max(0, y1 - pad_y)
+                    pw = min(w - bx, bw + 2 * pad_x)
+                    ph = min(h - by, bh + 2 * pad_y)
+                    plate_boxes.append({
+                        "frame_ms": frame_ms,
+                        "x": int(bx), "y": int(by),
+                        "w": int(pw), "h": int(ph),
+                    })
+
+    cap.release()
+    return face_boxes, plate_boxes
+
+
 def _has_nvenc() -> bool:
     """Check if NVENC hardware encoder is available."""
     try:
@@ -255,111 +326,63 @@ def _has_nvenc() -> bool:
 
 _nvenc_available: bool | None = None
 
-# Detection frequency: run model every Nth frame. BLUR_SPREAD=5 covers gaps.
-DETECT_EVERY_N = 3
-BLUR_SPREAD = 5
 
+def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Path) -> bool:
+    """Re-encode video with blur regions, piping frames directly to ffmpeg.
 
-def detect_and_blur(video_path: Path, output_path: Path) -> tuple[int, int]:
-    """Single-pass: read video once, detect faces/plates, apply blur, encode.
-
-    Runs detection every 3rd frame, applies blur with ±5 frame spread,
-    and pipes frames to ffmpeg in one pass. Returns (face_count, plate_count).
+    Uses NVENC hardware encoding on GPU if available, otherwise libx264.
+    Single-pass: read frames with OpenCV, apply blur, pipe raw to ffmpeg.
     """
     global _nvenc_available
 
-    model = _get_privacy_model()
-    if model is None:
+    if not blur_boxes:
         import shutil
         shutil.copy2(video_path, output_path)
-        return 0, 0
+        return True
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        return 0, 0
+        return False
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    # Pre-compute: for each frame, which blur regions are active
+    BLUR_SPREAD = 5  # blur N frames before and after each detection
+    blur_per_frame: dict[int, list[tuple]] = {}
+    for bb in blur_boxes:
+        frame_idx = int(bb["frame_ms"] * fps / 1000)
+        x, y, w, h = bb["x"], bb["y"], bb["w"], bb["h"]
+        x = max(0, min(x, width - 1))
+        y = max(0, min(y, height - 1))
+        w = max(1, min(w, width - x))
+        h = max(1, min(h, height - y))
+        rect = (x, y, w, h)
+        for offset in range(-BLUR_SPREAD, BLUR_SPREAD + 1):
+            fi = frame_idx + offset
+            if 0 <= fi < total_frames:
+                blur_per_frame.setdefault(fi, []).append(rect)
+
     # Detect NVENC once
     if _nvenc_available is None:
         _nvenc_available = _has_nvenc()
-        if _nvenc_available:
-            print(f"    Encoder: NVENC")
-        else:
-            print(f"    Encoder: libx264 (ultrafast)")
+        print(f"    NVENC: {'available' if _nvenc_available else 'not available, using libx264'}")
 
+    # Build ffmpeg command — pipe raw BGR frames in, encode directly to output
     if _nvenc_available:
         encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
     else:
-        encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
-
-    # --- Pass 1: detect only (read all frames, run model every Nth) ---
-    # We need detections before we can blur, because blur spreads ±5 frames.
-    face_count = 0
-    plate_count = 0
-    blur_per_frame: dict[int, list[tuple]] = {}
-
-    for i in range(total_frames):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if i % DETECT_EVERY_N != 0:
-            continue
-
-        h, w = frame.shape[:2]
-        results = model.predict(frame, conf=FACE_MIN_CONFIDENCE, imgsz=640, verbose=False)
-        for result in results:
-            for box in result.boxes:
-                cls = int(box.cls[0]) if box.cls is not None else -1
-                if cls not in (PRIVACY_FACE_CLS, PRIVACY_PLATE_CLS):
-                    continue
-
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                bw = x2 - x1
-                bh = y2 - y1
-
-                if cls == PRIVACY_FACE_CLS:
-                    if bh < 15:
-                        continue
-                    face_count += 1
-                    pad_x = bw * FACE_BOX_PADDING
-                    pad_y = bh * FACE_BOX_PADDING
-                else:
-                    plate_count += 1
-                    pad_x = bw * PLATE_BOX_PADDING
-                    pad_y = bh * PLATE_BOX_PADDING
-
-                bx = max(0, int(x1 - pad_x))
-                by = max(0, int(y1 - pad_y))
-                pw = min(w - bx, int(bw + 2 * pad_x))
-                ph = min(h - by, int(bh + 2 * pad_y))
-                rect = (bx, by, pw, ph)
-
-                for offset in range(-BLUR_SPREAD, BLUR_SPREAD + 1):
-                    fi = i + offset
-                    if 0 <= fi < total_frames:
-                        blur_per_frame.setdefault(fi, []).append(rect)
-
-    print(f"    {face_count} faces, {plate_count} plates detected")
-
-    if not blur_per_frame:
-        # No blur needed — just copy original
-        cap.release()
-        import shutil
-        shutil.copy2(video_path, output_path)
-        return face_count, plate_count
-
-    # --- Pass 2: blur + encode (read all frames, apply blur, pipe to ffmpeg) ---
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        # Raw video input from pipe
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-s", f"{width}x{height}", "-r", str(fps),
         "-i", "pipe:0",
+        # Audio from original
         "-i", str(video_path),
         "-map", "0:v", "-map", "1:a?",
         *encoder_args,
@@ -371,14 +394,14 @@ def detect_and_blur(video_path: Path, output_path: Path) -> tuple[int, int]:
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
-    blurred_count = 0
+    blurred_frame_count = 0
     for fi in range(total_frames):
         ret, frame = cap.read()
         if not ret:
             break
 
         if fi in blur_per_frame:
-            blurred_count += 1
+            blurred_frame_count += 1
             for (x, y, w, h) in blur_per_frame[fi]:
                 roi = frame[y:y+h, x:x+w]
                 if roi.size > 0:
@@ -391,11 +414,8 @@ def detect_and_blur(video_path: Path, output_path: Path) -> tuple[int, int]:
     proc.stdin.close()
     proc.wait(timeout=300)
 
-    print(f"    Blurred {blurred_count}/{total_frames} frames")
-
-    if not (output_path.exists() and proc.returncode == 0):
-        return 0, 0
-    return face_count, plate_count
+    print(f"    Blurred {blurred_frame_count}/{total_frames} frames")
+    return output_path.exists() and proc.returncode == 0
 
 
 def upload_to_s3(s3, video_id: str, file_path: Path) -> str:
@@ -643,17 +663,33 @@ def process_video(s3, conn, video_id: str) -> bool:
             raise RuntimeError("Video download failed")
         print(f"    Download: {time.time() - t_step:.1f}s")
 
-        # Detect + blur in single pass (every 3rd frame, ±5 spread)
+        # Detect faces + license plates in a single pass (every other frame)
         t_step = time.time()
-        output_path = video_path.with_suffix(".blurred.mp4")
-        face_count, plate_count = detect_and_blur(video_path, output_path)
-        print(f"    Detect+blur: {time.time() - t_step:.1f}s")
+        face_boxes, plate_boxes = detect_faces_and_plates(video_path)
+        print(f"    Detection: {time.time() - t_step:.1f}s — {len(face_boxes)} faces, {len(plate_boxes)} plates")
 
-        # Upload to S3 — blurred version if blur happened, original otherwise
-        t_step = time.time()
-        upload_file = output_path if output_path.exists() and (face_count + plate_count > 0) else video_path
-        s3_url = upload_to_s3(s3, video_id, upload_file)
-        print(f"    Upload: {time.time() - t_step:.1f}s — {s3_url}")
+        # Combine all blur regions
+        all_blur_boxes = face_boxes + plate_boxes
+        s3_url = None
+
+        if all_blur_boxes:
+            # Blur faces + plates and re-encode
+            t_step = time.time()
+            output_path = video_path.with_suffix(".blurred.mp4")
+            ok = blur_with_tracking(video_path, all_blur_boxes, output_path)
+            if not ok or not output_path.exists():
+                raise RuntimeError("Blur encoding failed")
+            print(f"    Blur+encode: {time.time() - t_step:.1f}s")
+
+            # Upload blurred video to S3
+            t_step = time.time()
+            s3_url = upload_to_s3(s3, video_id, output_path)
+            print(f"    Upload: {time.time() - t_step:.1f}s — {s3_url}")
+        else:
+            # No blur needed — upload original video as-is
+            t_step = time.time()
+            s3_url = upload_to_s3(s3, video_id, video_path)
+            print(f"    Upload (no blur): {time.time() - t_step:.1f}s — {s3_url}")
 
         # Generate and upload metadata
         t_step = time.time()
