@@ -67,7 +67,7 @@ PERSON_LABELS = {"person", "construction worker", "pedestrian"}
 
 # Face detection
 FACE_MIN_CONFIDENCE = 0.3
-FACE_BOX_PADDING = 0.15
+FACE_BOX_PADDING = 0.6
 # Only blur faces on persons taller than this (pixels). ~100px = close/medium range.
 MIN_PERSON_HEIGHT_PX = 100
 
@@ -350,7 +350,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # Pre-compute: for each frame, which blur regions are active
-    BLUR_SPREAD = 5  # blur N frames before and after each detection
+    BLUR_SPREAD = 3  # blur N frames before and after each detection (detection runs every 2nd frame)
     blur_per_frame: dict[int, list[tuple]] = {}
     for bb in blur_boxes:
         frame_idx = int(bb["frame_ms"] * fps / 1000)
