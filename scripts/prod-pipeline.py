@@ -363,6 +363,7 @@ def detect_and_blur(video_path: Path, output_path: Path) -> tuple[int, int]:
         "-i", str(video_path),
         "-map", "0:v", "-map", "1:a?",
         *encoder_args,
+        "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-movflags", "+faststart",
         str(output_path),
