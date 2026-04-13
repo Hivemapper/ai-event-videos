@@ -174,6 +174,7 @@ interface Section {
   types: EventType[];
   rank: (a: ScoredEvent, b: ScoredEvent) => number;
   filter?: (s: ScoredEvent) => boolean;
+  limit?: number; // per-section override (defaults to perSectionLimit)
 }
 
 const SECTIONS: Section[] = [
@@ -182,6 +183,7 @@ const SECTIONS: Section[] = [
     name: "Extreme Braking",
     types: ["HARSH_BRAKING"],
     rank: (a, b) => (b.maxSpeed - b.minSpeed) - (a.maxSpeed - a.minSpeed),
+    limit: 10,
   },
   {
     index: 1,
@@ -361,9 +363,10 @@ async function main() {
     // Remove existing
     pool = pool.filter((s) => !existingIds.has(s.event.id));
 
-    // Sort and take top N
+    // Sort and take top N (per-section limit overrides global)
     pool.sort(section.rank);
-    const top = pool.slice(0, perSectionLimit);
+    const sectionMax = section.limit ?? perSectionLimit;
+    const top = pool.slice(0, sectionMax);
 
     const entries: HighlightEntry[] = top.map((s) => ({
       id: s.event.id,
