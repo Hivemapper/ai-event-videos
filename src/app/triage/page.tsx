@@ -50,9 +50,9 @@ const FILTER_OPTIONS = [
 const PERIOD_OPTIONS: { value: string | null; label: string; desc?: string }[] = [
   { value: null, label: "All Periods" },
   { value: "1", label: "Period 1", desc: "Jan – Sep 15, 2025" },
-  { value: "2", label: "Period 2", desc: "Sep 15, 2025 – Jan 15, 2026" },
-  { value: "3", label: "Period 3", desc: "Jan 15 – Feb 10, 2026" },
-  { value: "4", label: "Period 4", desc: "Feb 11 – Mar 15, 2026" },
+  { value: "2", label: "Period 2", desc: "Sep 15, 2025 – Jan 20, 2026" },
+  { value: "3", label: "Period 3", desc: "Jan 20 – Feb 25, 2026 (fw ≥6.65.2)" },
+  { value: "4", label: "Period 4", desc: "Feb 25 – Mar 15, 2026 (fw ≥6.68.4)" },
   { value: "5", label: "Period 5", desc: "Mar 15, 2026 onward" },
 ];
 
