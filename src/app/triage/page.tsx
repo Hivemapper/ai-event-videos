@@ -53,7 +53,7 @@ const PERIOD_OPTIONS: { value: string | null; label: string; desc?: string }[] =
   { value: "2", label: "Period 2", desc: "Sep 15, 2025 – Jan 20, 2026" },
   { value: "3", label: "Period 3", desc: "Jan 20 – Feb 25, 2026 (fw ≥6.65.2)" },
   { value: "4", label: "Period 4", desc: "Feb 25 – Mar 15, 2026 (fw ≥6.68.4)" },
-  { value: "5", label: "Period 5", desc: "Mar 15, 2026 onward" },
+  { value: "5", label: "Period 5", desc: "Mar 15, 2026 onward (fw ≥6.69.4)" },
 ];
 
 function formatDate(dateStr: string | null): string {
