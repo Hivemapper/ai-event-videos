@@ -6,6 +6,7 @@ import useSWR from "swr";
 import { ChevronLeft, ChevronRight, Copy, FileQuestion, Ghost, Route, VideoOff, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Header } from "@/components/layout/header";
 import { cn } from "@/lib/utils";
@@ -105,30 +106,20 @@ function TriageTable() {
   return (
     <div>
       {/* Period selector */}
-      <div className="flex items-center gap-2 mb-4">
-        {PERIOD_OPTIONS.map(({ value, label, desc }) => {
-          const isActive = period === value;
-          return (
-            <button
-              key={label}
-              onClick={() => handlePeriod(value)}
-              className={cn(
-                "rounded-md border px-3 py-1.5 text-sm transition-all",
-                isActive
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "hover:border-foreground/20"
-              )}
-              title={desc}
-            >
-              {label}
-            </button>
-          );
-        })}
-        {period && (
-          <span className="text-xs text-muted-foreground ml-2">
-            {PERIOD_OPTIONS.find((p) => p.value === period)?.desc}
-          </span>
-        )}
+      <div className="mb-4">
+        <Select value={period ?? "all"} onValueChange={(v) => handlePeriod(v === "all" ? null : v)}>
+          <SelectTrigger className="w-[320px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {PERIOD_OPTIONS.map(({ value, label, desc }) => (
+              <SelectItem key={label} value={value ?? "all"}>
+                <span>{label}</span>
+                {desc && <span className="text-muted-foreground ml-2 text-xs">{desc}</span>}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Summary cards */}
