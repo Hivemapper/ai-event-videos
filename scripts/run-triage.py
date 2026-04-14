@@ -590,11 +590,25 @@ def api_request(method: str, url: str, **kwargs) -> requests.Response:
         wait = min(wait * 2, 300)
 
 
-def fetch_events(api_key: str, limit: int, days: int, offset: int = 0) -> list[dict]:
+PERIODS = {
+    1: ("2025-01-01", "2025-09-15", "Period 1: Jan 1 – Sep 15, 2025"),
+    2: ("2025-09-15", "2026-01-15", "Period 2: Mid-Sep 2025 – Jan 15, 2026"),
+    3: ("2026-01-15", "2026-02-10", "Period 3: Jan 15 – Feb 10, 2026"),
+    4: ("2026-02-11", "2026-03-15", "Period 4: Feb 11 – Mar 15, 2026"),
+    5: ("2026-03-15", "2099-01-01", "Period 5: Mar 15, 2026 onward"),
+}
+
+
+def fetch_events(api_key: str, limit: int, days: int, offset: int = 0,
+                 start_date: datetime | None = None, end_date: datetime | None = None) -> list[dict]:
     """Fetch recent events from Bee Maps. Splits into 31-day chunks if needed."""
     auth = f"Basic {api_key}"
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    if start_date and end_date:
+        start = start_date
+        end = end_date
+    else:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
     max_chunk = timedelta(days=31)
 
     # Build 31-day chunks (newest first)
@@ -608,7 +622,8 @@ def fetch_events(api_key: str, limit: int, days: int, offset: int = 0) -> list[d
     all_events: list[dict] = []
     page_size = min(limit, 500)
 
-    print(f"Fetching {limit} events from last {days} days ({len(chunks)} chunk(s))...")
+    range_label = f"{start.strftime('%Y-%m-%d')} → {end.strftime('%Y-%m-%d')}"
+    print(f"Fetching {limit} events from {range_label} ({len(chunks)} chunk(s))...")
 
     for chunk_start, chunk_end in chunks:
         chunk_offset = offset if not all_events else 0
@@ -708,6 +723,8 @@ def main():
     parser = argparse.ArgumentParser(description="Phase 0 Triage — classify events without video")
     parser.add_argument("num_events", type=int, help="Number of events to triage")
     parser.add_argument("--days", type=int, default=30, help="Look back N days (default: 30)")
+    parser.add_argument("--period", type=int, choices=[1, 2, 3, 4, 5],
+                        help="Filter to a specific data period (1-5)")
     args = parser.parse_args()
 
     api_key = load_api_key()
@@ -722,9 +739,21 @@ def main():
         r[0] for r in conn.execute("SELECT id FROM triage_results").fetchall()
     )
 
+    # Resolve date range from --period or --days
+    start_date = None
+    end_date = None
+    if args.period:
+        p_start, p_end, p_label = PERIODS[args.period]
+        start_date = datetime.fromisoformat(p_start).replace(tzinfo=timezone.utc)
+        end_date = min(datetime.fromisoformat(p_end).replace(tzinfo=timezone.utc),
+                       datetime.now(timezone.utc))
+        print(f"{BOLD}{p_label}{RESET}")
+        print(f"  Date range: {p_start} → {end_date.strftime('%Y-%m-%d')}")
+
     # Fetch all events in the date range, then filter to untriaged
     print(f"{len(existing)} already triaged, looking for {args.num_events} new events...")
-    all_events = fetch_events(api_key, args.num_events + len(existing), args.days)
+    all_events = fetch_events(api_key, args.num_events + len(existing), args.days,
+                              start_date=start_date, end_date=end_date)
     to_triage = [e for e in all_events if e["id"] not in existing][:args.num_events]
     print(f"  found {len(to_triage)} new events (scanned {len(all_events)} total)\n")
 
