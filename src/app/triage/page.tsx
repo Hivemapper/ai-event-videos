@@ -46,6 +46,15 @@ const FILTER_OPTIONS = [
   { value: "signal", label: "Signal" },
 ] as const;
 
+const PERIOD_OPTIONS: { value: string | null; label: string; desc?: string }[] = [
+  { value: null, label: "All Periods" },
+  { value: "1", label: "Period 1", desc: "Jan – Sep 15, 2025" },
+  { value: "2", label: "Period 2", desc: "Sep 15, 2025 – Jan 15, 2026" },
+  { value: "3", label: "Period 3", desc: "Jan 15 – Feb 10, 2026" },
+  { value: "4", label: "Period 4", desc: "Feb 11 – Mar 15, 2026" },
+  { value: "5", label: "Period 5", desc: "Mar 15, 2026 onward" },
+];
+
 function formatDate(dateStr: string | null): string {
   if (!dateStr) return "—";
   const d = new Date(dateStr.endsWith("Z") ? dateStr : dateStr + "Z");
@@ -68,8 +77,9 @@ function formatRules(rulesJson: string): string[] {
 function TriageTable() {
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState<string | null>(null);
+  const [period, setPeriod] = useState<string | null>(null);
 
-  const url = `/api/triage?limit=${PAGE_SIZE}&offset=${offset}${filter ? `&filter=${filter}` : ""}`;
+  const url = `/api/triage?limit=${PAGE_SIZE}&offset=${offset}${filter ? `&filter=${filter}` : ""}${period ? `&period=${period}` : ""}`;
   const { data, isLoading } = useSWR<{
     results: TriageResult[];
     total: number;
@@ -82,14 +92,45 @@ function TriageTable() {
   const page = Math.floor(offset / PAGE_SIZE) + 1;
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  // Reset offset when filter changes
   const handleFilter = (f: string | null) => {
     setFilter(f);
     setOffset(0);
   };
 
+  const handlePeriod = (p: string | null) => {
+    setPeriod(p);
+    setOffset(0);
+  };
+
   return (
     <div>
+      {/* Period selector */}
+      <div className="flex items-center gap-2 mb-4">
+        {PERIOD_OPTIONS.map(({ value, label, desc }) => {
+          const isActive = period === value;
+          return (
+            <button
+              key={label}
+              onClick={() => handlePeriod(value)}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-sm transition-all",
+                isActive
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "hover:border-foreground/20"
+              )}
+              title={desc}
+            >
+              {label}
+            </button>
+          );
+        })}
+        {period && (
+          <span className="text-xs text-muted-foreground ml-2">
+            {PERIOD_OPTIONS.find((p) => p.value === period)?.desc}
+          </span>
+        )}
+      </div>
+
       {/* Summary cards */}
       <div className="grid grid-cols-7 gap-2 mb-6">
         {FILTER_OPTIONS.map(({ value, label }) => {

@@ -6,6 +6,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(request.nextUrl.searchParams.get("limit") ?? "50", 10);
     const offset = parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10);
     const filter = request.nextUrl.searchParams.get("filter"); // ghost, open_road, signal
+    const period = request.nextUrl.searchParams.get("period"); // 1-5
 
     const db = await getDb();
 
@@ -25,8 +26,29 @@ export async function GET(request: NextRequest) {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
 
-    const whereClause = filter ? "WHERE triage_result = ?" : "";
-    const params: unknown[] = filter ? [filter] : [];
+    // Period date ranges
+    const PERIODS: Record<string, [string, string]> = {
+      "1": ["2025-01-01", "2025-09-15"],
+      "2": ["2025-09-15", "2026-01-15"],
+      "3": ["2026-01-15", "2026-02-10"],
+      "4": ["2026-02-11", "2026-03-15"],
+      "5": ["2026-03-15", "2099-01-01"],
+    };
+
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter) {
+      conditions.push("triage_result = ?");
+      params.push(filter);
+    }
+    if (period && PERIODS[period]) {
+      const [pStart, pEnd] = PERIODS[period];
+      conditions.push("event_timestamp >= ? AND event_timestamp < ?");
+      params.push(pStart + "T00:00:00Z", pEnd + "T00:00:00Z");
+    }
+
+    const whereClause = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
 
     const countResult = await db.query(
       `SELECT COUNT(*) as count FROM triage_results ${whereClause}`,
@@ -40,9 +62,12 @@ export async function GET(request: NextRequest) {
       [...params, limit, offset]
     );
 
-    // Also get summary counts
+    // Also get summary counts (within period filter if set)
+    const summaryWhere = period && PERIODS[period]
+      ? `WHERE event_timestamp >= '${PERIODS[period][0]}T00:00:00Z' AND event_timestamp < '${PERIODS[period][1]}T00:00:00Z'`
+      : "";
     const summaryResult = await db.query(
-      `SELECT triage_result, COUNT(*) as count FROM triage_results GROUP BY triage_result`
+      `SELECT triage_result, COUNT(*) as count FROM triage_results ${summaryWhere} GROUP BY triage_result`
     );
     const summary: Record<string, number> = {};
     for (const row of summaryResult.rows as Array<{ triage_result: string; count: number }>) {
