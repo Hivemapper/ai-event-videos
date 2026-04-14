@@ -313,13 +313,14 @@ def detect_faces_and_plates(video_path: Path) -> tuple[list[dict], list[dict]]:
 
 
 def _has_nvenc() -> bool:
-    """Check if NVENC hardware encoder is available."""
+    """Check if NVENC hardware encoder is actually usable (not just listed)."""
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
             capture_output=True, text=True, timeout=10,
         )
-        return "h264_nvenc" in result.stdout
+        return result.returncode == 0
     except Exception:
         return False
 
@@ -372,7 +373,7 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
 
     # Build ffmpeg command — pipe raw BGR frames in, encode directly to output
     if _nvenc_available:
-        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23", "-profile:v", "high"]
     else:
         encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
