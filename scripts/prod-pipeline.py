@@ -407,7 +407,18 @@ def blur_with_tracking(video_path: Path, blur_boxes: list[dict], output_path: Pa
                 roi = frame[y:y+h, x:x+w]
                 if roi.size > 0:
                     k = max(15, min(99, (w + h) // 2 | 1))
-                    frame[y:y+h, x:x+w] = cv2.GaussianBlur(roi, (k, k), k // 3)
+                    blurred_roi = cv2.GaussianBlur(roi, (k, k), k // 3)
+                    # Rounded-corner mask so blur blends naturally
+                    radius = max(1, min(w, h) // 4)
+                    mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.rectangle(mask, (radius, 0), (w - radius, h), 255, -1)
+                    cv2.rectangle(mask, (0, radius), (w, h - radius), 255, -1)
+                    cv2.circle(mask, (radius, radius), radius, 255, -1)
+                    cv2.circle(mask, (w - radius, radius), radius, 255, -1)
+                    cv2.circle(mask, (radius, h - radius), radius, 255, -1)
+                    cv2.circle(mask, (w - radius, h - radius), radius, 255, -1)
+                    mask_3ch = mask[:, :, np.newaxis] / 255.0
+                    frame[y:y+h, x:x+w] = (blurred_roi * mask_3ch + roi * (1 - mask_3ch)).astype(np.uint8)
 
         proc.stdin.write(frame.tobytes())
 
