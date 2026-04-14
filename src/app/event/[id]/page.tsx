@@ -408,7 +408,9 @@ export default function EventDetailPage({
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `event_${event.id}.mp4`;
+      const d = new Date(event.timestamp);
+      const dateStr = `${(d.getMonth() + 1).toString().padStart(2, "0")}-${d.getDate().toString().padStart(2, "0")}-${d.getFullYear()}`;
+      link.download = `event_${event.id}_${dateStr}.mp4`;
       link.click();
       URL.revokeObjectURL(url);
     } catch {
