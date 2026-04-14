@@ -3,7 +3,7 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
-import { ChevronLeft, ChevronRight, Copy, FileQuestion, Ghost, Route, VideoOff, Zap } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, FileQuestion, Ghost, Loader2, Play, Route, VideoOff, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -79,13 +79,37 @@ function TriageTable() {
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState<string | null>(null);
   const [period, setPeriod] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
 
   const url = `/api/triage?limit=${PAGE_SIZE}&offset=${offset}${filter ? `&filter=${filter}` : ""}${period ? `&period=${period}` : ""}`;
-  const { data, isLoading } = useSWR<{
+  const { data, isLoading, mutate } = useSWR<{
     results: TriageResult[];
     total: number;
     summary: Record<string, number>;
   }>(url, fetcher, { revalidateOnFocus: false });
+
+  const runTriage = async () => {
+    setIsRunning(true);
+    setRunMessage(null);
+    try {
+      const resp = await fetch("/api/triage/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ numEvents: 500, period: period ? parseInt(period) : null }),
+      });
+      const data = await resp.json();
+      setRunMessage(data.message || "Triage started");
+      // Poll for new results after a delay
+      setTimeout(() => mutate(), 5000);
+      setTimeout(() => mutate(), 15000);
+      setTimeout(() => mutate(), 30000);
+    } catch {
+      setRunMessage("Failed to start triage");
+    } finally {
+      setIsRunning(false);
+    }
+  };
 
   const results = data?.results ?? [];
   const total = data?.total ?? 0;
@@ -105,8 +129,8 @@ function TriageTable() {
 
   return (
     <div>
-      {/* Period selector */}
-      <div className="mb-4">
+      {/* Period selector + Run button */}
+      <div className="flex items-center gap-3 mb-4">
         <Select value={period ?? "all"} onValueChange={(v) => handlePeriod(v === "all" ? null : v)}>
           <SelectTrigger className="w-[320px]">
             <SelectValue />
@@ -120,6 +144,17 @@ function TriageTable() {
             ))}
           </SelectContent>
         </Select>
+        <Button onClick={runTriage} disabled={isRunning} size="sm">
+          {isRunning ? (
+            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+          ) : (
+            <Play className="w-4 h-4 mr-2" />
+          )}
+          {isRunning ? "Running..." : "Run Triage"}
+        </Button>
+        {runMessage && (
+          <span className="text-xs text-muted-foreground">{runMessage}</span>
+        )}
       </div>
 
       {/* Summary cards */}
