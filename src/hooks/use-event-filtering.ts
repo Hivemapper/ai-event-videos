@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useEffect } from "react";
+import { useMemo } from "react";
 import { AIEvent, Region } from "@/types/events";
 import { getTimeOfDay, TimeOfDay } from "@/lib/sun";
 import { EventIndexEntry } from "@/lib/event-index";
@@ -38,17 +38,6 @@ export function useEventFiltering({
   indexCountries,
   selectedRoadTypes,
 }: UseEventFilteringOptions): AIEvent[] {
-  // Cache time-of-day results per event ID, cleared when events change
-  const todCacheRef = useRef<Map<string, TimeOfDay>>(new Map());
-  const prevEventsRef = useRef<AIEvent[]>([]);
-
-  useEffect(() => {
-    if (events !== prevEventsRef.current) {
-      todCacheRef.current = new Map();
-      prevEventsRef.current = events;
-    }
-  }, [events]);
-
   // Build a grid-cell → region-id lookup map from regions (O(1) per event)
   const gridToRegionId = useMemo(() => {
     const map = new Map<string, string>();
@@ -86,18 +75,18 @@ export function useEventFiltering({
 
     // Filter by time of day if any selected
     if (selectedTimeOfDay.length > 0) {
-      const cache = todCacheRef.current;
+      const timeOfDayById = new Map<string, TimeOfDay>();
       const todSet = new Set(selectedTimeOfDay);
 
       filtered = filtered.filter((event) => {
-        let tod = cache.get(event.id);
+        let tod = timeOfDayById.get(event.id);
         if (tod === undefined) {
           tod = getTimeOfDay(
             event.timestamp,
             event.location.lat,
             event.location.lon
           ).timeOfDay;
-          cache.set(event.id, tod);
+          timeOfDayById.set(event.id, tod);
         }
         return todSet.has(tod);
       });
@@ -159,7 +148,6 @@ export function useEventFiltering({
     gridToRegionId,
     useIndexForCountries,
     eventIndex,
-    indexCountries,
     effectiveCountries,
     selectedCountries,
     selectedRoadTypes,

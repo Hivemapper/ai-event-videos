@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
 
 export default function ProductionPipelineRedirect() {
-  redirect("/production-pipeline/queued");
+  redirect("/pipeline?stage=production&status=queued");
 }

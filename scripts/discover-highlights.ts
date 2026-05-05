@@ -11,8 +11,37 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { createClient, type Client as LibsqlClient } from "@libsql/client";
+import { isVruDetectionLabel } from "../src/lib/vru-labels";
 
 const API_BASE_URL = "https://beemaps.com/api/developer/aievents";
+
+// ---------------------------------------------------------------------------
+// VRU config (mirrors src/lib/detection-summary.ts + enrichment route)
+// ---------------------------------------------------------------------------
+
+/** Type weights per VRU label. Higher = more "interesting" / higher risk. */
+const VRU_TYPE_WEIGHTS: Record<string, number> = {
+  person: 1.0,
+  pedestrian: 1.0,
+  child: 1.3,
+  stroller: 1.3,
+  wheelchair: 1.2,
+  bicycle: 1.0,
+  scooter: 0.9,
+  skateboard: 0.9,
+  motorcycle: 0.7,
+  dog: 0.5,
+  cat: 0.4,
+  bird: 0.2,
+  horse: 0.6,
+  sheep: 0.4,
+  cow: 0.5,
+  bear: 0.8,
+};
+
+/** Match detection-summary.ts VRU_MIN_CONFIDENCE */
+const VRU_MIN_CONFIDENCE = 0.46;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -41,6 +70,8 @@ interface ScoredEvent {
   maxSpeed: number;
   minSpeed: number;
   acceleration: number;
+  vruScore: number;
+  vruLabels: string[]; // distinct VRU labels seen in this event, for logging
 }
 
 interface HighlightEntry {
@@ -114,6 +145,104 @@ function getAcceleration(metadata: Record<string, unknown> | undefined): number 
 }
 
 // ---------------------------------------------------------------------------
+// VRU metadata (queried from Turso detection pipeline DB)
+// ---------------------------------------------------------------------------
+
+interface VruInfo {
+  score: number;
+  labels: string[];
+}
+
+/** Fetch VRU detection data for a batch of event/video IDs from Turso.
+ *  Returns a map from video_id → VruInfo. IDs with no detection run or no
+ *  qualifying segments map to { score: 0, labels: [] }. */
+async function fetchVruScores(ids: string[]): Promise<Map<string, VruInfo>> {
+  const out = new Map<string, VruInfo>();
+  if (ids.length === 0) return out;
+
+  const url = process.env.TURSO_DATABASE_URL;
+  const authToken = process.env.TURSO_AUTH_TOKEN;
+  if (!url) {
+    console.warn("  (skipping VRU scoring — TURSO_DATABASE_URL not set)");
+    return out;
+  }
+
+  let db: LibsqlClient;
+  try {
+    db = createClient({ url, authToken });
+  } catch (e) {
+    console.warn(`  (VRU DB connect failed: ${e instanceof Error ? e.message : e})`);
+    return out;
+  }
+
+  // Turso placeholder limit is generous but chunk to be safe.
+  const CHUNK = 400;
+  const latestRunByVideo = new Map<string, string>();
+
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    // Latest completed run per video_id.
+    const runsRes = await db.execute({
+      sql: `SELECT video_id, id, created_at FROM detection_runs
+            WHERE status = 'completed' AND video_id IN (${placeholders})
+            ORDER BY video_id ASC, created_at DESC`,
+      args: chunk,
+    });
+    for (const row of runsRes.rows as unknown as Array<{
+      video_id: string;
+      id: string;
+    }>) {
+      if (!latestRunByVideo.has(row.video_id)) {
+        latestRunByVideo.set(row.video_id, row.id);
+      }
+    }
+  }
+
+  if (latestRunByVideo.size === 0) return out;
+
+  const runIds = Array.from(new Set(latestRunByVideo.values()));
+  const runToVideo = new Map<string, string>();
+  for (const [videoId, runId] of latestRunByVideo) {
+    runToVideo.set(runId, videoId);
+  }
+
+  // Aggregate score: Σ(typeWeight × max_confidence) across qualifying segments.
+  // Distinct labels stored for logging / "interesting" callouts.
+  const scores = new Map<string, { score: number; labels: Set<string> }>();
+
+  for (let i = 0; i < runIds.length; i += CHUNK) {
+    const chunk = runIds.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => "?").join(",");
+    const segRes = await db.execute({
+      sql: `SELECT run_id, label, max_confidence
+            FROM video_detection_segments
+            WHERE run_id IN (${placeholders}) AND max_confidence >= ?`,
+      args: [...chunk, VRU_MIN_CONFIDENCE],
+    });
+    for (const row of segRes.rows as unknown as Array<{
+      run_id: string;
+      label: string;
+      max_confidence: number;
+    }>) {
+      if (!isVruDetectionLabel(row.label)) continue;
+      const weight = VRU_TYPE_WEIGHTS[row.label] ?? 0.3; // unknown VRU-ish → small weight
+      const videoId = runToVideo.get(row.run_id);
+      if (!videoId) continue;
+      const cur = scores.get(videoId) ?? { score: 0, labels: new Set<string>() };
+      cur.score += weight * row.max_confidence;
+      cur.labels.add(row.label);
+      scores.set(videoId, cur);
+    }
+  }
+
+  for (const [videoId, v] of scores) {
+    out.set(videoId, { score: v.score, labels: Array.from(v.labels).sort() });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Bee Maps API
 // ---------------------------------------------------------------------------
 
@@ -177,48 +306,74 @@ interface Section {
   limit?: number; // per-section override (defaults to perSectionLimit)
 }
 
+/** Baseline severity signal for an event: combines speed delta, peak speed,
+ *  and acceleration. Used as the multiplier for VRU scoring and as a
+ *  tie-breaker across existing sections. */
+function severity(s: ScoredEvent): number {
+  return (s.maxSpeed - s.minSpeed) + s.acceleration * 30 + s.maxSpeed * 0.3;
+}
+
+/** Wrap a primary ranker so VRU score acts as a secondary tie-breaker boost.
+ *  The boost is bounded so it cannot override a clear winner on the primary. */
+function withVruBoost(
+  primary: (a: ScoredEvent, b: ScoredEvent) => number,
+  boost = 0.15
+): (a: ScoredEvent, b: ScoredEvent) => number {
+  return (a, b) => {
+    const p = primary(a, b);
+    if (Math.abs(p) > 1) return p; // clear winner on primary signal
+    return p + (b.vruScore - a.vruScore) * boost;
+  };
+}
+
 const SECTIONS: Section[] = [
   {
     index: 0,
     name: "Extreme Braking",
     types: ["HARSH_BRAKING"],
-    rank: (a, b) => (b.maxSpeed - b.minSpeed) - (a.maxSpeed - a.minSpeed),
+    rank: withVruBoost((a, b) => (b.maxSpeed - b.minSpeed) - (a.maxSpeed - a.minSpeed)),
     limit: 10,
   },
   {
     index: 1,
     name: "High Speed",
     types: ["HIGH_SPEED"],
-    rank: (a, b) => b.maxSpeed - a.maxSpeed,
+    rank: withVruBoost((a, b) => b.maxSpeed - a.maxSpeed),
   },
   {
     index: 2,
     name: "Highest G-Force",
     types: ["HIGH_G_FORCE"],
-    rank: (a, b) => b.acceleration - a.acceleration,
+    rank: withVruBoost((a, b) => b.acceleration - a.acceleration),
   },
   {
     index: 3,
     name: "Aggressive Acceleration",
     types: ["AGGRESSIVE_ACCELERATION"],
-    rank: (a, b) => b.acceleration - a.acceleration,
+    rank: withVruBoost((a, b) => b.acceleration - a.acceleration),
   },
   {
     index: 4,
     name: "Swerving",
     types: ["SWERVING"],
-    rank: (a, b) => b.acceleration - a.acceleration,
+    rank: withVruBoost((a, b) => b.acceleration - a.acceleration),
   },
   {
     index: 5,
     name: "International Highlights",
     types: [...TYPES],
-    rank: (a, b) => {
-      const sa = (a.maxSpeed - a.minSpeed) + a.acceleration * 30 + a.maxSpeed * 0.3;
-      const sb = (b.maxSpeed - b.minSpeed) + b.acceleration * 30 + b.maxSpeed * 0.3;
-      return sb - sa;
-    },
+    rank: withVruBoost((a, b) => severity(b) - severity(a)),
     filter: (s) => !isUSCoords(s.event.location.lat, s.event.location.lon),
+  },
+  {
+    index: 6,
+    name: "VRU Close Calls",
+    types: [...TYPES],
+    // Rank by combined VRU-presence * event-severity. Events without any
+    // detected VRU get filtered out below.
+    rank: (a, b) => b.vruScore * severity(b) - a.vruScore * severity(a),
+    filter: (s) => s.vruScore > 0.5, // requires at least one confident VRU
+    limit: 8,
   },
 ];
 
@@ -242,9 +397,61 @@ function getExistingIds(): Set<string> {
 // Write new events into highlights.ts
 // ---------------------------------------------------------------------------
 
+/** Short human description used only when creating a brand-new section. */
+const SECTION_DESCRIPTIONS: Record<string, string> = {
+  "VRU Close Calls":
+    "Events featuring vulnerable road users — pedestrians, cyclists, and motorcyclists detected near the vehicle during high-severity maneuvers.",
+};
+
+function buildEntryCode(entries: HighlightEntry[], now: number): string {
+  return entries
+    .map(
+      (e) =>
+        `      {\n` +
+        `        id: "${e.id}",\n` +
+        `        type: "${e.type}",\n` +
+        `        location: "${e.location}",\n` +
+        `        coords: { lat: ${e.coords.lat}, lon: ${e.coords.lon} },\n` +
+        `        date: "${e.date}",\n` +
+        `        maxSpeed: ${e.maxSpeed},\n` +
+        `        minSpeed: ${e.minSpeed},\n` +
+        `        acceleration: ${e.acceleration},\n` +
+        `        addedAt: ${now},\n` +
+        `      },`
+    )
+    .join("\n");
+}
+
+/** Insert a brand-new section block before the closing `];` of the
+ *  `highlightSections` array. */
+function insertNewSection(
+  content: string,
+  title: string,
+  entries: HighlightEntry[],
+  now: number
+): string {
+  const description = SECTION_DESCRIPTIONS[title] ?? "";
+  const entriesCode = buildEntryCode(entries, now);
+  const block =
+    `  {\n` +
+    `    title: "${title}",\n` +
+    `    description:\n      "${description}",\n` +
+    `    events: [\n${entriesCode}\n    ],\n` +
+    `  },\n`;
+
+  // Find the closing `];` of the top-level array. Search from the end.
+  const closeIdx = content.lastIndexOf("];");
+  if (closeIdx < 0) {
+    console.warn(`  Could not find highlightSections close bracket; skipping new section "${title}"`);
+    return content;
+  }
+  return content.slice(0, closeIdx) + block + content.slice(closeIdx);
+}
+
 function appendToHighlights(sectionNewEvents: Map<number, HighlightEntry[]>) {
   const hlPath = path.resolve(__dirname, "../src/lib/highlights.ts");
   let content = fs.readFileSync(hlPath, "utf-8");
+  const now = Date.now();
 
   // For each section, find the last event entry and insert after it
   for (const [sectionIndex, entries] of sectionNewEvents) {
@@ -252,31 +459,15 @@ function appendToHighlights(sectionNewEvents: Map<number, HighlightEntry[]>) {
 
     const section = SECTIONS[sectionIndex];
     const sectionTitle = section.name;
-
-    // Build the new entries as TypeScript code
-    const now = Date.now();
-    const newCode = entries
-      .map(
-        (e) =>
-          `      {\n` +
-          `        id: "${e.id}",\n` +
-          `        type: "${e.type}",\n` +
-          `        location: "${e.location}",\n` +
-          `        coords: { lat: ${e.coords.lat}, lon: ${e.coords.lon} },\n` +
-          `        date: "${e.date}",\n` +
-          `        maxSpeed: ${e.maxSpeed},\n` +
-          `        minSpeed: ${e.minSpeed},\n` +
-          `        acceleration: ${e.acceleration},\n` +
-          `        addedAt: ${now},\n` +
-          `      },`
-      )
-      .join("\n");
+    const newCode = buildEntryCode(entries, now);
 
     // Find the events array closing for this section by looking for the
     // section title, then finding the next `    ],` which closes the events array.
     const titleIdx = content.indexOf(`title: "${sectionTitle}"`);
     if (titleIdx < 0) {
-      console.warn(`  Could not find section "${sectionTitle}" in highlights.ts, skipping`);
+      // Section not present yet — create it (e.g., first run with VRU Close Calls).
+      console.log(`  Creating new section "${sectionTitle}" with ${entries.length} events`);
+      content = insertNewSection(content, sectionTitle, entries, now);
       continue;
     }
 
@@ -341,13 +532,35 @@ async function main() {
     byType[type] = events.map((event) => {
       const { maxSpeed, minSpeed } = parseSpeedArray(event.metadata);
       const acceleration = getAcceleration(event.metadata);
-      return { event, maxSpeed, minSpeed, acceleration };
+      return {
+        event,
+        maxSpeed,
+        minSpeed,
+        acceleration,
+        vruScore: 0,
+        vruLabels: [],
+      };
     });
   }
 
   // Get existing IDs to avoid duplicates
   const existingIds = getExistingIds();
   console.log(`\nExisting highlights: ${existingIds.size} events`);
+
+  // Fetch VRU scores for all candidate events in one pass.
+  const allIds = Object.values(byType).flat()
+    .map((s) => s.event.id)
+    .filter((id) => !existingIds.has(id));
+  console.log(`\nFetching VRU metadata for ${allIds.length} candidate events...`);
+  const vruMap = await fetchVruScores(allIds);
+  console.log(`  got VRU data for ${vruMap.size} events`);
+  for (const scored of Object.values(byType).flat()) {
+    const v = vruMap.get(scored.event.id);
+    if (v) {
+      scored.vruScore = v.score;
+      scored.vruLabels = v.labels;
+    }
+  }
 
   // Rank per section, excluding existing
   const sectionNewEvents = new Map<number, HighlightEntry[]>();
@@ -409,6 +622,12 @@ async function main() {
     }
   }
 
+  // Build a lookup from id → ScoredEvent for logging VRU info alongside entries.
+  const scoredById = new Map<string, ScoredEvent>();
+  for (const list of Object.values(byType)) {
+    for (const s of list) scoredById.set(s.event.id, s);
+  }
+
   // Report
   let totalNew = 0;
   console.log("\n--- Results ---\n");
@@ -417,8 +636,12 @@ async function main() {
     console.log(`${section.name}: ${entries.length} new events`);
     for (const e of entries) {
       const speedDrop = Math.round(e.maxSpeed - e.minSpeed);
+      const scored = scoredById.get(e.id);
+      const vruStr = scored && scored.vruScore > 0
+        ? ` | VRU: ${scored.vruScore.toFixed(2)} [${scored.vruLabels.join(",")}]`
+        : "";
       console.log(
-        `  ${e.id.slice(0, 8)}… | ${e.location} | ${e.date} | speed: ${e.maxSpeed}→${e.minSpeed} (Δ${speedDrop}) | accel: ${e.acceleration} m/s²`
+        `  ${e.id.slice(0, 8)}… | ${e.location} | ${e.date} | speed: ${e.maxSpeed}→${e.minSpeed} (Δ${speedDrop}) | accel: ${e.acceleration} m/s²${vruStr}`
       );
     }
     totalNew += entries.length;

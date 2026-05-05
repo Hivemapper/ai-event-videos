@@ -75,7 +75,8 @@ function getGridKey(lat: number, lon: number): string {
 
 export function useEventIndex(
   startDate: string,
-  endDate: string
+  endDate: string,
+  enabled = true
 ): EventIndexResult {
   const [index, setIndex] = useState<Map<string, EventIndexEntry>>(new Map());
   const [countries, setCountries] = useState<string[]>([]);
@@ -93,6 +94,11 @@ export function useEventIndex(
   const runIdRef = useRef(0);
 
   useEffect(() => {
+    if (!enabled) {
+      cancelledRef.current = true;
+      return;
+    }
+
     cancelledRef.current = true; // cancel previous run
     const runId = ++runIdRef.current;
     cancelledRef.current = false;
@@ -336,7 +342,7 @@ export function useEventIndex(
     return () => {
       cancelledRef.current = true;
     };
-  }, [startDate, endDate]);
+  }, [startDate, endDate, enabled]);
 
   return { index, countries, roadTypes, progress };
 }

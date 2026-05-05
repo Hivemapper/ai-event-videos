@@ -2,14 +2,21 @@ import { NextResponse } from "next/server";
 import { AVAILABLE_DETECTION_MODELS } from "@/lib/pipeline-config";
 import {
   createDetectionRun,
-  getActiveDetectionRun,
+  DETECTION_PRIORITY_MANUAL,
   listDetectionRuns,
   setDetectionRunWorkerPid,
   updateDetectionRunStatus,
 } from "@/lib/pipeline-store";
 import { spawnDetectionWorker } from "@/lib/detection-worker";
+import { syncClippedEventAssetsForAws } from "@/lib/clipped-event-assets";
 
 export const runtime = "nodejs";
+
+const LOCAL_RUNNER_MODES = new Set(["local", "local-worker", "spawn-local"]);
+
+function getDetectionRunnerMode(): string {
+  return (process.env.DETECTION_RUNNER_MODE ?? "aws-queue").trim().toLowerCase();
+}
 
 export async function GET(
   _request: Request,
@@ -69,25 +76,68 @@ export async function POST(
   }
 
   const modelConfig = AVAILABLE_DETECTION_MODELS.find((m) => m.id === modelName);
+  const runnerMode = getDetectionRunnerMode();
+  const shouldSpawnLocalWorker = LOCAL_RUNNER_MODES.has(runnerMode);
+  const executionTarget = shouldSpawnLocalWorker ? "local" : "aws";
+  const queuedForHost = process.env.DETECTION_AWS_HOST?.trim() || null;
+  let localAssetSync: Awaited<ReturnType<typeof syncClippedEventAssetsForAws>> | null = null;
+
+  if (!shouldSpawnLocalWorker) {
+    try {
+      localAssetSync = await syncClippedEventAssetsForAws(videoId);
+      if (localAssetSync.skippedReason === "no-detector-hosts") {
+        return NextResponse.json(
+          {
+            error: "Local clipped event assets exist, but no AWS detector hosts were configured or discovered",
+            localAssetSync,
+          },
+          { status: 500 }
+        );
+      }
+    } catch (error) {
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to sync local clipped event assets",
+        },
+        { status: 500 }
+      );
+    }
+  }
+
   const run = await createDetectionRun({
     videoId,
     modelName,
     config: {
       modelDisplayName: modelConfig?.name,
       type: modelConfig?.type,
-      device: modelConfig?.device,
+      device: shouldSpawnLocalWorker ? modelConfig?.device : "AWS GPU",
       classes: modelConfig?.classes,
       prompt: modelConfig?.prompt,
       features: modelConfig?.features,
       estimatedTime: modelConfig?.estimatedTime,
+      framesPerVideo: 300,
+      frameSampling: "every_n_frames",
+      frameStride: 5,
+      manualPriority: true,
+      executionTarget,
+      runnerMode,
+      ...(queuedForHost ? { queuedForHost } : {}),
+      ...(localAssetSync ? { localAssetSync } : {}),
     },
+    machineId: shouldSpawnLocalWorker ? undefined : null,
+    priority: DETECTION_PRIORITY_MANUAL,
   });
 
   if (!run) {
-    const activeRun = await getActiveDetectionRun();
+    const activeRun = (await listDetectionRuns(videoId)).find(
+      (candidate) => candidate.status === "queued" || candidate.status === "running"
+    );
     return NextResponse.json(
       {
-        error: "A detection run is already active",
+        error: "A detection run is already active for this video",
         activeRun: activeRun
           ? {
               id: activeRun.id,
@@ -100,26 +150,36 @@ export async function POST(
     );
   }
 
-  try {
-    const worker = spawnDetectionWorker({ runId: run.id });
-    await setDetectionRunWorkerPid(run.id, worker.pid);
-  } catch (error) {
-    await updateDetectionRunStatus(run.id, "failed", {
-      lastError:
-        error instanceof Error
-          ? error.message
-          : "Failed to start detection worker",
-    });
-    return NextResponse.json(
-      {
-        error:
+  if (shouldSpawnLocalWorker) {
+    try {
+      const worker = spawnDetectionWorker({ runId: run.id });
+      await setDetectionRunWorkerPid(run.id, worker.pid);
+    } catch (error) {
+      await updateDetectionRunStatus(run.id, "failed", {
+        lastError:
           error instanceof Error
             ? error.message
             : "Failed to start detection worker",
-      },
-      { status: 500 }
-    );
+      });
+      return NextResponse.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to start detection worker",
+        },
+        { status: 500 }
+      );
+    }
   }
 
-  return NextResponse.json({ run }, { status: 201 });
+  return NextResponse.json(
+    {
+      run,
+      executionTarget,
+      queuedForHost,
+      localAssetSync,
+    },
+    { status: shouldSpawnLocalWorker ? 201 : 202 }
+  );
 }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { getTimeOfDay } from "@/lib/sun";
+import { isVruDetectionLabel } from "@/lib/vru-labels";
 
 export const runtime = "nodejs";
 
@@ -21,13 +22,6 @@ interface EnrichmentResult {
   location: { city: string | null; country: string | null } | null;
   timeline: Array<{ startSec: number; endSec: number; event: string; details: string }> | null;
 }
-
-/** Labels that are NOT VRU detections */
-const NON_VRU_LABELS = new Set([
-  "car", "truck", "bus",
-  "stop sign", "traffic light", "crosswalk", "traffic signal", "yield sign",
-  "traffic cone",
-]);
 
 export async function GET(
   request: NextRequest,
@@ -85,7 +79,7 @@ export async function GET(
         end_ms: number;
         max_confidence: number;
       }>) {
-        if (NON_VRU_LABELS.has(row.label)) continue;
+        if (!isVruDetectionLabel(row.label)) continue;
         const arr = byLabel.get(row.label) ?? [];
         arr.push({
           startMs: row.start_ms,

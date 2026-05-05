@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useMemo, Suspense } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { RefreshCw, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -11,29 +11,12 @@ import {
   FilterBar,
   NewEventsBanner,
 } from "@/components/events";
-import dynamic from "next/dynamic";
-
-const AgentView = dynamic(
-  () => import("@/components/events/agent-dialog").then((m) => m.AgentView),
-  { ssr: false }
-);
 import { Header } from "@/components/layout/header";
-
-const EventsMap = dynamic(
-  () => import("@/components/map/events-map").then((m) => m.EventsMap),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="h-[calc(100vh-200px)] bg-muted animate-pulse rounded-xl" />
-    ),
-  }
-);
-import { Coordinates } from "@/components/events/filter-bar";
+import type { Coordinates, FilterUrlOverrides } from "@/components/events/filter-bar";
 import { useEvents } from "@/hooks/use-events";
 import { useEventIndex } from "@/hooks/use-event-index";
 import { AIEvent, AIEventType } from "@/types/events";
 import { TimeOfDay } from "@/lib/sun";
-import { getApiKey } from "@/lib/api";
 
 // Default to last 7 days
 function getDefaultDates() {
@@ -78,36 +61,53 @@ function GalleryView() {
   const [selectedRoadTypes, setSelectedRoadTypes] = useState<string[]>(
     searchParams.get("roadTypes")?.split(",").filter(Boolean) || []
   );
+  const [selectedVruLabels, setSelectedVruLabels] = useState<string[]>(
+    searchParams.get("vruLabels")?.split(",").filter(Boolean) || []
+  );
   const [searchCoordinates, setSearchCoordinates] = useState<Coordinates | null>(
     parseCoordinates(searchParams.get("coords"))
   );
   const [searchRadius, setSearchRadius] = useState(
     parseInt(searchParams.get("radius") || "500")
   );
-  const [view, setView] = useState<"list" | "map">(
-    (searchParams.get("view") as "list" | "map") || "list"
+  const [eventIndexEnabled, setEventIndexEnabled] = useState(
+    () => searchParams.has("countries") || searchParams.has("roadTypes")
   );
 
 
   // Background event index for country + road type discovery
-  const { index: eventIndex, countries: indexCountries, roadTypes: indexRoadTypes, progress: indexProgress } = useEventIndex(startDate, endDate);
+  const { index: eventIndex, countries: indexCountries, roadTypes: indexRoadTypes, progress: indexProgress } = useEventIndex(startDate, endDate, eventIndexEnabled);
 
   // Update URL when filters change
-  const updateUrl = useCallback(() => {
+  const updateUrl = useCallback((overrides: FilterUrlOverrides = {}) => {
+    const hasOverride = (key: keyof FilterUrlOverrides) =>
+      Object.prototype.hasOwnProperty.call(overrides, key);
+    const nextStartDate = overrides.startDate ?? startDate;
+    const nextEndDate = overrides.endDate ?? endDate;
+    const nextSelectedTypes = overrides.selectedTypes ?? selectedTypes;
+    const nextSelectedTimeOfDay = overrides.selectedTimeOfDay ?? selectedTimeOfDay;
+    const nextSelectedCountries = overrides.selectedCountries ?? selectedCountries;
+    const nextSelectedRoadTypes = overrides.selectedRoadTypes ?? selectedRoadTypes;
+    const nextSelectedVruLabels = overrides.selectedVruLabels ?? selectedVruLabels;
+    const nextSearchCoordinates = hasOverride("searchCoordinates")
+      ? overrides.searchCoordinates ?? null
+      : searchCoordinates;
+    const nextSearchRadius = overrides.searchRadius ?? searchRadius;
+
     const params = new URLSearchParams();
-    if (startDate !== defaultDates.startDate) params.set("startDate", startDate);
-    if (endDate !== defaultDates.endDate) params.set("endDate", endDate);
-    if (selectedTypes.length > 0) params.set("types", selectedTypes.join(","));
-    if (selectedTimeOfDay.length > 0) params.set("timeOfDay", selectedTimeOfDay.join(","));
-    if (selectedCountries.length > 0) params.set("countries", selectedCountries.join(","));
-    if (selectedRoadTypes.length > 0) params.set("roadTypes", selectedRoadTypes.join(","));
-    if (searchCoordinates) params.set("coords", `${searchCoordinates.lat},${searchCoordinates.lon}`);
-    if (searchRadius !== 500) params.set("radius", searchRadius.toString());
-    if (view !== "list") params.set("view", view);
+    if (nextStartDate !== defaultDates.startDate) params.set("startDate", nextStartDate);
+    if (nextEndDate !== defaultDates.endDate) params.set("endDate", nextEndDate);
+    if (nextSelectedTypes.length > 0) params.set("types", nextSelectedTypes.join(","));
+    if (nextSelectedTimeOfDay.length > 0) params.set("timeOfDay", nextSelectedTimeOfDay.join(","));
+    if (nextSelectedCountries.length > 0) params.set("countries", nextSelectedCountries.join(","));
+    if (nextSelectedRoadTypes.length > 0) params.set("roadTypes", nextSelectedRoadTypes.join(","));
+    if (nextSelectedVruLabels.length > 0) params.set("vruLabels", nextSelectedVruLabels.join(","));
+    if (nextSearchCoordinates) params.set("coords", `${nextSearchCoordinates.lat},${nextSearchCoordinates.lon}`);
+    if (nextSearchRadius !== 500) params.set("radius", nextSearchRadius.toString());
 
     const queryString = params.toString();
     router.replace(queryString ? `?${queryString}` : "/", { scroll: false });
-  }, [startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, searchCoordinates, searchRadius, view, defaultDates, router]);
+  }, [startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, selectedVruLabels, searchCoordinates, searchRadius, defaultDates, router]);
 
   const {
     filteredEvents,
@@ -121,6 +121,9 @@ function GalleryView() {
     refresh,
     newEventsCount,
     showNewEvents,
+    isRefreshing,
+    isLoadingNewEvents,
+    isLoadingMore,
   } = useEvents({
     startDate,
     endDate,
@@ -132,6 +135,8 @@ function GalleryView() {
     eventIndex,
     indexCountries,
     selectedRoadTypes,
+    selectedVruLabels,
+    resolveRegions: eventIndexEnabled,
   });
 
   // Use index countries when available, fallback to useEvents countries
@@ -144,31 +149,24 @@ function GalleryView() {
   );
   useEffect(() => {
     if (effectiveCountries.length > 0 && !countriesInitialized) {
-      setSelectedCountries(effectiveCountries);
-      setCountriesInitialized(true);
+      queueMicrotask(() => {
+        setSelectedCountries(effectiveCountries);
+        setCountriesInitialized(true);
+      });
     }
   }, [effectiveCountries, countriesInitialized]);
 
   // When index discovers new countries, add them to selection if all were selected
-  const prevIndexCountriesRef = useMemo(() => ({ current: indexCountries.length }), []);
+  const prevIndexCountriesRef = useRef(indexCountries.length);
   useEffect(() => {
     if (countriesInitialized && indexCountries.length > prevIndexCountriesRef.current) {
       // If user had all countries selected, keep all selected
       if (selectedCountries.length >= prevIndexCountriesRef.current && prevIndexCountriesRef.current > 0) {
-        setSelectedCountries(indexCountries);
+        queueMicrotask(() => setSelectedCountries(indexCountries));
       }
       prevIndexCountriesRef.current = indexCountries.length;
     }
-  }, [indexCountries, countriesInitialized, selectedCountries.length, prevIndexCountriesRef]);
-
-
-  // Auto-load all events when map view is active
-  useEffect(() => {
-    if (view === "map" && hasMore && !isLoading) {
-      loadMore();
-    }
-  }, [view, hasMore, isLoading, loadMore]);
-
+  }, [indexCountries, countriesInitialized, selectedCountries.length]);
 
   const handleEventClick = useCallback(
     (event: AIEvent) => {
@@ -179,8 +177,8 @@ function GalleryView() {
     [router, updateUrl]
   );
 
-  const handleApply = useCallback(() => {
-    updateUrl();
+  const handleApply = useCallback((overrides?: FilterUrlOverrides) => {
+    updateUrl(overrides);
   }, [updateUrl]);
 
   return (
@@ -209,9 +207,9 @@ function GalleryView() {
           selectedCountries={selectedCountries}
           searchCoordinates={searchCoordinates}
           searchRadius={searchRadius}
-          view={view}
           roadTypes={indexRoadTypes}
           selectedRoadTypes={selectedRoadTypes}
+          selectedVruLabels={selectedVruLabels}
           indexProgress={indexProgress}
           onStartDateChange={setStartDate}
           onEndDateChange={setEndDate}
@@ -220,9 +218,10 @@ function GalleryView() {
           onCountriesChange={setSelectedCountries}
           onCoordinatesChange={setSearchCoordinates}
           onRadiusChange={setSearchRadius}
-          onViewChange={setView}
           onRoadTypesChange={setSelectedRoadTypes}
+          onVruLabelsChange={setSelectedVruLabels}
           onApply={handleApply}
+          onIndexingRequested={() => setEventIndexEnabled(true)}
         />
 
         {/* Error message */}
@@ -239,57 +238,43 @@ function GalleryView() {
         )}
 
         {/* Results count */}
-        {!error && !isLoading && filteredEvents.length > 0 && (
-          <p className="text-sm text-muted-foreground">
-            Showing {filteredEvents.length.toLocaleString()} of {totalCount.toLocaleString()} events
+        {!error && filteredEvents.length > 0 && (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span>
+              Showing {filteredEvents.length.toLocaleString()} of {totalCount.toLocaleString()} events
+            </span>
+            {isRefreshing && (
+              <span className="inline-flex items-center gap-1 text-xs">
+                <RefreshCw className="h-3 w-3 animate-spin" />
+                Updating
+              </span>
+            )}
           </p>
         )}
 
         {/* New events link */}
-        <NewEventsBanner count={newEventsCount} onClick={showNewEvents} />
+        <NewEventsBanner
+          count={newEventsCount}
+          isLoading={isLoadingNewEvents}
+          onClick={showNewEvents}
+        />
 
-        {/* Event grid or map */}
-        {view === "list" ? (
-          <EventGrid
-            events={filteredEvents}
-            isLoading={isLoading}
-            hasMore={hasMore}
-            onLoadMore={loadMore}
-            onEventClick={handleEventClick}
-          />
-        ) : (
-          <>
-            <EventsMap
-              events={filteredEvents}
-              onEventClick={handleEventClick}
-              className="h-[calc(100vh-200px)] rounded-xl"
-            />
-            {hasMore && (
-              <p className="text-sm text-muted-foreground text-center py-2">
-                Loading all events for map... ({filteredEvents.length.toLocaleString()} loaded)
-              </p>
-            )}
-          </>
-        )}
+        <EventGrid
+          events={filteredEvents}
+          isLoading={(isLoading && filteredEvents.length === 0) || isLoadingMore}
+          hasMore={hasMore}
+          onLoadMore={loadMore}
+          onEventClick={handleEventClick}
+        />
       </main>
     </>
   );
 }
 
 function HomeContent() {
-  const searchParams = useSearchParams();
-  const agentOpen = searchParams.has("agent");
-
   return (
     <div className="min-h-screen bg-background">
-      {agentOpen ? (
-        <>
-          <Header />
-          <AgentView />
-        </>
-      ) : (
-        <GalleryView />
-      )}
+      <GalleryView />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, type FormEvent } from "react";
 import {
   Calendar,
   Check,
@@ -13,10 +13,9 @@ import {
   Moon,
   Sunrise,
   Sunset,
-  LayoutGrid,
-  Map,
   Route,
   Loader2,
+  Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +40,11 @@ import { ALL_EVENT_TYPES, EVENT_TYPE_CONFIG } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { TimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
 import { EventIndexProgress } from "@/hooks/use-event-index";
+import { getMapboxToken } from "@/lib/api";
+import {
+  VRU_OBJECT_FILTER_OPTIONS,
+  getVruObjectFilterLabel,
+} from "@/lib/vru-labels";
 
 const TIME_OF_DAY_OPTIONS: { value: TimeOfDay; label: string; icon: typeof Sun }[] = [
   { value: "Day", label: "Day", icon: Sun },
@@ -61,7 +65,91 @@ export const RADIUS_OPTIONS = [
   { value: 1000, label: "1km" },
   { value: 2000, label: "2km" },
   { value: 5000, label: "5km" },
+  { value: 10000, label: "10km" },
+  { value: 25000, label: "25km" },
 ] as const;
+
+export interface FilterUrlOverrides {
+  startDate?: string;
+  endDate?: string;
+  selectedTypes?: AIEventType[];
+  selectedTimeOfDay?: TimeOfDay[];
+  selectedCountries?: string[];
+  selectedRoadTypes?: string[];
+  selectedVruLabels?: string[];
+  searchCoordinates?: Coordinates | null;
+  searchRadius?: number;
+}
+
+interface MapboxGeocodeFeature {
+  bbox?: [number, number, number, number];
+  center?: [number, number];
+  place_name?: string;
+  place_type?: string[];
+}
+
+interface MapboxGeocodeResponse {
+  features?: MapboxGeocodeFeature[];
+}
+
+const COORDINATE_PATTERN = /^\s*\(?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)?\s*$/;
+const EARTH_RADIUS_METERS = 6371000;
+
+function parseCoordinateInput(value: string): Coordinates | null {
+  const match = value.match(COORDINATE_PATTERN);
+  if (!match) return null;
+
+  const lat = Number(match[1]);
+  const lon = Number(match[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+  return { lat, lon };
+}
+
+function formatCoordinatesForInput(coords: Coordinates): string {
+  return `${Number(coords.lat.toFixed(5))},${Number(coords.lon.toFixed(5))}`;
+}
+
+function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) ** 2;
+  return EARTH_RADIUS_METERS * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function nearestRadiusOption(radiusMeters: number): number {
+  return RADIUS_OPTIONS.reduce((best, option) =>
+    Math.abs(option.value - radiusMeters) < Math.abs(best.value - radiusMeters)
+      ? option
+      : best
+  ).value;
+}
+
+function estimateRadiusFromFeature(feature: MapboxGeocodeFeature): number {
+  if (feature.bbox && feature.bbox.length === 4) {
+    const [west, south, east, north] = feature.bbox;
+    const centerLat = feature.center?.[1] ?? (south + north) / 2;
+    const centerLon = feature.center?.[0] ?? (west + east) / 2;
+    const radius = Math.max(
+      distanceMeters(centerLat, centerLon, south, west),
+      distanceMeters(centerLat, centerLon, south, east),
+      distanceMeters(centerLat, centerLon, north, west),
+      distanceMeters(centerLat, centerLon, north, east)
+    );
+    return nearestRadiusOption(radius);
+  }
+
+  const types = feature.place_type ?? [];
+  if (types.includes("country") || types.includes("region")) return 25000;
+  if (types.includes("district") || types.includes("place")) return 10000;
+  if (types.includes("locality") || types.includes("neighborhood")) return 2000;
+  return 500;
+}
 
 interface FilterBarProps {
   startDate: string;
@@ -72,9 +160,9 @@ interface FilterBarProps {
   selectedCountries: string[];
   searchCoordinates: Coordinates | null;
   searchRadius: number;
-  view: "list" | "map";
   roadTypes?: string[];
   selectedRoadTypes?: string[];
+  selectedVruLabels?: string[];
   indexProgress?: EventIndexProgress;
   onStartDateChange: (date: string) => void;
   onEndDateChange: (date: string) => void;
@@ -83,9 +171,10 @@ interface FilterBarProps {
   onCountriesChange: (countries: string[]) => void;
   onCoordinatesChange: (coords: Coordinates | null) => void;
   onRadiusChange: (radius: number) => void;
-  onViewChange: (view: "list" | "map") => void;
   onRoadTypesChange?: (types: string[]) => void;
-  onApply?: () => void;
+  onVruLabelsChange?: (labels: string[]) => void;
+  onApply?: (filters?: FilterUrlOverrides) => void;
+  onIndexingRequested?: () => void;
 }
 
 export function FilterBar({
@@ -97,9 +186,9 @@ export function FilterBar({
   selectedCountries,
   searchCoordinates,
   searchRadius,
-  view,
   roadTypes = [],
   selectedRoadTypes = [],
+  selectedVruLabels = [],
   indexProgress,
   onStartDateChange,
   onEndDateChange,
@@ -108,12 +197,18 @@ export function FilterBar({
   onCountriesChange,
   onCoordinatesChange,
   onRadiusChange,
-  onViewChange,
   onRoadTypesChange,
+  onVruLabelsChange,
   onApply,
+  onIndexingRequested,
 }: FilterBarProps) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [showAllCountries, setShowAllCountries] = useState(false);
+  const [locationSearch, setLocationSearch] = useState(
+    searchCoordinates ? formatCoordinatesForInput(searchCoordinates) : ""
+  );
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [isLocationSearching, setIsLocationSearching] = useState(false);
 
   // Draft state for modal - only applied when user clicks "Apply Filters"
   const [draftStartDate, setDraftStartDate] = useState(startDate);
@@ -122,29 +217,21 @@ export function FilterBar({
   const [draftTimeOfDay, setDraftTimeOfDay] = useState<TimeOfDay[]>(selectedTimeOfDay);
   const [draftCountries, setDraftCountries] = useState<string[]>(selectedCountries);
   const [draftRoadTypes, setDraftRoadTypes] = useState<string[]>(selectedRoadTypes);
-  const [draftCoordinates, setDraftCoordinates] = useState<Coordinates | null>(searchCoordinates);
-  const [draftRadius, setDraftRadius] = useState(searchRadius);
-  const [draftCoordsInput, setDraftCoordsInput] = useState("");
+  const [draftVruLabels, setDraftVruLabels] = useState<string[]>(selectedVruLabels);
 
-  // Reset draft state only when modal OPENS (not on every prop change while open)
-  const prevOpenRef = useRef(false);
-  useEffect(() => {
-    const justOpened = advancedOpen && !prevOpenRef.current;
-    prevOpenRef.current = advancedOpen;
-    if (!justOpened) return;
-
-    setDraftStartDate(startDate);
-    setDraftEndDate(endDate);
-    setDraftTypes([...selectedTypes]);
-    setDraftTimeOfDay([...selectedTimeOfDay]);
-    setDraftCountries([...selectedCountries]);
-    setDraftRoadTypes([...selectedRoadTypes]);
-    setDraftCoordinates(searchCoordinates);
-    setDraftRadius(searchRadius);
-    setDraftCoordsInput(
-      searchCoordinates ? `${searchCoordinates.lat},${searchCoordinates.lon}` : ""
-    );
-  }, [advancedOpen, startDate, endDate, selectedTypes, selectedTimeOfDay, selectedCountries, selectedRoadTypes, searchCoordinates, searchRadius]);
+  const handleAdvancedOpenChange = (open: boolean) => {
+    if (open) {
+      onIndexingRequested?.();
+      setDraftStartDate(startDate);
+      setDraftEndDate(endDate);
+      setDraftTypes([...selectedTypes]);
+      setDraftTimeOfDay([...selectedTimeOfDay]);
+      setDraftCountries([...selectedCountries]);
+      setDraftRoadTypes([...selectedRoadTypes]);
+      setDraftVruLabels([...selectedVruLabels]);
+    }
+    setAdvancedOpen(open);
+  };
 
   const handleTypeToggle = (type: AIEventType) => {
     if (draftTypes.includes(type)) {
@@ -155,7 +242,9 @@ export function FilterBar({
   };
 
   const handleRemoveType = (type: AIEventType) => {
-    onTypesChange(selectedTypes.filter((t) => t !== type));
+    const nextTypes = selectedTypes.filter((t) => t !== type);
+    onTypesChange(nextTypes);
+    onApply?.({ selectedTypes: nextTypes });
   };
 
   const handleClearAllTypes = () => {
@@ -171,7 +260,9 @@ export function FilterBar({
   };
 
   const handleRemoveTimeOfDay = (time: TimeOfDay) => {
-    onTimeOfDayChange(selectedTimeOfDay.filter((t) => t !== time));
+    const nextTimeOfDay = selectedTimeOfDay.filter((t) => t !== time);
+    onTimeOfDayChange(nextTimeOfDay);
+    onApply?.({ selectedTimeOfDay: nextTimeOfDay });
   };
 
   const handleClearAllTimeOfDay = () => {
@@ -206,30 +297,22 @@ export function FilterBar({
     setDraftRoadTypes([]);
   };
 
-  const handleCoordsInputChange = (value: string) => {
-    setDraftCoordsInput(value);
-
-    // Parse coordinates in format "lat,lon"
-    const match = value.match(/^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$/);
-    if (match) {
-      const lat = parseFloat(match[1]);
-      const lon = parseFloat(match[2]);
-      if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
-        setDraftCoordinates({ lat, lon });
-        return;
-      }
+  const handleVruLabelToggle = (label: string) => {
+    if (draftVruLabels.includes(label)) {
+      setDraftVruLabels(draftVruLabels.filter((item) => item !== label));
+    } else {
+      setDraftVruLabels([...draftVruLabels, label]);
     }
-
-    // Only clear coordinates when user explicitly empties the field
-    if (value.trim() === "") {
-      setDraftCoordinates(null);
-    }
-    // Otherwise keep existing draftCoordinates — don't clear while user is typing
   };
 
-  const handleClearCoordinates = () => {
-    setDraftCoordsInput("");
-    setDraftCoordinates(null);
+  const handleRemoveVruLabel = (label: string) => {
+    const nextLabels = selectedVruLabels.filter((item) => item !== label);
+    onVruLabelsChange?.(nextLabels);
+    onApply?.({ selectedVruLabels: nextLabels });
+  };
+
+  const handleClearAllVruLabels = () => {
+    setDraftVruLabels([]);
   };
 
   const handleApplyFilters = () => {
@@ -239,9 +322,16 @@ export function FilterBar({
     onTimeOfDayChange(draftTimeOfDay);
     onCountriesChange(draftCountries);
     onRoadTypesChange?.(draftRoadTypes);
-    onCoordinatesChange(draftCoordinates);
-    onRadiusChange(draftRadius);
-    onApply?.();
+    onVruLabelsChange?.(draftVruLabels);
+    onApply?.({
+      startDate: draftStartDate,
+      endDate: draftEndDate,
+      selectedTypes: draftTypes,
+      selectedTimeOfDay: draftTimeOfDay,
+      selectedCountries: draftCountries,
+      selectedRoadTypes: draftRoadTypes,
+      selectedVruLabels: draftVruLabels,
+    });
     setAdvancedOpen(false);
   };
 
@@ -250,7 +340,93 @@ export function FilterBar({
     onTimeOfDayChange([]);
     onCountriesChange([...countries]);
     onRoadTypesChange?.([]);
+    onVruLabelsChange?.([]);
     onCoordinatesChange(null);
+    setLocationSearch("");
+    setLocationError(null);
+    onApply?.({
+      selectedTypes: [],
+      selectedTimeOfDay: [],
+      selectedCountries: [...countries],
+      selectedRoadTypes: [],
+      selectedVruLabels: [],
+      searchCoordinates: null,
+    });
+  };
+
+  const handleLocationSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = locationSearch.trim();
+    setLocationError(null);
+
+    if (!query) {
+      onCoordinatesChange(null);
+      onApply?.({ searchCoordinates: null });
+      return;
+    }
+
+    const parsedCoordinates = parseCoordinateInput(query);
+    if (parsedCoordinates) {
+      onCoordinatesChange(parsedCoordinates);
+      onRadiusChange(searchRadius);
+      onApply?.({
+        searchCoordinates: parsedCoordinates,
+        searchRadius,
+      });
+      return;
+    }
+
+    const token = getMapboxToken();
+    if (!token) {
+      setLocationError("Place search needs a Mapbox token in Settings.");
+      return;
+    }
+
+    setIsLocationSearching(true);
+    try {
+      const response = await fetch(
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?` +
+          new URLSearchParams({
+            access_token: token,
+            autocomplete: "false",
+            limit: "1",
+            types: "address,poi,neighborhood,locality,place,district,region,country",
+          }).toString()
+      );
+      if (!response.ok) {
+        throw new Error(`Mapbox geocoding failed: ${response.status}`);
+      }
+
+      const data = (await response.json()) as MapboxGeocodeResponse;
+      const feature = data.features?.[0];
+      if (!feature?.center || feature.center.length < 2) {
+        throw new Error("No matching place found.");
+      }
+
+      const nextCoordinates = {
+        lat: feature.center[1],
+        lon: feature.center[0],
+      };
+      const nextRadius = estimateRadiusFromFeature(feature);
+      onCoordinatesChange(nextCoordinates);
+      onRadiusChange(nextRadius);
+      setLocationSearch(feature.place_name ?? query);
+      onApply?.({
+        searchCoordinates: nextCoordinates,
+        searchRadius: nextRadius,
+      });
+    } catch (error) {
+      setLocationError(error instanceof Error ? error.message : "Unable to search that place.");
+    } finally {
+      setIsLocationSearching(false);
+    }
+  };
+
+  const handleClearAppliedCoordinates = () => {
+    onCoordinatesChange(null);
+    setLocationSearch("");
+    setLocationError(null);
+    onApply?.({ searchCoordinates: null });
   };
 
   const allCountriesSelected =
@@ -266,98 +442,111 @@ export function FilterBar({
     (selectedTypes.length > 0 ? 1 : 0) +
     (selectedTimeOfDay.length > 0 ? 1 : 0) +
     (!allCountriesSelected && selectedCountries.length > 0 ? 1 : 0) +
-    (selectedRoadTypes.length > 0 ? 1 : 0);
+    (selectedRoadTypes.length > 0 ? 1 : 0) +
+    (selectedVruLabels.length > 0 ? 1 : 0);
 
   return (
     <div className="space-y-4">
       {/* Filter controls */}
-      <div className="flex flex-wrap items-center gap-4">
-        {/* Filters button */}
-        <Dialog open={advancedOpen} onOpenChange={setAdvancedOpen}>
-          <DialogTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "gap-2",
-                activeFilterCount > 0 && "border-primary text-primary"
-              )}
-            >
-              <SlidersHorizontal className="w-4 h-4" />
-              Filters
-              {activeFilterCount > 0 && (
-                <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-xs">
-                  {activeFilterCount}
-                </Badge>
-              )}
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-5xl">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                Filters
-                {isIndexing && (
-                  <span className="flex items-center gap-1.5 text-xs font-normal text-muted-foreground">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    {indexProgress.phase === "loading-countries" && "Loading country data..."}
-                    {indexProgress.phase === "discovering" && (
-                      <>Indexing events ({indexProgress.eventsDiscovered.toLocaleString()}/{indexProgress.totalEvents.toLocaleString()})</>
-                    )}
-                    {indexProgress.phase === "road-types" && (
-                      <>Road types ({indexProgress.roadTypesResolved}/{indexProgress.roadTypesTotal})</>
-                    )}
-                  </span>
-                )}
-              </DialogTitle>
-            </DialogHeader>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <form
+          onSubmit={handleLocationSubmit}
+          className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center"
+        >
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              type="search"
+              value={locationSearch}
+              onChange={(event) => {
+                setLocationSearch(event.target.value);
+                setLocationError(null);
+              }}
+              placeholder="Menlo Park, CA or 37.45,-122.18"
+              className="h-10 pl-9"
+            />
+          </div>
+          <Select
+            value={searchRadius.toString()}
+            onValueChange={(value) => {
+              const nextRadius = parseInt(value, 10);
+              onRadiusChange(nextRadius);
+              if (searchCoordinates) {
+                onApply?.({ searchRadius: nextRadius });
+              }
+            }}
+          >
+            <SelectTrigger className="h-10 w-full sm:w-28">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {RADIUS_OPTIONS.map((option) => (
+                <SelectItem
+                  key={option.value}
+                  value={option.value.toString()}
+                >
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            type="submit"
+            className="h-10 gap-2 sm:w-auto"
+            disabled={isLocationSearching}
+          >
+            {isLocationSearching ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Search className="w-4 h-4" />
+            )}
+            Search
+          </Button>
+        </form>
 
-            {/* Location search — full width, horizontal */}
-            <div className="flex items-center gap-3 py-3 border-b">
-              <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide shrink-0">
-                <MapPin className="w-4 h-4" />
-                Location
-              </label>
-              <div className="relative flex-1">
-                <Input
-                  type="text"
-                  placeholder="lat,lon"
-                  value={draftCoordsInput}
-                  onChange={(e) => handleCoordsInputChange(e.target.value)}
-                  className={cn(
-                    draftCoordinates && "pr-8 border-primary"
-                  )}
-                />
-                {draftCoordinates && (
-                  <button
-                    type="button"
-                    onClick={handleClearCoordinates}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded-full hover:bg-muted"
-                  >
-                    <X className="w-4 h-4 text-muted-foreground" />
-                  </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Filters button */}
+          <Dialog
+            open={advancedOpen}
+            onOpenChange={handleAdvancedOpenChange}
+          >
+            <DialogTrigger asChild>
+              <Button
+                variant="outline"
+                className={cn(
+                  "h-10 gap-2",
+                  activeFilterCount > 0 && "border-primary text-primary"
                 )}
-              </div>
-              <Select
-                value={draftRadius.toString()}
-                onValueChange={(value) => setDraftRadius(parseInt(value))}
               >
-                <SelectTrigger className="w-32 shrink-0">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {RADIUS_OPTIONS.map((option) => (
-                    <SelectItem
-                      key={option.value}
-                      value={option.value.toString()}
-                    >
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+                <SlidersHorizontal className="w-4 h-4" />
+                Filters
+                {activeFilterCount > 0 && (
+                  <Badge variant="secondary" className="ml-1 px-1.5 py-0 text-xs">
+                    {activeFilterCount}
+                  </Badge>
+                )}
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-6xl">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  Filters
+                  {isIndexing && (
+                    <span className="flex items-center gap-1.5 text-xs font-normal text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      {indexProgress.phase === "loading-countries" && "Loading country data..."}
+                      {indexProgress.phase === "discovering" && (
+                        <>Indexing events ({indexProgress.eventsDiscovered.toLocaleString()}/{indexProgress.totalEvents.toLocaleString()})</>
+                      )}
+                      {indexProgress.phase === "road-types" && (
+                        <>Road types ({indexProgress.roadTypesResolved}/{indexProgress.roadTypesTotal})</>
+                      )}
+                    </span>
+                  )}
+                </DialogTitle>
+              </DialogHeader>
 
-            <div className="grid grid-cols-2 md:grid-cols-[1.5fr_1fr_1fr_1fr_1fr] gap-6 py-4">
+            <div className="grid grid-cols-1 gap-6 py-4 sm:grid-cols-2 lg:grid-cols-[1.3fr_1fr_1fr_1fr_1fr_1fr]">
               {/* Column 1: Date Range */}
               <div className="space-y-6">
                 {/* Date range */}
@@ -618,6 +807,47 @@ export function FilterBar({
                   </p>
                 )}
               </div>
+
+              {/* Column 6: VRU/Object Filter */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-medium flex items-center gap-2 text-muted-foreground uppercase tracking-wide">
+                    <Search className="w-4 h-4" />
+                    VRU / Object
+                  </label>
+                  {draftVruLabels.length > 0 && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleClearAllVruLabels}
+                      className="text-xs h-6 px-2"
+                    >
+                      Clear
+                    </Button>
+                  )}
+                </div>
+
+                <div className="space-y-1 max-h-[240px] overflow-y-auto">
+                  {VRU_OBJECT_FILTER_OPTIONS.map((option) => {
+                    const isSelected = draftVruLabels.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => handleVruLabelToggle(option.value)}
+                        className={cn(
+                          "w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors text-left",
+                          "hover:bg-accent",
+                          isSelected && "bg-accent/50"
+                        )}
+                      >
+                        <span className="text-xs flex-1">{option.label}</span>
+                        {isSelected && <Check className="w-3 h-3 shrink-0 text-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             <DialogFooter>
@@ -643,30 +873,32 @@ export function FilterBar({
           </Button>
         )}
 
-        {/* View toggle */}
-        <div className="flex gap-1 ml-auto">
-          <Button
-            variant={view === "list" ? "secondary" : "ghost"}
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => onViewChange("list")}
-          >
-            <LayoutGrid className="w-4 h-4" />
-          </Button>
-          <Button
-            variant={view === "map" ? "secondary" : "ghost"}
-            size="icon"
-            className="h-8 w-8"
-            onClick={() => onViewChange("map")}
-          >
-            <Map className="w-4 h-4" />
-          </Button>
         </div>
       </div>
 
+      {locationError && (
+        <p className="text-sm text-destructive">{locationError}</p>
+      )}
+
       {/* Selected filter chips */}
-      {(selectedTypes.length > 0 || selectedTimeOfDay.length > 0 || selectedRoadTypes.length > 0) && (
+      {(searchCoordinates || selectedTypes.length > 0 || selectedTimeOfDay.length > 0 || selectedRoadTypes.length > 0 || selectedVruLabels.length > 0) && (
         <div className="flex flex-wrap gap-2">
+          {searchCoordinates && (
+            <Badge
+              variant="secondary"
+              className="pl-2 pr-1 py-1 flex items-center gap-1 border"
+            >
+              <MapPin className="w-3 h-3" />
+              <span>{formatCoordinatesForInput(searchCoordinates)}</span>
+              <button
+                type="button"
+                onClick={handleClearAppliedCoordinates}
+                className="ml-1 p-0.5 rounded-full hover:bg-black/10"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </Badge>
+          )}
           {selectedTypes.map((type) => {
             const config = EVENT_TYPE_CONFIG[type];
             const Icon = config.icon;
@@ -733,7 +965,28 @@ export function FilterBar({
               <span>{type}</span>
               <button
                 type="button"
-                onClick={() => onRoadTypesChange?.(selectedRoadTypes.filter((t) => t !== type))}
+                onClick={() => {
+                  const nextRoadTypes = selectedRoadTypes.filter((t) => t !== type);
+                  onRoadTypesChange?.(nextRoadTypes);
+                  onApply?.({ selectedRoadTypes: nextRoadTypes });
+                }}
+                className="ml-1 p-0.5 rounded-full hover:bg-black/10"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </Badge>
+          ))}
+          {selectedVruLabels.map((label) => (
+            <Badge
+              key={label}
+              variant="secondary"
+              className="pl-2 pr-1 py-1 flex items-center gap-1 border"
+            >
+              <Search className="w-3 h-3" />
+              <span>{getVruObjectFilterLabel(label)}</span>
+              <button
+                type="button"
+                onClick={() => handleRemoveVruLabel(label)}
                 className="ml-1 p-0.5 rounded-full hover:bg-black/10"
               >
                 <X className="w-3 h-3" />

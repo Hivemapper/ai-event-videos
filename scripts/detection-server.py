@@ -38,7 +38,7 @@ from PIL import Image
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_detection import (
-    PROJECT_ROOT, DB_PATH, CACHE_DIR, FRAMES_PER_VIDEO, PIPELINE_VERSION,
+    PROJECT_ROOT, DB_PATH, CACHE_DIR, FRAMES_PER_VIDEO, DEFAULT_FRAME_STRIDE, PIPELINE_VERSION,
     API_BASE_URL,
     GDINO_TEXT_PROMPT, GDINO_BOX_THRESHOLD, GDINO_TEXT_THRESHOLD,
     CLIP_MODEL_NAME, CLIP_PRETRAINED, CLIP_MIN_SIMILARITY,
@@ -46,6 +46,8 @@ from run_detection import (
     ANIMAL_LABELS, ANIMAL_MIN_CONFIDENCE, ANIMAL_MIN_FRAMES, ANIMAL_FRAME_GAP_MS,
     get_device, free_gpu, download_video, extract_frames,
     load_api_key, utc_now,
+    parse_frame_target, parse_frame_stride, fetch_event_for_detection,
+    should_cleanup_video_path,
     normalize_gdino_label, apply_nms, filter_ego_vehicle,
     filter_non_collision_vehicles, penalize_riderless, _filter_animal_detections,
     update_run_status, get_detection_run,
@@ -61,6 +63,8 @@ RED = "\033[31m"
 RESET = "\033[0m"
 
 MODEL_NAME = "gdino-base+clip"
+MIN_PRIORITY_FIRMWARE_NUM = 7_004_003
+DETECTION_PRIORITY_DEFAULT = 100
 
 
 class ModelCache:
@@ -293,21 +297,13 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
 
     video_id = run["video_id"]
     config = json.loads(run["config_json"] or "{}")
-    num_frames = int(config.get("framesPerVideo", FRAMES_PER_VIDEO))
+    num_frames = parse_frame_target(config.get("framesPerVideo", FRAMES_PER_VIDEO))
+    frame_stride = parse_frame_stride(config.get("frameStride"))
 
     video_path = None
     try:
         # Fetch event
-        api_key = load_api_key()
-        from run_detection import api_request
-        resp = api_request(
-            "GET",
-            f"{API_BASE_URL}/{video_id}?includeGnssData=true&includeImuData=true",
-            headers={"Authorization": api_key, "Content-Type": "application/json"},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        event = resp.json()
+        event = fetch_event_for_detection(video_id, include_sensor=True)
 
         # Download video
         video_url = event.get("videoUrl")
@@ -318,7 +314,7 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
             raise RuntimeError("Video download failed")
 
         # Extract frames
-        frames = extract_frames(video_path, num_frames)
+        frames = extract_frames(video_path, num_frames, frame_stride=frame_stride)
         if not frames:
             raise RuntimeError("No frames extracted")
 
@@ -335,20 +331,32 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
         detections = _filter_animal_detections(detections)
 
         # Save to DB
-        total_saved = 0
-        for det in detections:
-            conn.execute(
-                """INSERT INTO frame_detections
-                   (video_id, frame_ms, label, x_min, y_min, x_max, y_max,
-                    confidence, frame_width, frame_height, pipeline_version, model_name, run_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (video_id, det["frame_ms"], det["label"],
-                 det["x_min"], det["y_min"], det["x_max"], det["y_max"],
-                 det["confidence"], det["frame_width"], det["frame_height"],
-                 PIPELINE_VERSION, MODEL_NAME, run_id),
+        insert_sql = """INSERT INTO frame_detections
+           (video_id, frame_ms, label, x_min, y_min, x_max, y_max,
+            confidence, frame_width, frame_height, pipeline_version, model_name, run_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        insert_rows = [
+            (
+                video_id,
+                det["frame_ms"],
+                det["label"],
+                det["x_min"],
+                det["y_min"],
+                det["x_max"],
+                det["y_max"],
+                det["confidence"],
+                det["frame_width"],
+                det["frame_height"],
+                PIPELINE_VERSION,
+                MODEL_NAME,
+                run_id,
             )
-            total_saved += 1
-        conn.commit()
+            for det in detections
+        ]
+        total_saved = len(insert_rows)
+        if insert_rows:
+            conn.executemany(insert_sql, insert_rows)
+            conn.commit()
 
         # Aggregate detections into time segments
         segments: list[tuple] = []
@@ -396,9 +404,9 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
             "(video_id, label, start_ms, end_ms, max_confidence, support_level, pipeline_version, source, run_id) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        for seg in segments:
-            conn.execute(seg_sql, seg)
-        conn.commit()
+        if segments:
+            conn.executemany(seg_sql, segments)
+            conn.commit()
 
         update_run_status(conn, run_id, "completed", detection_count=total_saved)
         print(f"  {GREEN}Completed: {total_saved} detections, {len(segments)} segments{RESET}")
@@ -410,8 +418,8 @@ def process_run(cache: ModelCache, run_id: str) -> bool:
         update_run_status(conn, run_id, "failed", last_error=str(exc)[:1000])
         return False
     finally:
-        # Clean up cached video to prevent disk from filling up
-        if video_path and video_path.exists():
+        # Clean up cached downloads, but preserve local clipped/public source files.
+        if video_path and video_path.exists() and should_cleanup_video_path(video_path):
             video_path.unlink(missing_ok=True)
         conn.close()
 
@@ -435,60 +443,106 @@ MACHINE_ID = get_machine_id()
 def claim_next_run(cache: ModelCache, args_ref=None) -> str | None:
     """Find and claim the next video to process. Returns run_id or None."""
     conn = get_db()
+    try:
+        # First check for existing queued detection runs (e.g. from web UI)
+        rows = conn.execute(
+            """SELECT dr.id AS id
+               FROM detection_runs dr
+               LEFT JOIN triage_results t ON t.id = dr.video_id
+               LEFT JOIN video_frame_timing_qc q ON q.video_id = dr.video_id
+               WHERE dr.status = 'queued'
+               ORDER BY
+                 COALESCE(dr.priority, ?) ASC,
+                 CASE
+                   WHEN t.firmware_version_num >= ?
+                    AND q.bucket IN ('perfect', 'ok')
+                   THEN 0 ELSE 1
+                 END ASC,
+                 CASE WHEN t.firmware_version_num >= ? THEN 0 ELSE 1 END ASC,
+                 CASE WHEN q.bucket IN ('perfect', 'ok') THEN 0 ELSE 1 END ASC,
+                 dr.created_at ASC
+               LIMIT 10""",
+            (
+                DETECTION_PRIORITY_DEFAULT,
+                MIN_PRIORITY_FIRMWARE_NUM,
+                MIN_PRIORITY_FIRMWARE_NUM,
+            ),
+        ).fetchall()
 
-    # First check for existing queued detection runs (e.g. from web UI)
-    row = conn.execute(
-        "SELECT id FROM detection_runs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
-    ).fetchone()
+        for row in rows:
+            run_id = row[0] if isinstance(row, tuple) else row["id"]
+            conn.execute(
+                "UPDATE detection_runs SET status = 'running', started_at = ?, worker_pid = ?, machine_id = ? WHERE id = ? AND status = 'queued'",
+                (utc_now(), os.getpid(), MACHINE_ID, run_id)
+            )
+            conn.commit()
+            claimed = conn.execute(
+                "SELECT status, worker_pid, machine_id FROM detection_runs WHERE id = ?",
+                (run_id,)
+            ).fetchone()
+            if not claimed:
+                continue
+            status = claimed[0] if isinstance(claimed, tuple) else claimed["status"]
+            worker_pid = claimed[1] if isinstance(claimed, tuple) else claimed["worker_pid"]
+            machine_id = claimed[2] if isinstance(claimed, tuple) else claimed["machine_id"]
+            if status == "running" and int(worker_pid or 0) == os.getpid() and machine_id == MACHINE_ID:
+                return run_id
 
-    if row:
-        run_id = row[0] if isinstance(row, tuple) else row["id"]
+        # Pick from triage_results: signal events with no detection run yet
+        candidate = conn.execute(
+            """SELECT t.id AS id FROM triage_results t
+               LEFT JOIN video_frame_timing_qc q ON q.video_id = t.id
+               WHERE t.triage_result = 'signal'
+                 AND (t.road_class IS NULL OR t.road_class != 'motorway')
+                 AND (t.speed_min IS NULL OR t.speed_min < 45)
+                 AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
+               ORDER BY
+                 CASE
+                   WHEN t.firmware_version_num >= ?
+                    AND q.bucket IN ('perfect', 'ok')
+                   THEN 0 ELSE 1
+                 END ASC,
+                 CASE WHEN t.firmware_version_num >= ? THEN 0 ELSE 1 END ASC,
+                 CASE WHEN q.bucket IN ('perfect', 'ok') THEN 0 ELSE 1 END ASC,
+                 CASE WHEN t.event_timestamp IS NULL THEN 1 ELSE 0 END ASC,
+                 julianday(t.event_timestamp) DESC,
+                 t.created_at DESC
+               LIMIT 1""",
+            (MIN_PRIORITY_FIRMWARE_NUM, MIN_PRIORITY_FIRMWARE_NUM),
+        ).fetchone()
+
+        if not candidate:
+            return None
+
+        video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
+        run_id = str(uuid.uuid4())
+        config = json.dumps({
+            "modelDisplayName": "GDINO Base (grounding-dino-base) + CLIP",
+            "type": "Open-vocabulary (detect anything described in text)",
+            "device": "CUDA",
+            "framesPerVideo": args_ref.frames,
+            "frameSampling": "every_n_frames" if args_ref.frame_stride else "max",
+            "frameStride": args_ref.frame_stride,
+        })
         conn.execute(
-            "UPDATE detection_runs SET status = 'running', started_at = ?, worker_pid = ?, machine_id = ? WHERE id = ?",
-            (utc_now(), os.getpid(), MACHINE_ID, run_id)
+            """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at, started_at, worker_pid)
+               VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+            (run_id, video_id, MODEL_NAME, config, MACHINE_ID, utc_now(), utc_now(), os.getpid())
         )
         conn.commit()
-        conn.close()
         return run_id
-
-    # Pick from triage_results: signal events with no detection run yet
-    candidate = conn.execute(
-        """SELECT t.id FROM triage_results t
-           WHERE t.triage_result = 'signal'
-             AND (t.road_class IS NULL OR t.road_class != 'motorway')
-             AND (t.speed_min IS NULL OR t.speed_min < 45)
-             AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-           LIMIT 1"""
-    ).fetchone()
-
-    if not candidate:
+    finally:
         conn.close()
-        return None
-
-    video_id = candidate[0] if isinstance(candidate, tuple) else candidate["id"]
-    run_id = str(uuid.uuid4())
-    config = json.dumps({
-        "modelDisplayName": "GDINO Base (grounding-dino-base) + CLIP",
-        "type": "Open-vocabulary (detect anything described in text)",
-        "device": "CUDA",
-        "framesPerVideo": args_ref.frames,
-    })
-    conn.execute(
-        """INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at, started_at, worker_pid)
-           VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
-        (run_id, video_id, MODEL_NAME, config, MACHINE_ID, utc_now(), utc_now(), os.getpid())
-    )
-    conn.commit()
-    conn.close()
-    return run_id
 
 
 def main():
     parser = argparse.ArgumentParser(description="Persistent detection server")
     parser.add_argument("--poll", type=float, default=2, help="Poll interval (default: 2s)")
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers (default: 1)")
-    parser.add_argument("--frames", type=int, default=45, help="Frames per video (default: 45)")
+    parser.add_argument("--frames", type=int, default=FRAMES_PER_VIDEO, help=f"Maximum frames per video (default: {FRAMES_PER_VIDEO})")
+    parser.add_argument("--frame-stride", type=int, default=DEFAULT_FRAME_STRIDE, help=f"Sample every N source frames (default: {DEFAULT_FRAME_STRIDE})")
     args = parser.parse_args()
+    args.frame_stride = parse_frame_stride(args.frame_stride)
 
     print(f"{BOLD}{'═' * 60}{RESET}")
     print(f"  Detection Server")
@@ -496,6 +550,10 @@ def main():
     print(f"  PID: {os.getpid()}")
     print(f"  Workers: {args.workers}")
     print(f"  Frames:  {args.frames}")
+    if args.frame_stride:
+        print(f"  Stride:  every {args.frame_stride} source frames")
+    else:
+        print("  Stride:  disabled")
     print(f"{BOLD}{'═' * 60}{RESET}")
 
     # Load models once
@@ -540,7 +598,14 @@ def main():
             time.sleep(0.5)
             continue
 
-        run_id = claim_next_run(cache, args_ref=args)
+        try:
+            run_id = claim_next_run(cache, args_ref=args)
+        except Exception as exc:
+            print(f"\n{RED}Queue poll failed: {exc}{RESET}", flush=True)
+            traceback.print_exc()
+            time.sleep(max(args.poll, 5))
+            continue
+
         if not run_id:
             time.sleep(args.poll)
             continue

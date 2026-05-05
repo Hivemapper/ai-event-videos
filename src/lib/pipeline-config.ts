@@ -157,7 +157,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
     prompt:
       "person. bicycle. motorcycle. wheelchair. stroller. person wearing safety vest. skateboard. dog.",
     features: ["OpenCLIP verification (filters false positives)"],
-    estimatedTime: "~1.5 min for 75 frames",
+    estimatedTime: "Up to 300 frames; every 5th frame on standard clips",
   },
   {
     id: "mm-gdino",
@@ -180,7 +180,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
       "traffic cone",
       "construction worker",
     ],
-    estimatedTime: "~1.3 min for 75 frames",
+    estimatedTime: "Up to 300 frames; every 5th frame on standard clips",
   },
   {
     id: "yolo-world",
@@ -202,7 +202,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
       "truck",
       "bus",
     ],
-    estimatedTime: "~2 min for 75 frames",
+    estimatedTime: "Up to 300 frames; every 5th frame on standard clips",
   },
   {
     id: "yolo26x",
@@ -222,7 +222,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
       "skateboard",
     ],
     features: ["CLAHE night enhancement", "imgsz=1280"],
-    estimatedTime: "~1 min for 75 frames",
+    estimatedTime: "Up to 300 frames; every 5th frame on standard clips",
   },
   {
     id: "yolo11x",
@@ -242,7 +242,7 @@ export const AVAILABLE_DETECTION_MODELS: DetectionModelConfig[] = [
       "skateboard",
     ],
     features: ["CLAHE night enhancement", "imgsz=1280"],
-    estimatedTime: "~1.5 min for 75 frames",
+    estimatedTime: "Up to 300 frames; every 5th frame on standard clips",
   },
 ];
 

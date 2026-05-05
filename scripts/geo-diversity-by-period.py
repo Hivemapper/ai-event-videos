@@ -25,7 +25,8 @@ DB_PATH = PROJECT_ROOT / "data" / "labels.db"
 DEFAULT_PERIODS = [
     ("Period 3: Jan 15 – Feb 10, 2026", "2026-01-15", "2026-02-10"),
     ("Period 4: Feb 11 – Mar 15, 2026", "2026-02-11", "2026-03-15"),
-    ("Period 5: Mar 15 – Apr 8, 2026",  "2026-03-15", "2026-04-09"),
+    ("Period 5: Mar 15 – Apr 17, 2026", "2026-03-15", "2026-04-17"),
+    ("Period 6: Apr 17, 2026+ (fw ≥7.0.12)", "2026-04-17", "2099-01-01"),
 ]
 
 # Cache geocoded coordinates to avoid re-querying

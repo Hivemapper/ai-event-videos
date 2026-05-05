@@ -4,14 +4,22 @@ import fs from "fs";
 import path from "path";
 
 export const runtime = "nodejs";
+const GEO_CACHE_TTL_MS = 10 * 60 * 1000;
+
+interface GeoMetricsResponse {
+  countries: Array<{ country: string; count: number; pct: number }>;
+  total: number;
+  resolved: number;
+  unresolved: number;
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let queryFn: ((point: [number, number]) => Record<string, any> | null) | null =
   null;
+let geoCache: { expiresAt: number; data: GeoMetricsResponse } | null = null;
 
 async function ensureCountryLookup() {
   if (queryFn) return;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const whichPolygon = (await import("which-polygon" as string)).default;
   const geojsonPath = path.join(process.cwd(), "public", "data", "countries-110m.json");
   const geojson = JSON.parse(fs.readFileSync(geojsonPath, "utf-8"));
@@ -26,6 +34,15 @@ function getCountry(lat: number, lon: number): string | null {
 
 export async function GET() {
   try {
+    if (geoCache && geoCache.expiresAt > Date.now()) {
+      return NextResponse.json(geoCache.data, {
+        headers: {
+          "Cache-Control": "private, max-age=300, stale-while-revalidate=600",
+          "X-Metrics-Cache": "hit",
+        },
+      });
+    }
+
     await ensureCountryLookup();
 
     const db = await getDb();
@@ -47,22 +64,30 @@ export async function GET() {
       lon REAL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_triage_results_signal_location
+        ON triage_results (triage_result, lat, lon)
+    `);
 
     const result = await db.query(
-      `SELECT lat, lon FROM triage_results WHERE triage_result = 'signal' AND lat IS NOT NULL AND lon IS NOT NULL`
+      `SELECT ROUND(lat, 2) AS lat, ROUND(lon, 2) AS lon, COUNT(*) AS count
+       FROM triage_results
+       WHERE triage_result = 'signal' AND lat IS NOT NULL AND lon IS NOT NULL
+       GROUP BY ROUND(lat, 2), ROUND(lon, 2)`
     );
 
     const countryCounts: Record<string, number> = {};
     let resolved = 0;
     let unresolved = 0;
 
-    for (const row of result.rows as Array<{ lat: number; lon: number }>) {
+    for (const row of result.rows as Array<{ lat: number; lon: number; count: number }>) {
       const country = getCountry(row.lat, row.lon);
+      const count = Number(row.count) || 0;
       if (country) {
-        countryCounts[country] = (countryCounts[country] || 0) + 1;
-        resolved++;
+        countryCounts[country] = (countryCounts[country] || 0) + count;
+        resolved += count;
       } else {
-        unresolved++;
+        unresolved += count;
       }
     }
 
@@ -75,7 +100,15 @@ export async function GET() {
       }))
       .sort((a, b) => b.count - a.count);
 
-    return NextResponse.json({ countries, total, resolved, unresolved });
+    const data = { countries, total, resolved, unresolved };
+    geoCache = { data, expiresAt: Date.now() + GEO_CACHE_TTL_MS };
+
+    return NextResponse.json(data, {
+      headers: {
+        "Cache-Control": "private, max-age=300, stale-while-revalidate=600",
+        "X-Metrics-Cache": "miss",
+      },
+    });
   } catch (error) {
     console.error("Geo metrics error:", error);
     return NextResponse.json(

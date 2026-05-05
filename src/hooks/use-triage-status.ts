@@ -2,8 +2,9 @@
 
 import useSWR from "swr";
 import { useCallback } from "react";
+import type { AIEventType } from "@/types/events";
 
-export type TriageCategory = "missing_video" | "missing_metadata" | "ghost" | "open_road" | "signal";
+export type TriageCategory = "missing_video" | "missing_metadata" | "ghost" | "open_road" | "signal" | "duplicate" | "non_linear" | "privacy" | "skipped_firmware";
 
 export interface TriageResult {
   id: string;
@@ -30,16 +31,23 @@ export function useTriageStatus(eventId: string, eventType?: string) {
   const { data, mutate, ...rest } = useSWR<TriageResult | null>(
     `triage-${eventId}`,
     () => fetchTriageStatus(eventId),
-    { revalidateOnFocus: false, dedupingInterval: 60000 }
+    {
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+      dedupingInterval: 60000,
+    }
   );
 
   const setTriage = useCallback(
-    async (category: TriageCategory) => {
+    async (category: TriageCategory, nextEventType?: string) => {
       try {
         const resp = await fetch(`/api/triage/${eventId}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ triage_result: category, event_type: eventType ?? "UNKNOWN" }),
+          body: JSON.stringify({
+            triage_result: category,
+            event_type: nextEventType ?? eventType ?? "UNKNOWN",
+          }),
         });
         if (!resp.ok) return;
         const json = await resp.json();
@@ -51,6 +59,24 @@ export function useTriageStatus(eventId: string, eventType?: string) {
     [eventId, eventType, mutate]
   );
 
+  const setEventType = useCallback(
+    async (nextEventType: AIEventType) => {
+      try {
+        const resp = await fetch(`/api/triage/${eventId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ event_type: nextEventType }),
+        });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        mutate(json.triage ?? null);
+      } catch {
+        // DB may be locked or table missing
+      }
+    },
+    [eventId, mutate]
+  );
+
   const removeTriage = useCallback(async () => {
     try {
       await fetch(`/api/triage/${eventId}`, { method: "DELETE" });
@@ -60,5 +86,5 @@ export function useTriageStatus(eventId: string, eventType?: string) {
     }
   }, [eventId, mutate]);
 
-  return { data, mutate, setTriage, removeTriage, ...rest };
+  return { data, mutate, setTriage, setEventType, removeTriage, ...rest };
 }

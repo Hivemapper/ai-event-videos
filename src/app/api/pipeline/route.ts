@@ -1,114 +1,72 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
+import {
+  getPipelineCounts,
+  getPipelineRows,
+  getPipelineTabCount,
+} from "@/lib/pipeline-dashboard";
+import type {
+  PipelineDashboardTab,
+  PipelineFpsQcFilter,
+  PipelineSort,
+} from "@/lib/pipeline-dashboard";
 import { isPipelineRunning } from "@/lib/pipeline-manager";
 
 export const runtime = "nodejs";
 
+const VALID_SORTS: PipelineSort[] = ["date_desc", "detections_desc", "detections_asc"];
+const VALID_FPS_QC_FILTERS = new Set<string>(["perfect", "ok", "filter_out", "missing"]);
+
+function parseFpsQcFilters(value: string | null): PipelineFpsQcFilter[] {
+  if (!value) return [];
+
+  return value
+    .split(",")
+    .map((filter) => filter.trim())
+    .filter((filter): filter is PipelineFpsQcFilter => VALID_FPS_QC_FILTERS.has(filter));
+}
+
 /**
  * Returns signal events grouped by pipeline status:
- * - queued: triage=signal, no completed/running/queued detection run
- * - running: has a detection run with status running or queued
+ * - queued: has an explicit queued run, or is eligible and has no run yet
+ * - running: has a detection run with status running
  * - completed: has a completed detection run
- * - failed: has a failed detection run (and no completed one)
+ * - failed: has a failed detection run with no active/completed retry
  */
 export async function GET(request: NextRequest) {
   const tab = request.nextUrl.searchParams.get("tab") ?? "queued";
   const limit = parseInt(request.nextUrl.searchParams.get("limit") ?? "50", 10);
   const offset = parseInt(request.nextUrl.searchParams.get("offset") ?? "0", 10);
+  const includeCounts = request.nextUrl.searchParams.get("includeCounts") !== "false";
+  const sortParam = request.nextUrl.searchParams.get("sort");
+  const sort: PipelineSort = VALID_SORTS.includes(sortParam as PipelineSort)
+    ? (sortParam as PipelineSort)
+    : "date_desc";
+  const fpsQcFilters = parseFpsQcFilters(request.nextUrl.searchParams.get("fpsQc"));
 
   const db = await getDb();
 
-  // Count each category
-  const countsResult = await db.query(`
-    SELECT
-      (SELECT COUNT(*) FROM triage_results t
-       WHERE t.triage_result = 'signal'
-         AND (t.road_class IS NULL OR t.road_class != 'motorway')
-         AND (t.speed_min IS NULL OR t.speed_min < 45)
-         AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-      ) as queued,
-      (SELECT COUNT(DISTINCT dr.video_id) FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status IN ('queued', 'running')
-      ) as running,
-      (SELECT COUNT(DISTINCT dr.video_id) FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status = 'completed'
-      ) as completed,
-      (SELECT COUNT(DISTINCT dr.video_id) FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status = 'failed'
-         AND NOT EXISTS (SELECT 1 FROM detection_runs dr2 WHERE dr2.video_id = dr.video_id AND dr2.status = 'completed')
-      ) as failed
-  `);
+  const activeTab: PipelineDashboardTab =
+    tab === "running" || tab === "completed" || tab === "failed" ? tab : "queued";
+  const rows = await getPipelineRows(db, activeTab, limit, offset, sort, fpsQcFilters);
+  const filteredTotal =
+    activeTab === "completed" && fpsQcFilters.length > 0
+      ? await getPipelineTabCount(db, activeTab, fpsQcFilters)
+      : null;
 
-  const counts = countsResult.rows[0] as Record<string, number>;
-
-  // Fetch rows for the active tab
-  let rows: Record<string, unknown>[] = [];
-  let total = 0;
-
-  if (tab === "queued") {
-    total = counts.queued;
-    const result = await db.query(
-      `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class
-       FROM triage_results t
-       WHERE t.triage_result = 'signal'
-         AND (t.road_class IS NULL OR t.road_class != 'motorway')
-         AND (t.speed_min IS NULL OR t.speed_min < 45)
-         AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-       ORDER BY t.event_timestamp DESC
-       LIMIT ? OFFSET ?`,
-      [limit, offset]
-    );
-    rows = result.rows;
-  } else if (tab === "running") {
-    total = counts.running;
-    const result = await db.query(
-      `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.status as run_status, dr.model_name, dr.started_at, dr.machine_id
-       FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status IN ('queued', 'running')
-       ORDER BY dr.created_at DESC
-       LIMIT ? OFFSET ?`,
-      [limit, offset]
-    );
-    rows = result.rows;
-  } else if (tab === "completed") {
-    total = counts.completed;
-    const result = await db.query(
-      `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.model_name, dr.detection_count, dr.started_at, dr.completed_at, dr.machine_id
-       FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status = 'completed'
-       ORDER BY dr.completed_at DESC
-       LIMIT ? OFFSET ?`,
-      [limit, offset]
-    );
-    rows = result.rows;
-  } else if (tab === "failed") {
-    total = counts.failed;
-    const result = await db.query(
-      `SELECT t.id, t.event_type, t.speed_min, t.speed_max, t.event_timestamp, t.road_class,
-              dr.id as run_id, dr.model_name, dr.last_error, dr.completed_at, dr.machine_id
-       FROM detection_runs dr
-       JOIN triage_results t ON t.id = dr.video_id
-       WHERE t.triage_result = 'signal'
-         AND dr.status = 'failed'
-         AND NOT EXISTS (SELECT 1 FROM detection_runs dr2 WHERE dr2.video_id = dr.video_id AND dr2.status = 'completed')
-       ORDER BY dr.completed_at DESC
-       LIMIT ? OFFSET ?`,
-      [limit, offset]
-    );
-    rows = result.rows;
+  if (!includeCounts) {
+    return NextResponse.json({
+      rows,
+      ...(filteredTotal !== null ? { total: filteredTotal } : {}),
+      pipelineRunning: isPipelineRunning(),
+    });
   }
 
-  return NextResponse.json({ counts, rows, total, pipelineRunning: isPipelineRunning() });
+  const counts = await getPipelineCounts(db);
+  return NextResponse.json({
+    counts,
+    rows,
+    total: filteredTotal ?? counts[activeTab],
+    pipelineRunning: isPipelineRunning(),
+  });
 }

@@ -6,14 +6,9 @@ export const eventsSearchSchema = z.object({
   types: z.array(z.string()).optional(),
   bbox: z.array(z.number()).length(4).optional(),
   polygon: z.array(z.array(z.number()).length(2)).optional(),
+  vruLabels: z.array(z.string().min(1)).optional(),
   limit: z.number().int().positive().max(500).optional(),
   offset: z.number().int().nonnegative().optional(),
-});
-
-export const agentQuerySchema = z.object({
-  query: z.string().min(1, "Query is required"),
-  apiKey: z.string().optional(),
-  beemapsApiKey: z.string().optional(),
 });
 
 export const analyzeSchema = z.object({

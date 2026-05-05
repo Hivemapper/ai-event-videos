@@ -46,6 +46,9 @@ DEFAULT_CONFIG = {
         "skateboard. dog. traffic cone. car. truck. bus."
     ),
     "features": ["OpenCLIP verification (filters false positives)"],
+    "framesPerVideo": 180,
+    "frameSampling": "every_n_frames",
+    "frameStride": 5,
 }
 
 # ANSI colors

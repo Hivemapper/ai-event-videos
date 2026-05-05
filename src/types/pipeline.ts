@@ -152,6 +152,7 @@ export interface DetectionRun {
   videoId: string;
   modelName: string;
   status: DetectionRunStatus;
+  priority: number;
   config: Record<string, unknown>;
   detectionCount: number | null;
   workerPid: number | null;
@@ -187,6 +188,7 @@ export interface ProductionRun {
   privacyStatus: ProductionStepStatus;
   metadataStatus: ProductionStepStatus;
   uploadStatus: ProductionStepStatus;
+  priority: number;
   s3VideoKey: string | null;
   s3MetadataKey: string | null;
   workerPid: number | null;

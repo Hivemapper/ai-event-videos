@@ -7,7 +7,7 @@ const ANTHROPIC_KEY_STORAGE_KEY = "anthropic-api-key";
 const CAMERA_INTRINSICS_STORAGE_KEY = "camera-intrinsics";
 const SPEED_UNIT_STORAGE_KEY = "speed-unit";
 const S3_BUCKET_STORAGE_KEY = "prod-s3-bucket";
-const DEFAULT_S3_BUCKET = "hivemapper-blurred-ai-event-videos";
+const DEFAULT_S3_BUCKET = "beemaps-hivemapper-event-videos";
 const DEFAULT_S3_REGION = "us-west-2";
 
 export type SpeedUnit = "mph" | "kmh";

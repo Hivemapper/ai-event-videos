@@ -41,13 +41,14 @@ interface VideoVruPanelProps {
   onMinConfidenceChange?: (value: number) => void;
   activeDetectionRun?: DetectionRun | null;
   detectionRuns?: DetectionRun[];
-  onRunDetection?: (modelName: string) => void;
+  onRunDetection?: (modelName: string) => void | Promise<void>;
   selectedRunId?: string | null;
   onSelectRun?: (runId: string) => void;
   onCancelRun?: (runId: string) => void;
   segments?: VideoDetectionSegment[];
   sceneAttributes?: Record<string, { value: string; confidence: number | null }>;
   logs?: string;
+  runDeviceLabel?: string;
   onSeek: (time: number) => void;
   onRemoveSegment?: (label: string, startMs: number, endMs: number) => void;
 }
@@ -103,6 +104,7 @@ export function VideoVruPanel({
   segments,
   sceneAttributes,
   logs,
+  runDeviceLabel,
   onSeek,
   onRemoveSegment,
 }: VideoVruPanelProps) {
@@ -111,6 +113,8 @@ export function VideoVruPanel({
   );
   const [logsOpen, setLogsOpen] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [runSubmitting, setRunSubmitting] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll logs to bottom
@@ -196,7 +200,13 @@ export function VideoVruPanel({
         <div className="space-y-3 rounded-lg border bg-card px-4 py-3">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold">Detections</h3>
-            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+            <Dialog
+              open={dialogOpen}
+              onOpenChange={(open) => {
+                setDialogOpen(open);
+                if (open) setRunError(null);
+              }}
+            >
               <DialogTrigger asChild>
                 <Button size="sm" variant="outline" disabled={!!isRunActive}>
                   <Plus className="h-3.5 w-3.5 mr-1" />
@@ -238,7 +248,7 @@ export function VideoVruPanel({
                         <span className="text-muted-foreground">Device</span>
                         <span className="flex items-center gap-1">
                           <Cpu className="h-3 w-3" />
-                          {selectedModelConfig.device}
+                          {runDeviceLabel ?? selectedModelConfig.device}
                         </span>
                         {selectedModelConfig.prompt && (
                           <>
@@ -273,19 +283,38 @@ export function VideoVruPanel({
                     </div>
                   )}
                 </div>
+                {runError && (
+                  <p className="text-sm text-destructive">{runError}</p>
+                )}
                 <DialogFooter>
                   <DialogClose asChild>
-                    <Button variant="outline">Cancel</Button>
+                    <Button variant="outline" disabled={runSubmitting}>Cancel</Button>
                   </DialogClose>
                   <Button
-                    disabled={!!isRunActive}
-                    onClick={() => {
-                      onRunDetection(selectedRunModel);
-                      setDialogOpen(false);
+                    disabled={!!isRunActive || runSubmitting}
+                    onClick={async () => {
+                      setRunError(null);
+                      setRunSubmitting(true);
+                      try {
+                        await onRunDetection(selectedRunModel);
+                        setDialogOpen(false);
+                      } catch (error) {
+                        setRunError(
+                          error instanceof Error
+                            ? error.message
+                            : "Failed to start detection run"
+                        );
+                      } finally {
+                        setRunSubmitting(false);
+                      }
                     }}
                   >
-                    <Play className="h-3.5 w-3.5 mr-1" />
-                    Run
+                    {runSubmitting ? (
+                      <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5 mr-1" />
+                    )}
+                    {runSubmitting ? "Starting" : "Run"}
                   </Button>
                 </DialogFooter>
               </DialogContent>

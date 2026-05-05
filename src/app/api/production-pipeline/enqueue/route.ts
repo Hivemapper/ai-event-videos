@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import { randomUUID } from "crypto";
 
 export const runtime = "nodejs";
+const PRODUCTION_PRIORITY_DEFAULT = 100;
 
 /**
  * Bulk-enqueue eligible events into the production pipeline.
@@ -31,6 +32,7 @@ export async function POST(request: NextRequest) {
      WHERE dr.status = 'completed'
        AND t.triage_result = 'signal'
        AND NOT EXISTS (SELECT 1 FROM production_runs pr WHERE pr.video_id = dr.video_id)
+     ORDER BY COALESCE(dr.completed_at, dr.created_at) DESC
      LIMIT ?`,
     [batchLimit]
   );
@@ -45,6 +47,7 @@ export async function POST(request: NextRequest) {
              AND (t.road_class = 'motorway' OR (t.speed_min IS NOT NULL AND t.speed_min >= 45))
              AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
              AND NOT EXISTS (SELECT 1 FROM production_runs pr WHERE pr.video_id = t.id)
+           ORDER BY t.event_timestamp DESC
            LIMIT ?`,
           [remaining]
         )
@@ -54,18 +57,18 @@ export async function POST(request: NextRequest) {
 
   for (const row of eligibleVru.rows as Array<{ video_id: string }>) {
     const result = await db.run(
-      `INSERT OR IGNORE INTO production_runs (id, video_id, created_at)
-       VALUES (?, ?, datetime('now'))`,
-      [randomUUID(), row.video_id]
+      `INSERT OR IGNORE INTO production_runs (id, video_id, priority, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+      [randomUUID(), row.video_id, PRODUCTION_PRIORITY_DEFAULT]
     );
     enqueued += result.changes;
   }
 
   for (const row of eligibleSkipped.rows as Array<{ video_id: string }>) {
     const result = await db.run(
-      `INSERT OR IGNORE INTO production_runs (id, video_id, created_at)
-       VALUES (?, ?, datetime('now'))`,
-      [randomUUID(), row.video_id]
+      `INSERT OR IGNORE INTO production_runs (id, video_id, priority, created_at)
+       VALUES (?, ?, ?, datetime('now'))`,
+      [randomUUID(), row.video_id, PRODUCTION_PRIORITY_DEFAULT]
     );
     enqueued += result.changes;
   }

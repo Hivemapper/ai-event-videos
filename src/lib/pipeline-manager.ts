@@ -11,6 +11,7 @@ import {
 } from "@/lib/pipeline-store";
 import { spawnDetectionWorker } from "@/lib/detection-worker";
 import { AVAILABLE_DETECTION_MODELS } from "@/lib/pipeline-config";
+import { buildVruPriorityOrderBy } from "@/lib/vru-priority";
 
 let running = false;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -121,11 +122,16 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
   const db = await getDb();
   const result = await db.query(
     `SELECT t.id FROM triage_results t
+     LEFT JOIN video_frame_timing_qc q ON q.video_id = t.id
      WHERE t.triage_result = 'signal'
        AND (t.road_class IS NULL OR t.road_class != 'motorway')
        AND (t.speed_min IS NULL OR t.speed_min < 45)
        AND NOT EXISTS (SELECT 1 FROM detection_runs dr WHERE dr.video_id = t.id)
-     ORDER BY RANDOM()
+     ORDER BY
+       ${buildVruPriorityOrderBy("t", "q")},
+       CASE WHEN t.event_timestamp IS NULL THEN 1 ELSE 0 END ASC,
+       julianday(t.event_timestamp) DESC,
+       t.created_at DESC
      LIMIT 5`
   );
 
@@ -155,6 +161,9 @@ async function startNextRun(): Promise<{ started: boolean; error?: string }> {
         prompt: modelConfig?.prompt,
         features: modelConfig?.features,
         estimatedTime: modelConfig?.estimatedTime,
+        framesPerVideo: 300,
+        frameSampling: "every_n_frames",
+        frameStride: 5,
       },
     });
 

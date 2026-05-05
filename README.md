@@ -17,8 +17,7 @@ View event videos, run AI scene analysis, detect and track road actors, inspect 
 
 **Full Feature List**
 
-- **Event Gallery** — Browse events in a grid view with video thumbnails, or switch to an interactive map view
-- **AI Filter Agent** — Natural language search powered by Claude. Ask questions like "Harsh braking in London last week" and the agent translates your query into structured filters to find matching events
+- **Event Gallery** — Browse events with fast filters and paginated list results
 - **Highlights** — Curated collections of notable events with trending discovery and search for new extreme events
 - **Filtering** — Filter by date range, event type, time of day (day/dawn/dusk/night), country, and geographic coordinates with radius
 - **Event Detail View** — Play event videos with speed overlay, synchronized map playback showing the GNSS track, and downloadable video
@@ -44,17 +43,6 @@ View event videos, run AI scene analysis, detect and track road actors, inspect 
 | Stop Sign Violation | Failure to stop at stop sign |
 | Traffic Light Violation | Running a red light |
 | Tailgating | Following too closely |
-
-## AI Filter Agent
-
-The Agent tab opens a chat interface where you can describe what you're looking for in plain English. The agent uses Claude (Sonnet 4.5) to parse your query into structured filters — event types, date ranges, time of day, and geographic coordinates — then fetches matching events from the Bee Maps API.
-
-Example queries:
-- "Harsh braking in London last week"
-- "Stop sign violations in the past 3 days"
-- "High speed events at night near 37.7749, -122.4194"
-
-Requires an [Anthropic API key](https://console.anthropic.com), which can be configured in the settings dialog.
 
 ## AI Video Scene Analysis
 
@@ -126,7 +114,7 @@ Authentication: Mapbox access token.
 
 | API | Description |
 |-----|-------------|
-| [Messages API](https://docs.anthropic.com/en/api/messages) | Powers the AI Filter Agent, video scene analysis, and actor detection — Claude Sonnet 4.5 interprets natural language queries, analyzes video content, and detects road actors |
+| [Messages API](https://docs.anthropic.com/en/api/messages) | Powers video scene analysis and actor detection — Claude analyzes video content and detects road actors |
 
 Authentication: Anthropic API key. Get one at [console.anthropic.com](https://console.anthropic.com).
 
@@ -142,7 +130,7 @@ Used server-side to extract video frames and generate thumbnails. Must be instal
 - FFmpeg installed and available on `PATH`
 - A [Bee Maps API key](https://beemaps.com/developers)
 - A [Mapbox access token](https://account.mapbox.com)
-- An [Anthropic API key](https://console.anthropic.com) (optional, for AI Filter Agent, scene analysis, and actor detection)
+- An [Anthropic API key](https://console.anthropic.com) (optional, for scene analysis and actor detection)
 
 ### Setup
 
@@ -187,7 +175,6 @@ Open [http://localhost:3000](http://localhost:3000) to view the app.
 src/
 ├── app/
 │   ├── api/
-│   │   ├── agent/           # AI Filter Agent endpoint (Claude-powered query parsing)
 │   │   ├── analyze/         # AI video scene analysis endpoint
 │   │   ├── detect-actors/   # Actor detection endpoint (Claude vision)
 │   │   ├── events/          # Proxy for Bee Maps AI events API
@@ -201,21 +188,21 @@ src/
 │   ├── event/[id]/          # Event detail page
 │   ├── highlights/          # Curated highlights page
 │   ├── settings/            # Settings page (API keys, units, camera intrinsics)
-│   └── page.tsx             # Home page (event gallery + agent view)
+│   └── page.tsx             # Home page (event gallery)
 ├── components/
 │   ├── events/              # Event grid, cards, filters, video player, analysis, actor controls
 │   ├── layout/              # Header with tab navigation
 │   ├── map/                 # Mapbox map components with actor visualization
 │   └── ui/                  # Reusable UI components (shadcn/ui)
 ├── hooks/                   # React hooks for data fetching, actor detection, event polling
-├── lib/                     # Utilities, constants, geo-projection, agent skills, highlights
+├── lib/                     # Utilities, constants, geo-projection, highlights
 └── types/                   # TypeScript type definitions (events, actors)
 ```
 
 ## Tech Stack
 
 - **Data API**: [Bee Maps](https://docs.beemaps.com/platform/road-intelligence-api)
-- **AI**: [Anthropic Claude](https://docs.anthropic.com) (Sonnet 4.5 for natural language filter agent, video scene analysis, and actor detection)
+- **AI**: [Anthropic Claude](https://docs.anthropic.com) (Sonnet 4.5 for video scene analysis and actor detection)
 - **Framework**: [Next.js](https://nextjs.org) 16 (App Router)
 - **Language**: TypeScript
 - **Styling**: [Tailwind CSS](https://tailwindcss.com) 4

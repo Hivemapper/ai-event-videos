@@ -14,6 +14,9 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
     "ai-event-videos/**",
+    ".venv/**",
+    "**/.venv/**",
+    "data/**",
   ]),
 ]);
 

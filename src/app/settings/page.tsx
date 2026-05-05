@@ -526,7 +526,7 @@ function SettingsContent() {
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Required for the AI Filter Agent. Uses Claude to interpret natural language queries.
+                  Required for scene analysis and actor detection. Uses Claude to inspect event videos and frames.
                 </p>
               </div>
 

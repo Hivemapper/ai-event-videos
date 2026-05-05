@@ -9,14 +9,18 @@ import { LabeledFeature } from "@/lib/event-helpers";
 const SWR_OPTIONS = {
   dedupingInterval: 60000,
   revalidateOnFocus: false,
+  revalidateOnReconnect: false,
 };
 
 async function fetchEventDetail(id: string): Promise<AIEvent> {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API key not configured");
+  const headers: HeadersInit = {};
+  if (apiKey) {
+    headers.Authorization = apiKey;
+  }
 
-  const response = await fetch(`/api/events/${id}?includeGnssData=true&includeImuData=true`, {
-    headers: { Authorization: apiKey },
+  const response = await fetch(`/api/events/${id}?includeGnssData=true`, {
+    headers,
   });
 
   if (!response.ok) {

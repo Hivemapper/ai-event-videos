@@ -146,12 +146,16 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_frame_detections_run_id
     ON frame_detections (run_id);
 
+  CREATE INDEX IF NOT EXISTS idx_frame_detections_video_confidence
+    ON frame_detections (video_id, confidence DESC, created_at DESC);
+
   CREATE TABLE IF NOT EXISTS detection_runs (
     id TEXT PRIMARY KEY,
     video_id TEXT NOT NULL,
     model_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     config_json TEXT NOT NULL DEFAULT '{}',
+    priority INTEGER NOT NULL DEFAULT 100,
     detection_count INTEGER,
     worker_pid INTEGER,
     started_at TEXT,
@@ -163,6 +167,15 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_detection_runs_video
     ON detection_runs (video_id, created_at DESC);
+
+  CREATE INDEX IF NOT EXISTS idx_detection_runs_video_status
+    ON detection_runs (video_id, status);
+
+  CREATE INDEX IF NOT EXISTS idx_detection_runs_status_completed
+    ON detection_runs (status, completed_at DESC, video_id);
+
+  CREATE INDEX IF NOT EXISTS idx_detection_runs_status_created
+    ON detection_runs (status, created_at DESC, video_id);
 
   CREATE TABLE IF NOT EXISTS scene_attributes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,11 +212,42 @@ const SCHEMA_SQL = `
     speed_stddev REAL,
     gnss_displacement_m REAL,
     video_size INTEGER,
+    video_length_sec REAL,
+    bitrate_bps REAL,
+    firmware_version TEXT,
+    firmware_version_num INTEGER,
     event_timestamp TEXT,
     lat REAL,
     lon REAL,
     road_class TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_triage_results_signal_time
+    ON triage_results (triage_result, event_timestamp DESC);
+
+  CREATE TABLE IF NOT EXISTS video_frame_timing_qc (
+    video_id TEXT PRIMARY KEY,
+    firmware_version TEXT,
+    bucket TEXT NOT NULL,
+    frame_count INTEGER NOT NULL,
+    duration_s REAL NOT NULL,
+    effective_fps REAL NOT NULL,
+    gap_pct REAL NOT NULL,
+    single_gaps INTEGER NOT NULL,
+    double_gaps INTEGER NOT NULL,
+    triple_plus_gaps INTEGER NOT NULL DEFAULT 0,
+    max_delta_ms REAL NOT NULL,
+    late_frames INTEGER NOT NULL DEFAULT 0,
+    max_late_frames_per_2s INTEGER NOT NULL DEFAULT 0,
+    late_frame_clusters INTEGER NOT NULL DEFAULT 0,
+    non_monotonic_deltas INTEGER NOT NULL DEFAULT 0,
+    failed_rules TEXT NOT NULL DEFAULT '[]',
+    probe_status TEXT NOT NULL DEFAULT 'ok',
+    probe_error TEXT,
+    deltas_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS production_runs (
@@ -213,6 +257,7 @@ const SCHEMA_SQL = `
     privacy_status TEXT NOT NULL DEFAULT 'pending',
     metadata_status TEXT NOT NULL DEFAULT 'pending',
     upload_status TEXT NOT NULL DEFAULT 'pending',
+    priority INTEGER NOT NULL DEFAULT 100,
     s3_video_key TEXT,
     s3_metadata_key TEXT,
     worker_pid INTEGER,
@@ -226,6 +271,9 @@ const SCHEMA_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_production_runs_status
     ON production_runs (status);
+
+  CREATE INDEX IF NOT EXISTS idx_production_runs_video_status
+    ON production_runs (video_id, status);
 `;
 
 // ---------------------------------------------------------------------------
@@ -356,9 +404,15 @@ async function ensureColumn(
   definition: string
 ): Promise<void> {
   if (!(await tableHasColumn(client, table, column))) {
-    await client.exec(
-      `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
-    );
+    try {
+      await client.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (!message.includes("duplicate column")) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -424,9 +478,67 @@ export function getDb(): Promise<DbClient> {
     await ensureColumn(client, "labels", "detector_aliases", "TEXT");
     await ensureColumn(client, "video_detection_segments", "run_id", "TEXT");
     await ensureColumn(client, "detection_runs", "machine_id", "TEXT");
+    await ensureColumn(
+      client,
+      "detection_runs",
+      "priority",
+      "INTEGER NOT NULL DEFAULT 100"
+    );
     await ensureColumn(client, "triage_results", "lat", "REAL");
     await ensureColumn(client, "triage_results", "lon", "REAL");
     await ensureColumn(client, "triage_results", "road_class", "TEXT");
+    await ensureColumn(client, "triage_results", "video_length_sec", "REAL");
+    await ensureColumn(client, "triage_results", "bitrate_bps", "REAL");
+    await ensureColumn(client, "triage_results", "firmware_version", "TEXT");
+    await ensureColumn(client, "triage_results", "firmware_version_num", "INTEGER");
+    await ensureColumn(
+      client,
+      "video_frame_timing_qc",
+      "triple_plus_gaps",
+      "INTEGER NOT NULL DEFAULT 0"
+    );
+    await ensureColumn(
+      client,
+      "video_frame_timing_qc",
+      "max_late_frames_per_2s",
+      "INTEGER NOT NULL DEFAULT 0"
+    );
+    await ensureColumn(
+      client,
+      "video_frame_timing_qc",
+      "late_frame_clusters",
+      "INTEGER NOT NULL DEFAULT 0"
+    );
+    await ensureColumn(
+      client,
+      "production_runs",
+      "priority",
+      "INTEGER NOT NULL DEFAULT 100"
+    );
+    await client.exec(
+      `CREATE INDEX IF NOT EXISTS idx_production_runs_queue_priority
+       ON production_runs (status, priority, created_at)`
+    );
+    await client.exec(`
+      CREATE INDEX IF NOT EXISTS idx_detection_runs_video_status
+        ON detection_runs (video_id, status);
+      CREATE INDEX IF NOT EXISTS idx_detection_runs_status_completed
+        ON detection_runs (status, completed_at DESC, video_id);
+      CREATE INDEX IF NOT EXISTS idx_detection_runs_status_created
+        ON detection_runs (status, created_at DESC, video_id);
+      CREATE INDEX IF NOT EXISTS idx_detection_runs_queue_priority
+        ON detection_runs (status, priority, created_at, video_id);
+      CREATE INDEX IF NOT EXISTS idx_frame_detections_video_confidence
+        ON frame_detections (video_id, confidence DESC, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_production_runs_video_status
+        ON production_runs (video_id, status);
+      CREATE INDEX IF NOT EXISTS idx_video_detection_segments_video_confidence
+        ON video_detection_segments (video_id, max_confidence DESC, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_triage_results_signal_time
+        ON triage_results (triage_result, event_timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_triage_results_event_time
+        ON triage_results (event_timestamp DESC)
+    `);
 
     // Seed defaults
     await seedDefaults(client);

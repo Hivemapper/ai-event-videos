@@ -5,7 +5,7 @@ Provision detection servers via SSH.
 Usage:
     python3 scripts/provision-server.py 34.220.49.228
     python3 scripts/provision-server.py 34.220.49.228 54.184.38.149 16.144.29.139
-    python3 scripts/provision-server.py 34.220.49.228 --workers 3 --frames 40
+    python3 scripts/provision-server.py 34.220.49.228 --workers 3 --frames 300
 """
 
 import argparse
@@ -45,11 +45,11 @@ def ssh_cmd(ip: str, command: str, timeout: int = 30) -> tuple[int, str]:
         return 1, "SSH command timed out"
 
 
-def provision(ip: str, workers: int, frames: int) -> bool:
+def provision(ip: str, workers: int, frames: int, frame_stride: int) -> bool:
     """Provision a single server. Returns True on success."""
     print(f"\n{BOLD}{'═' * 50}{RESET}")
     print(f"  {CYAN}Provisioning {ip}{RESET}")
-    print(f"  Workers: {workers} | Frames: {frames}")
+    print(f"  Workers: {workers} | Frames: {frames} | Frame stride: {frame_stride}")
     print(f"{BOLD}{'═' * 50}{RESET}")
 
     # 1. Test connectivity
@@ -83,7 +83,7 @@ def provision(ip: str, workers: int, frames: int) -> bool:
         f"cd {PROJECT_DIR} && source .venv/bin/activate && "
         f"export HF_TOKEN={HF_TOKEN} && "
         f"tmux new-session -d -s detect "
-        f"'export HF_TOKEN={HF_TOKEN} && python3 scripts/detection-server.py --workers {workers} --frames {frames}'"
+        f"'export HF_TOKEN={HF_TOKEN} && python3 scripts/detection-server.py --workers {workers} --frames {frames} --frame-stride {frame_stride}'"
     )
     rc, out = ssh_cmd(ip, start_cmd, timeout=15)
     if rc != 0:
@@ -109,12 +109,13 @@ def main():
     parser = argparse.ArgumentParser(description="Provision detection servers")
     parser.add_argument("ips", nargs="+", help="IP addresses to provision")
     parser.add_argument("--workers", type=int, default=2, help="Workers per server (default: 2)")
-    parser.add_argument("--frames", type=int, default=30, help="Frames per video (default: 30)")
+    parser.add_argument("--frames", type=int, default=300, help="Maximum frames per video (default: 300)")
+    parser.add_argument("--frame-stride", type=int, default=5, help="Sample every N source frames (default: 5)")
     args = parser.parse_args()
 
     results = {}
     for ip in args.ips:
-        ok = provision(ip, args.workers, args.frames)
+        ok = provision(ip, args.workers, args.frames, args.frame_stride)
         results[ip] = ok
 
     # Summary

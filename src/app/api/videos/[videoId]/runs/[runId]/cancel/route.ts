@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   getDetectionRun,
+  isCurrentMachineId,
   updateDetectionRunStatus,
 } from "@/lib/pipeline-store";
 
@@ -26,7 +27,7 @@ export async function POST(
 
   await updateDetectionRunStatus(runId, "cancelled");
 
-  if (run.workerPid) {
+  if (run.workerPid && isCurrentMachineId(run.machineId)) {
     try {
       // Kill the entire process group (negative PID) since worker is detached
       process.kill(-run.workerPid, "SIGTERM");

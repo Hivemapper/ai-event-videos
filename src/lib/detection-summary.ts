@@ -1,22 +1,13 @@
 import type { FrameDetection } from "@/types/pipeline";
+import { isVruDetectionLabel } from "@/lib/vru-labels";
 
 /** Minimum peak confidence for VRU detections to appear in the clip summary (counts + timing) */
 const VRU_MIN_CONFIDENCE = 0.46;
-
-/** Labels excluded from clip summary (non-VRU vehicles) */
-const EXCLUDED_LABELS = new Set(["car", "truck", "bus"]);
-
-/** VRU labels that warrant timing callouts */
-const VRU_LABELS = new Set([
-  "person", "pedestrian", "child", "bicycle", "motorcycle",
-  "cat", "dog", "bird", "horse", "sheep", "cow", "bear",
-]);
 
 const PLURAL_MAP: Record<string, string> = {
   person: "people",
   pedestrian: "pedestrians",
   child: "children",
-  bus: "buses",
 };
 
 function pluralize(label: string, count: number): string {
@@ -56,15 +47,16 @@ export interface DetectionSummary {
  */
 export function summarizeDetections(
   detectionsByFrame: Map<number, FrameDetection[]>,
-  _minConfidence: number
+  minConfidence: number
 ): DetectionSummary {
-  // Collect detections above threshold, excluding vehicles
+  // Collect detections above threshold, keeping only VRU labels for user-facing summaries.
+  const threshold = Math.max(minConfidence, VRU_MIN_CONFIDENCE);
   const byLabel = new Map<string, FrameDetection[]>();
 
   for (const [, detections] of detectionsByFrame) {
     for (const det of detections) {
-      if (EXCLUDED_LABELS.has(det.label)) continue;
-      if (det.confidence < VRU_MIN_CONFIDENCE) continue;
+      if (!isVruDetectionLabel(det.label)) continue;
+      if (det.confidence < threshold) continue;
       const arr = byLabel.get(det.label) ?? [];
       arr.push(det);
       byLabel.set(det.label, arr);
@@ -102,15 +94,13 @@ export function summarizeDetections(
 
     counts[label] = tracks.length;
 
-    if (VRU_LABELS.has(label)) {
-      for (const track of tracks) {
-        vruTimings.push({
-          label,
-          firstSeenSec: track.first.frameMs / 1000,
-          lastSeenSec: track.last.frameMs / 1000,
-          peakConfidence: track.peakConfidence,
-        });
-      }
+    for (const track of tracks) {
+      vruTimings.push({
+        label,
+        firstSeenSec: track.first.frameMs / 1000,
+        lastSeenSec: track.last.frameMs / 1000,
+        peakConfidence: track.peakConfidence,
+      });
     }
   }
 

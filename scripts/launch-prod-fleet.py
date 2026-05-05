@@ -23,10 +23,10 @@ import time
 
 # ── Config ───────────────────────────────────────────────────────────────────
 INSTANCE_TYPE = "g6e.xlarge"
-AMI_ID = "ami-XXXXXXXXXXXXXXXXX"  # TODO: set to your CUDA-ready AMI
+AMI_ID = "ami-09dd651733c0a3232"  # prod-pipeline-base-20260414 (includes privacy model)
 KEY_NAME = "vru"
 KEY_PATH = "~/Downloads/vru.pem"
-SECURITY_GROUP = "sg-XXXXXXXXXXXXXXXXX"  # TODO: set to your security group
+SECURITY_GROUP = "sg-06ef3144b9d9ced08"
 SUBNET_ID = ""  # leave empty for default VPC, or set specific subnet
 REGION = "us-west-2"
 USER = "ec2-user"

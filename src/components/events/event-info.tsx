@@ -10,15 +10,19 @@ import {
   Copy,
   Check,
   Route,
+  Sun,
+  Moon,
+  Sunrise,
+  Sunset,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AIEvent } from "@/types/events";
 import { EVENT_TYPE_CONFIG } from "@/lib/constants";
 import { cn } from "@/lib/utils";
-import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
+import { getTimeOfDay, getTimeOfDayStyle, type TimeOfDay } from "@/lib/sun";
 import { RoadTypeData } from "@/hooks/use-road-type";
-import { formatDateTime, formatCoordinates, formatSpeed, getTimeOfDayIcon } from "@/lib/event-helpers";
+import { formatDateTime, formatCoordinates, formatSpeed } from "@/lib/event-helpers";
 
 interface EventInfoProps {
   event: AIEvent;
@@ -26,6 +30,19 @@ interface EventInfoProps {
   countryName: string | null;
   maxSpeed: number | null;
   acceleration: number | undefined;
+}
+
+function TimeOfDayBadgeIcon({ timeOfDay }: { timeOfDay: TimeOfDay }) {
+  switch (timeOfDay) {
+    case "Day":
+      return <Sun className="w-3 h-3" />;
+    case "Dawn":
+      return <Sunrise className="w-3 h-3" />;
+    case "Dusk":
+      return <Sunset className="w-3 h-3" />;
+    case "Night":
+      return <Moon className="w-3 h-3" />;
+  }
 }
 
 export function EventInfo({
@@ -85,7 +102,6 @@ export function EventInfo({
                     event.location.lat,
                     event.location.lon
                   );
-                  const TimeIcon = getTimeOfDayIcon(sunInfo.timeOfDay);
                   const style = getTimeOfDayStyle(sunInfo.timeOfDay);
                   return (
                     <span
@@ -95,7 +111,7 @@ export function EventInfo({
                         style.color
                       )}
                     >
-                      <TimeIcon className="w-3 h-3" />
+                      <TimeOfDayBadgeIcon timeOfDay={sunInfo.timeOfDay} />
                       {sunInfo.timeOfDay}
                     </span>
                   );

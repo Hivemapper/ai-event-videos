@@ -33,26 +33,67 @@ function lruSet(key: string, value: string): void {
 // --- Concurrent request queue ---
 const MAX_CONCURRENT = 4;
 let activeCount = 0;
-const pendingQueue: Array<{ resolve: () => void; priority: number }> = [];
+const pendingQueue: Array<{
+  resolve: () => void;
+  priority: number;
+  signal: AbortSignal;
+  onAbort: () => void;
+}> = [];
 
-function enqueue(priority: number): Promise<void> {
+function createAbortError(): DOMException {
+  return new DOMException("Thumbnail request aborted", "AbortError");
+}
+
+function enqueue(priority: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
   if (activeCount < MAX_CONCURRENT) {
     activeCount++;
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    pendingQueue.push({ resolve, priority });
+
+  return new Promise<void>((resolve, reject) => {
+    const queued = {
+      resolve: () => {
+        signal.removeEventListener("abort", queued.onAbort);
+        resolve();
+      },
+      priority,
+      signal,
+      onAbort: () => {},
+    };
+
+    queued.onAbort = () => {
+      const index = pendingQueue.indexOf(queued);
+      if (index >= 0) pendingQueue.splice(index, 1);
+      signal.removeEventListener("abort", queued.onAbort);
+      reject(createAbortError());
+    };
+
+    pendingQueue.push(queued);
+    signal.addEventListener("abort", queued.onAbort, { once: true });
     // Sort so higher priority (lower number = closer to top) goes first
     pendingQueue.sort((a, b) => a.priority - b.priority);
+  }).then(() => {
+    if (signal.aborted) {
+      throw createAbortError();
+    }
   });
 }
 
 function dequeue(): void {
   activeCount--;
-  if (pendingQueue.length > 0) {
-    activeCount++;
+  while (pendingQueue.length > 0) {
     const next = pendingQueue.shift()!;
+    if (next.signal.aborted) {
+      next.signal.removeEventListener("abort", next.onAbort);
+      continue;
+    }
+    activeCount++;
     next.resolve();
+    break;
   }
 }
 
@@ -86,6 +127,7 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
   const ref = useRef<HTMLDivElement | null>(null);
   const hasAttempted = useRef(!!lruGet(videoUrl) || failedUrls.has(videoUrl));
   const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
 
   // IntersectionObserver for lazy loading
   useEffect(() => {
@@ -131,13 +173,16 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
     const rect = ref.current?.getBoundingClientRect();
     const priority = rect ? Math.max(0, rect.top) : 9999;
 
-    // Wait for a queue slot
-    await enqueue(priority);
-
     const controller = new AbortController();
     abortRef.current = controller;
+    let acquiredSlot = false;
 
     try {
+      // Wait for a queue slot. If the card scrolls away or unmounts before
+      // then, aborting this signal removes it from the queue.
+      await enqueue(priority, controller.signal);
+      acquiredSlot = true;
+
       // Try up to 2 times (initial + 1 retry)
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
@@ -145,7 +190,7 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
           const blob = await fetchThumbnail(videoUrl, controller.signal);
           const objectUrl = URL.createObjectURL(blob);
           lruSet(videoUrl, objectUrl);
-          setThumbnailUrl(objectUrl);
+          if (mountedRef.current) setThumbnailUrl(objectUrl);
           return; // success
         } catch (err) {
           if (err instanceof DOMException && err.name === "AbortError") throw err;
@@ -161,11 +206,11 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
       throw lastError;
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
-      setError(true);
+      if (mountedRef.current) setError(true);
     } finally {
       abortRef.current = null;
-      dequeue();
-      setIsLoading(false);
+      if (acquiredSlot) dequeue();
+      if (mountedRef.current) setIsLoading(false);
     }
   }, [videoUrl]);
 
@@ -178,6 +223,7 @@ export function useThumbnail(videoUrl: string): UseThumbnailResult {
   // Abort in-flight request on unmount
   useEffect(() => {
     return () => {
+      mountedRef.current = false;
       abortRef.current?.abort();
     };
   }, []);
