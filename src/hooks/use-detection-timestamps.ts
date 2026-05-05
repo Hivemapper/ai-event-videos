@@ -20,7 +20,11 @@ export function useDetectionTimestamps(videoId: string | null, runId?: string) {
 
   const { data, error, isLoading, mutate } = useSWR<DetectionTimestampsResponse>(
     url,
-    fetcher
+    fetcher,
+    {
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+    }
   );
 
   const detectionsByFrame = useMemo(() => {
@@ -35,7 +39,7 @@ export function useDetectionTimestamps(videoId: string | null, runId?: string) {
       }
     }
     return map;
-  }, [data?.detections]);
+  }, [data]);
 
   return {
     timestamps: data?.timestamps ?? [],

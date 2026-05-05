@@ -2,17 +2,6 @@ import { randomUUID } from "crypto";
 import { execSync } from "child_process";
 import os from "os";
 import { getDb } from "@/lib/db";
-
-function getMachineId(): string {
-  try {
-    return execSync("scutil --get ComputerName", { timeout: 2000 })
-      .toString()
-      .trim();
-  } catch {
-    return os.hostname().split(".")[0] || "unknown";
-  }
-}
-const MACHINE_ID = getMachineId();
 import {
   createEmptyPipelineTotals,
   CURRENT_PIPELINE_VERSION,
@@ -26,10 +15,30 @@ import type {
   PipelineRunRecord,
   PipelineRunStatus,
   PipelineRunTotals,
+  ProductionRun,
+  ProductionRunStatus,
+  ProductionStepStatus,
   VideoDetectionSegment,
   VideoPipelineState,
   VideoPipelineStatus,
 } from "@/types/pipeline";
+
+function getMachineId(): string {
+  try {
+    return execSync("scutil --get ComputerName", { timeout: 2000 })
+      .toString()
+      .trim();
+  } catch {
+    return os.hostname().split(".")[0] || "unknown";
+  }
+}
+const MACHINE_ID = getMachineId();
+export const PRODUCTION_PRIORITY_MANUAL_VRU = 0;
+export const PRODUCTION_PRIORITY_DEFAULT = 100;
+
+export function isCurrentMachineId(machineId: string | null | undefined): boolean {
+  return Boolean(machineId && machineId === MACHINE_ID);
+}
 
 interface DbPipelineRunRow {
   id: string;
@@ -99,6 +108,7 @@ interface DbDetectionRunRow {
   model_name: string;
   status: DetectionRunStatus;
   config_json: string;
+  priority: number | null;
   detection_count: number | null;
   worker_pid: number | null;
   started_at: string | null;
@@ -197,6 +207,7 @@ function mapDetectionRun(row: DbDetectionRunRow): DetectionRun {
     videoId: row.video_id,
     modelName: row.model_name,
     status: row.status,
+    priority: row.priority ?? DETECTION_PRIORITY_DEFAULT,
     config: parseJson<Record<string, unknown>>(row.config_json, {}),
     detectionCount: row.detection_count,
     workerPid: row.worker_pid,
@@ -709,20 +720,35 @@ export async function getFrameDetectionModels(
 // Detection Runs
 // ---------------------------------------------------------------------------
 
+export const DETECTION_PRIORITY_MANUAL = 0;
+export const DETECTION_PRIORITY_DEFAULT = 100;
+
 export async function createDetectionRun(params: {
   videoId: string;
   modelName: string;
   config?: Record<string, unknown>;
+  machineId?: string | null;
+  priority?: number;
 }): Promise<DetectionRun | null> {
   const db = await getDb();
   const id = randomUUID();
+  const machineId =
+    params.machineId === undefined ? MACHINE_ID : params.machineId;
   const result = await db.run(
-    `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, created_at)
-     SELECT ?, ?, ?, 'queued', ?, ?, datetime('now')
+    `INSERT INTO detection_runs (id, video_id, model_name, status, config_json, machine_id, priority, created_at)
+     SELECT ?, ?, ?, 'queued', ?, ?, ?, datetime('now')
      WHERE NOT EXISTS (
-       SELECT 1 FROM detection_runs WHERE video_id = ? AND status IN ('queued', 'running', 'completed')
+       SELECT 1 FROM detection_runs WHERE video_id = ? AND status IN ('queued', 'running')
      )`,
-    [id, params.videoId, params.modelName, JSON.stringify(params.config ?? {}), MACHINE_ID, params.videoId]
+    [
+      id,
+      params.videoId,
+      params.modelName,
+      JSON.stringify(params.config ?? {}),
+      machineId,
+      params.priority ?? DETECTION_PRIORITY_DEFAULT,
+      params.videoId,
+    ]
   );
   if (result.changes === 0) return null;
   return (await getDetectionRun(id))!;
@@ -772,7 +798,10 @@ export async function listCompletedDetectionRuns(
 export async function getActiveDetectionRun(): Promise<DetectionRun | null> {
   const db = await getDb();
   const result = await db.query(
-    `SELECT * FROM detection_runs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`
+    `SELECT * FROM detection_runs
+     WHERE status IN ('queued', 'running')
+     ORDER BY priority ASC, created_at ASC
+     LIMIT 1`
   );
   const row = result.rows[0] as unknown as DbDetectionRunRow | undefined;
   return row ? mapDetectionRun(row) : null;
@@ -811,5 +840,273 @@ export async function setDetectionRunWorkerPid(
   await db.run(
     `UPDATE detection_runs SET worker_pid = ? WHERE id = ?`,
     [pid, id]
+  );
+}
+
+export async function deleteVideoDetectionSegment(
+  videoId: string,
+  label: string,
+  startMs: number,
+  endMs: number,
+  runId?: string
+): Promise<number> {
+  const db = await getDb();
+  const params: unknown[] = [videoId, label, startMs, endMs];
+  let runClause = "";
+  if (runId) {
+    runClause = " AND run_id = ?";
+    params.push(runId);
+  }
+  await db.run(
+    `DELETE FROM frame_detections WHERE video_id = ? AND label = ? AND frame_ms >= ? AND frame_ms <= ?${runClause}`,
+    params
+  );
+  const result = await db.run(
+    `DELETE FROM video_detection_segments WHERE video_id = ? AND label = ? AND start_ms = ? AND end_ms = ?${runClause}`,
+    [videoId, label, startMs, endMs, ...(runId ? [runId] : [])]
+  );
+  return result.changes ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// Production Runs
+// ---------------------------------------------------------------------------
+
+interface DbProductionRunRow {
+  id: string;
+  video_id: string;
+  status: ProductionRunStatus;
+  privacy_status: ProductionStepStatus;
+  metadata_status: ProductionStepStatus;
+  upload_status: ProductionStepStatus;
+  priority: number | null;
+  s3_video_key: string | null;
+  s3_metadata_key: string | null;
+  worker_pid: number | null;
+  machine_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  last_heartbeat_at: string | null;
+  last_error: string | null;
+  created_at: string;
+}
+
+function mapProductionRun(row: DbProductionRunRow): ProductionRun {
+  return {
+    id: row.id,
+    videoId: row.video_id,
+    status: row.status,
+    privacyStatus: row.privacy_status,
+    metadataStatus: row.metadata_status,
+    uploadStatus: row.upload_status,
+    priority: row.priority ?? PRODUCTION_PRIORITY_DEFAULT,
+    s3VideoKey: row.s3_video_key,
+    s3MetadataKey: row.s3_metadata_key,
+    workerPid: row.worker_pid,
+    machineId: row.machine_id,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    lastError: row.last_error,
+    createdAt: row.created_at,
+  };
+}
+
+export async function createProductionRun(
+  videoId: string,
+  priority = PRODUCTION_PRIORITY_DEFAULT
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const id = randomUUID();
+  const result = await db.run(
+    `INSERT OR IGNORE INTO production_runs (id, video_id, priority, created_at)
+     VALUES (?, ?, ?, datetime('now'))`,
+    [id, videoId, priority]
+  );
+  if (result.changes === 0) return null;
+  return (await getProductionRun(id))!;
+}
+
+export async function enqueueCompletedVruForProduction(
+  videoId: string
+): Promise<{
+  run: ProductionRun;
+  created: boolean;
+  prioritized: boolean;
+  requeued: boolean;
+}> {
+  const db = await getDb();
+
+  const completedRun = await db.query(
+    `SELECT id FROM detection_runs
+     WHERE video_id = ? AND status = 'completed'
+     ORDER BY COALESCE(completed_at, created_at) DESC
+     LIMIT 1`,
+    [videoId]
+  );
+
+  if (completedRun.rows.length === 0) {
+    throw new Error("Video does not have a completed VRU detection run");
+  }
+
+  const existing = await getProductionRunByVideoId(videoId);
+  if (!existing) {
+    const created = await createProductionRun(
+      videoId,
+      PRODUCTION_PRIORITY_MANUAL_VRU
+    );
+    if (!created) {
+      const raced = await getProductionRunByVideoId(videoId);
+      if (!raced) throw new Error("Failed to enqueue production run");
+      return { run: raced, created: false, prioritized: false, requeued: false };
+    }
+    return { run: created, created: true, prioritized: true, requeued: false };
+  }
+
+  if (existing.status === "completed" || existing.status === "processing") {
+    return {
+      run: existing,
+      created: false,
+      prioritized: false,
+      requeued: false,
+    };
+  }
+
+  const requeued = existing.status === "failed";
+  const prioritized = existing.priority !== PRODUCTION_PRIORITY_MANUAL_VRU;
+  await db.run(
+    `UPDATE production_runs
+     SET status = 'queued',
+         priority = ?,
+         privacy_status = CASE WHEN status = 'failed' THEN 'pending' ELSE privacy_status END,
+         metadata_status = CASE WHEN status = 'failed' THEN 'pending' ELSE metadata_status END,
+         upload_status = CASE WHEN status = 'failed' THEN 'pending' ELSE upload_status END,
+         machine_id = CASE WHEN status = 'failed' THEN NULL ELSE machine_id END,
+         worker_pid = CASE WHEN status = 'failed' THEN NULL ELSE worker_pid END,
+         started_at = CASE WHEN status = 'failed' THEN NULL ELSE started_at END,
+         completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END,
+         last_error = CASE WHEN status = 'failed' THEN NULL ELSE last_error END
+     WHERE video_id = ? AND status IN ('queued', 'failed')`,
+    [PRODUCTION_PRIORITY_MANUAL_VRU, videoId]
+  );
+
+  const updated = await getProductionRunByVideoId(videoId);
+  if (!updated) throw new Error("Failed to load production run after enqueue");
+  return { run: updated, created: false, prioritized, requeued };
+}
+
+export async function getProductionRun(
+  id: string
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM production_runs WHERE id = ?",
+    [id]
+  );
+  const row = result.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function getProductionRunByVideoId(
+  videoId: string
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+  const result = await db.query(
+    "SELECT * FROM production_runs WHERE video_id = ?",
+    [videoId]
+  );
+  const row = result.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function claimNextProductionRun(
+  machineId: string,
+  workerPid: number
+): Promise<ProductionRun | null> {
+  const db = await getDb();
+
+  // Atomic claim: UPDATE with subquery + status guard
+  const result = await db.run(
+    `UPDATE production_runs
+     SET status = 'processing',
+         machine_id = ?,
+         worker_pid = ?,
+         started_at = datetime('now'),
+         last_heartbeat_at = datetime('now')
+     WHERE id = (
+       SELECT id FROM production_runs
+       WHERE status = 'queued'
+         AND COALESCE(priority, ?) = ?
+       ORDER BY priority ASC, created_at ASC
+       LIMIT 1
+     ) AND status = 'queued'`,
+    [
+      machineId,
+      workerPid,
+      PRODUCTION_PRIORITY_DEFAULT,
+      PRODUCTION_PRIORITY_MANUAL_VRU,
+    ]
+  );
+
+  if (result.changes === 0) return null;
+
+  // Fetch the row we just claimed
+  const claimed = await db.query(
+    `SELECT * FROM production_runs
+     WHERE machine_id = ? AND worker_pid = ? AND status = 'processing'
+     ORDER BY started_at DESC LIMIT 1`,
+    [machineId, workerPid]
+  );
+  const row = claimed.rows[0] as unknown as DbProductionRunRow | undefined;
+  return row ? mapProductionRun(row) : null;
+}
+
+export async function updateProductionRunStatus(
+  id: string,
+  status: ProductionRunStatus,
+  extra?: { lastError?: string; s3VideoKey?: string; s3MetadataKey?: string }
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `UPDATE production_runs
+     SET status = ?,
+         last_error = COALESCE(?, last_error),
+         s3_video_key = COALESCE(?, s3_video_key),
+         s3_metadata_key = COALESCE(?, s3_metadata_key),
+         started_at = CASE WHEN ? = 'processing' AND started_at IS NULL THEN datetime('now') ELSE started_at END,
+         completed_at = CASE WHEN ? IN ('completed', 'failed') THEN datetime('now') ELSE completed_at END
+     WHERE id = ?`,
+    [
+      status,
+      extra?.lastError ?? null,
+      extra?.s3VideoKey ?? null,
+      extra?.s3MetadataKey ?? null,
+      status,
+      status,
+      id,
+    ]
+  );
+}
+
+export async function updateProductionStepStatus(
+  id: string,
+  step: "privacy" | "metadata" | "upload",
+  stepStatus: ProductionStepStatus
+): Promise<void> {
+  const db = await getDb();
+  const column = `${step}_status`;
+  await db.run(
+    `UPDATE production_runs SET ${column} = ? WHERE id = ?`,
+    [stepStatus, id]
+  );
+}
+
+export async function updateProductionRunHeartbeat(
+  id: string
+): Promise<void> {
+  const db = await getDb();
+  await db.run(
+    `UPDATE production_runs SET last_heartbeat_at = datetime('now') WHERE id = ?`,
+    [id]
   );
 }

@@ -121,6 +121,35 @@ export function SpeedProfileChart({
     [unit, yMax, plotHeight]
   );
 
+  const speedScreenPoints = useMemo(
+    () =>
+      speedPoints.map((p) => ({
+        x: getChartX(p.t),
+        y: getSpeedY(p.speed),
+      })),
+    [speedPoints, getChartX, getSpeedY]
+  );
+  const speedAreaPath = useMemo(
+    () => pointsToAreaPath(speedScreenPoints, baseline),
+    [speedScreenPoints, baseline]
+  );
+  const speedLinePath = useMemo(
+    () => pointsToPath(speedScreenPoints),
+    [speedScreenPoints]
+  );
+  const accelAreaPath = useMemo(() => {
+    if (accelPoints.length === 0) return "";
+    const maxAccelDisplay = Math.max(
+      ...accelPoints.map((p) => p.accel),
+      1
+    );
+    const accelScreenPoints = accelPoints.map((p) => ({
+      x: getChartX(p.t),
+      y: baseline - (p.accel / maxAccelDisplay) * plotHeight * 0.4,
+    }));
+    return pointsToAreaPath(accelScreenPoints, baseline);
+  }, [accelPoints, getChartX, baseline, plotHeight]);
+
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
       const svg = svgRef.current;
@@ -268,25 +297,15 @@ export function SpeedProfileChart({
         ))}
 
         {/* Acceleration area */}
-        {accelPoints.length > 0 && (() => {
-          const maxAccelDisplay = Math.max(
-            ...accelPoints.map((p) => p.accel),
-            1
-          );
-          const accelScreenPoints = accelPoints.map((p) => ({
-            x: getChartX(p.t),
-            y: baseline - (p.accel / maxAccelDisplay) * plotHeight * 0.4,
-          }));
-          return (
-            <path
-              d={pointsToAreaPath(accelScreenPoints, baseline)}
-              fill="url(#accelFill)"
-              stroke="rgb(249, 115, 22)"
-              strokeWidth={1}
-              strokeOpacity={0.3}
-            />
-          );
-        })()}
+        {accelAreaPath && (
+          <path
+            d={accelAreaPath}
+            fill="url(#accelFill)"
+            stroke="rgb(249, 115, 22)"
+            strokeWidth={1}
+            strokeOpacity={0.3}
+          />
+        )}
 
         {/* Speed limit reference line */}
         {speedLimitMs && (() => {
@@ -308,13 +327,7 @@ export function SpeedProfileChart({
         {/* Speed area fill */}
         {speedPoints.length > 1 && (
           <path
-            d={pointsToAreaPath(
-              speedPoints.map((p) => ({
-                x: getChartX(p.t),
-                y: getSpeedY(p.speed),
-              })),
-              baseline
-            )}
+            d={speedAreaPath}
             fill="url(#speedFill)"
             stroke="none"
           />
@@ -323,12 +336,7 @@ export function SpeedProfileChart({
         {/* Speed line */}
         {speedPoints.length > 1 && (
           <path
-            d={pointsToPath(
-              speedPoints.map((p) => ({
-                x: getChartX(p.t),
-                y: getSpeedY(p.speed),
-              }))
-            )}
+            d={speedLinePath}
             fill="none"
             stroke="rgb(59, 130, 246)"
             strokeWidth={2}

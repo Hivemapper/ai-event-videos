@@ -10,12 +10,56 @@ import { useEventPolling } from "@/hooks/use-event-polling";
 import { useEventFiltering } from "@/hooks/use-event-filtering";
 import { EventIndexEntry } from "@/lib/event-index";
 
+const MAX_GALLERY_CACHE_ENTRIES = 8;
+
 function deduplicateEvents(events: AIEvent[]): AIEvent[] {
   const seen = new Set<string>();
   return events.filter((e) => {
     if (seen.has(e.id)) return false;
     seen.add(e.id);
     return true;
+  });
+}
+
+interface CachedGalleryState {
+  events: AIEvent[];
+  totalCount: number;
+  offset: number;
+}
+
+const galleryStateCache = new Map<string, CachedGalleryState>();
+
+function getCachedGalleryState(key: string): CachedGalleryState | null {
+  return galleryStateCache.get(key) ?? null;
+}
+
+function setCachedGalleryState(key: string, state: CachedGalleryState): void {
+  galleryStateCache.delete(key);
+  galleryStateCache.set(key, state);
+
+  if (galleryStateCache.size <= MAX_GALLERY_CACHE_ENTRIES) return;
+  const oldestKey = galleryStateCache.keys().next().value;
+  if (oldestKey) galleryStateCache.delete(oldestKey);
+}
+
+function getGalleryCacheKey(options: {
+  startDate: string;
+  endDate: string;
+  typesKey: string;
+  vruLabelsKey: string;
+  searchCoordinates?: Coordinates | null;
+  searchRadius: number;
+  limit: number;
+}): string {
+  return JSON.stringify({
+    startDate: options.startDate,
+    endDate: options.endDate,
+    types: options.typesKey,
+    vruLabels: options.vruLabelsKey,
+    lat: options.searchCoordinates?.lat ?? null,
+    lon: options.searchCoordinates?.lon ?? null,
+    radius: options.searchRadius,
+    limit: options.limit,
   });
 }
 
@@ -36,6 +80,8 @@ interface UseEventsOptions {
   eventIndex?: Map<string, EventIndexEntry>;
   indexCountries?: string[];
   selectedRoadTypes?: string[];
+  selectedVruLabels?: string[];
+  resolveRegions?: boolean;
 }
 
 interface UseEventsResult {
@@ -52,23 +98,41 @@ interface UseEventsResult {
   refresh: () => void;
   newEventsCount: number;
   showNewEvents: () => void;
+  isRefreshing: boolean;
+  isLoadingNewEvents: boolean;
+  isLoadingMore: boolean;
 }
 
-export function useEvents(options: UseEventsOptions): UseEventsResult {
-  const { startDate, endDate, types, selectedTimeOfDay = [], selectedCountries = [], searchCoordinates, searchRadius = 500, limit = 50, eventIndex, indexCountries, selectedRoadTypes } = options;
+type LoadingMode = "initial" | "more" | "refresh" | "new-events";
 
-  const [events, setEvents] = useState<AIEvent[]>([]);
+export function useEvents(options: UseEventsOptions): UseEventsResult {
+  const { startDate, endDate, types, selectedTimeOfDay = [], selectedCountries = [], searchCoordinates, searchRadius = 500, limit = 50, eventIndex, indexCountries, selectedRoadTypes, selectedVruLabels = [], resolveRegions = true } = options;
+  const typesKey = JSON.stringify(types ?? []);
+  const vruLabelsKey = JSON.stringify(selectedVruLabels);
+  const cacheKey = getGalleryCacheKey({
+    startDate,
+    endDate,
+    typesKey,
+    vruLabelsKey,
+    searchCoordinates,
+    searchRadius,
+    limit,
+  });
+  const cachedState = getCachedGalleryState(cacheKey);
+
+  const [events, setEvents] = useState<AIEvent[]>(() => cachedState?.events ?? []);
   const [regions, setRegions] = useState<Region[]>([]);
   const [countries, setCountries] = useState<string[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState<LoadingMode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [totalCount, setTotalCount] = useState(0);
-  const initialTotalRef = useRef(0);
+  const [totalCount, setTotalCount] = useState(() => cachedState?.totalCount ?? 0);
+  const initialTotalRef = useRef(cachedState?.totalCount ?? 0);
 
   // Stabilize offset and events with refs to avoid recreating loadEvents
-  const offsetRef = useRef(0);
-  const eventsRef = useRef<AIEvent[]>([]);
+  const offsetRef = useRef(cachedState?.offset ?? cachedState?.events.length ?? 0);
+  const eventsRef = useRef<AIEvent[]>(cachedState?.events ?? []);
+  const activeRequestRef = useRef(0);
 
   // Keep eventsRef in sync
   useEffect(() => {
@@ -80,19 +144,47 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
     setHasApiKey(!!getApiKey());
   }, []);
 
+  const commitEvents = useCallback(
+    (nextEvents: AIEvent[], nextTotalCount: number, nextOffset: number) => {
+      setEvents(nextEvents);
+      setTotalCount(nextTotalCount);
+      offsetRef.current = nextOffset;
+      eventsRef.current = nextEvents;
+      setCachedGalleryState(cacheKey, {
+        events: nextEvents,
+        totalCount: nextTotalCount,
+        offset: nextOffset,
+      });
+    },
+    [cacheKey]
+  );
+
   const loadEvents = useCallback(
-    async (reset = false) => {
+    async ({
+      reset = false,
+      mode,
+      preserveCurrent = false,
+    }: {
+      reset?: boolean;
+      mode: LoadingMode;
+      preserveCurrent?: boolean;
+    }): Promise<boolean> => {
       if (!getApiKey()) {
         setHasApiKey(false);
         setError("Please configure your API key in settings.");
-        return;
+        return false;
       }
 
+      const requestId = activeRequestRef.current + 1;
+      activeRequestRef.current = requestId;
       setHasApiKey(true);
-      setIsLoading(true);
+      setLoadingMode(mode);
       setError(null);
 
       const currentOffset = reset ? 0 : offsetRef.current;
+      if (reset && !preserveCurrent) {
+        commitEvents([], 0, 0);
+      }
 
       try {
         const startDateTime = new Date(startDate + "T00:00:00.000Z").toISOString();
@@ -106,44 +198,64 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
           startDate: startDateTime,
           endDate: endDateTime,
           types: types && types.length > 0 ? types : undefined,
+          vruLabels: selectedVruLabels.length > 0 ? selectedVruLabels : undefined,
           polygon,
           limit,
           offset: currentOffset,
         });
 
+        if (activeRequestRef.current !== requestId) return false;
+
         const newEvents = reset
           ? response.events
           : deduplicateEvents([...eventsRef.current, ...response.events]);
+        const nextOffset = currentOffset + response.events.length;
 
         // Show events immediately — no geocoding blocking here
-        setEvents(newEvents);
-        setTotalCount(response.pagination.total);
-        offsetRef.current = currentOffset + response.events.length;
+        commitEvents(newEvents, response.pagination.total, nextOffset);
 
         if (reset) {
           initialTotalRef.current = response.pagination.total;
         }
+
+        return true;
       } catch (err) {
+        if (activeRequestRef.current !== requestId) return false;
         setError(err instanceof Error ? err.message : "Failed to load events");
+        return false;
       } finally {
-        setIsLoading(false);
+        if (activeRequestRef.current === requestId) {
+          setLoadingMode(null);
+        }
       }
     },
-    [startDate, endDate, types, searchCoordinates, searchRadius, limit]
+    [startDate, endDate, types, selectedVruLabels, searchCoordinates, searchRadius, limit, commitEvents]
   );
 
   // Load events when server-side filters change
   useEffect(() => {
-    offsetRef.current = 0;
-    setEvents([]);
-    eventsRef.current = [];
-    loadEvents(true);
+    activeRequestRef.current += 1;
+    const cached = getCachedGalleryState(cacheKey);
+
+    if (cached) {
+      commitEvents(cached.events, cached.totalCount, cached.offset);
+      initialTotalRef.current = cached.totalCount;
+      setError(null);
+      setLoadingMode(null);
+    } else {
+      offsetRef.current = 0;
+      eventsRef.current = [];
+      setEvents([]);
+      setTotalCount(0);
+      initialTotalRef.current = 0;
+      void loadEvents({ reset: true, mode: "initial" });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate, endDate, JSON.stringify(types), searchCoordinates?.lat, searchCoordinates?.lon, searchRadius]);
+  }, [cacheKey]);
 
   // Geocode regions asynchronously after events load
   useEffect(() => {
-    if (events.length === 0) {
+    if (!resolveRegions || events.length === 0) {
       setRegions([]);
       setCountries([]);
       return;
@@ -160,11 +272,16 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
     return () => {
       cancelled = true;
     };
-  }, [events]);
+  }, [events, resolveRegions]);
+
+  const isLoading = loadingMode !== null;
+  const isRefreshing = loadingMode === "refresh" || loadingMode === "new-events";
+  const isLoadingMore = loadingMode === "more";
+  const isLoadingNewEvents = loadingMode === "new-events";
 
   const loadMore = useCallback(() => {
     if (!isLoading && events.length < totalCount) {
-      loadEvents(false);
+      void loadEvents({ reset: false, mode: "more" });
     }
   }, [isLoading, events.length, totalCount, loadEvents]);
 
@@ -179,12 +296,13 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
       startDate: startDateTime,
       endDate: endDateTime,
       types: types && types.length > 0 ? types : undefined,
+      vruLabels: selectedVruLabels.length > 0 ? selectedVruLabels : undefined,
       polygon,
       limit: 1,
       offset: 0,
     });
     return response.pagination.total;
-  }, [startDate, endDate, types, searchCoordinates, searchRadius]);
+  }, [startDate, endDate, types, selectedVruLabels, searchCoordinates, searchRadius]);
 
   const { newEventsCount, showNewEvents: pollingShowNew } = useEventPolling({
     enabled: hasApiKey && !isLoading,
@@ -193,18 +311,21 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
   });
 
   const refresh = useCallback(() => {
-    offsetRef.current = 0;
-    setEvents([]);
-    eventsRef.current = [];
-    loadEvents(true);
+    void loadEvents({
+      reset: true,
+      mode: eventsRef.current.length > 0 ? "refresh" : "initial",
+      preserveCurrent: eventsRef.current.length > 0,
+    });
   }, [loadEvents]);
 
   const showNewEvents = useCallback(() => {
-    pollingShowNew();
-    offsetRef.current = 0;
-    setEvents([]);
-    eventsRef.current = [];
-    loadEvents(true);
+    void loadEvents({
+      reset: true,
+      mode: "new-events",
+      preserveCurrent: true,
+    }).then((loaded) => {
+      if (loaded) pollingShowNew();
+    });
   }, [loadEvents, pollingShowNew]);
 
   // Client-side filtering
@@ -234,5 +355,8 @@ export function useEvents(options: UseEventsOptions): UseEventsResult {
     refresh,
     newEventsCount,
     showNewEvents,
+    isRefreshing,
+    isLoadingNewEvents,
+    isLoadingMore,
   };
 }

@@ -1,5 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 
+export async function HEAD(request: NextRequest) {
+  const url = request.nextUrl.searchParams.get("url");
+  if (!url) {
+    return NextResponse.json({ error: "URL is required" }, { status: 400 });
+  }
+  try {
+    let response = await fetch(url, { method: "HEAD" });
+    if (response.status === 403) {
+      await new Promise((r) => setTimeout(r, 2000));
+      response = await fetch(url, { method: "HEAD" });
+    }
+    const headers = new Headers({ "Cache-Control": "public, max-age=300" });
+    const contentLength = response.headers.get("content-length");
+    const contentType = response.headers.get("content-type");
+    if (contentLength) headers.set("Content-Length", contentLength);
+    if (contentType) headers.set("Content-Type", contentType);
+    return new NextResponse(null, { status: response.status, headers });
+  } catch {
+    return new NextResponse(null, { status: 500 });
+  }
+}
+
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
 

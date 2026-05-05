@@ -15,6 +15,8 @@ export function useDetectionRuns(videoId: string | null) {
         );
         return hasActive ? 2000 : 0;
       },
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
     }
   );
 

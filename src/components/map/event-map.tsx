@@ -6,13 +6,19 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { getMapboxToken, getApiKey } from "@/lib/api";
 import { DetectedActor } from "@/types/actors";
 import { ActorTrack } from "@/types/actors";
+import { VideoDetectionSegment } from "@/types/pipeline";
 import { calculateBearing } from "@/lib/geo-projection";
-import { MAKI_ICONS, getActorIcon } from "@/lib/actor-icons";
+import { getActorIcon } from "@/lib/actor-icons";
 
 interface PathPoint {
   lat: number;
   lon: number;
   timestamp?: number;
+}
+
+interface SpeedDataPoint {
+  AVG_SPEED_MS: number;
+  TIMESTAMP: number;
 }
 
 interface MapFeature {
@@ -45,6 +51,7 @@ interface EventMapProps {
     lon: number;
   };
   path?: PathPoint[];
+  speedData?: SpeedDataPoint[];
   currentTime?: number;
   videoDuration?: number;
   className?: string;
@@ -52,10 +59,206 @@ interface EventMapProps {
   showMapFeatures?: boolean;
   detectedActors?: DetectedActor[];
   actorTracks?: ActorTrack[];
+  detectionSegments?: VideoDetectionSegment[];
   onSeek?: (time: number) => void;
+  followVehicle?: boolean;
 }
 
 const MAPBOX_STYLE = "mapbox://styles/arielseidman/clyf7l1at00u001r1eyc63yyy";
+const ROUTE_BLUE = "#2563eb";
+const BRAKING_DECEL_THRESHOLD = 0.35;
+const DECEL_LOOKBACK_SECONDS = 1;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function haversineMeters(a: PathPoint, b: PathPoint): number {
+  const earthRadiusM = 6_371_000;
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * earthRadiusM * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function nearestDeceleration(
+  samples: Array<{ progress: number; decel: number }>,
+  progress: number
+): number {
+  if (samples.length === 0) return 0;
+  let best = samples[0];
+  let bestDistance = Math.abs(progress - best.progress);
+  for (let i = 1; i < samples.length; i += 1) {
+    const distance = Math.abs(progress - samples[i].progress);
+    if (distance < bestDistance) {
+      best = samples[i];
+      bestDistance = distance;
+    }
+  }
+  return best.decel;
+}
+
+function timestampDeltaSeconds(start: number, end: number): number {
+  const delta = end - start;
+  if (delta <= 0) return 0;
+  return delta > 10 ? delta / 1000 : delta;
+}
+
+function pathSegmentProgress(path: PathPoint[], index: number): number {
+  const start = path[0]?.timestamp;
+  const end = path[path.length - 1]?.timestamp;
+  const a = path[index];
+  const b = path[index + 1];
+  if (
+    isFiniteNumber(start) &&
+    isFiniteNumber(end) &&
+    end > start &&
+    isFiniteNumber(a?.timestamp) &&
+    isFiniteNumber(b?.timestamp)
+  ) {
+    const midpoint = (a.timestamp + b.timestamp) / 2;
+    return Math.max(0, Math.min(1, (midpoint - start) / (end - start)));
+  }
+  return (index + 0.5) / (path.length - 1);
+}
+
+function decelerationSamplesFromSpeedData(
+  speedData: SpeedDataPoint[] | undefined
+): Array<{ progress: number; decel: number }> {
+  if (!speedData || speedData.length < 2) return [];
+
+  const points = speedData
+    .filter(
+      (point) =>
+        isFiniteNumber(point.AVG_SPEED_MS) && isFiniteNumber(point.TIMESTAMP)
+    )
+    .sort((a, b) => a.TIMESTAMP - b.TIMESTAMP);
+  if (points.length < 2) return [];
+
+  const start = points[0].TIMESTAMP;
+  const end = points[points.length - 1].TIMESTAMP;
+  const duration = end - start;
+
+  const samples: Array<{ progress: number; decel: number }> = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const current = points[i];
+    let prevIndex = i - 1;
+    while (
+      prevIndex > 0 &&
+      timestampDeltaSeconds(points[prevIndex].TIMESTAMP, current.TIMESTAMP) <
+        DECEL_LOOKBACK_SECONDS
+    ) {
+      prevIndex -= 1;
+    }
+
+    const prev = points[prevIndex];
+    const dt = timestampDeltaSeconds(prev.TIMESTAMP, current.TIMESTAMP);
+    if (dt <= 0) continue;
+    const decel = Math.max(0, (prev.AVG_SPEED_MS - current.AVG_SPEED_MS) / dt);
+    const progress =
+      duration > 0
+        ? ((prev.TIMESTAMP + current.TIMESTAMP) / 2 - start) / duration
+        : (i - 0.5) / (points.length - 1);
+    samples.push({ progress: Math.max(0, Math.min(1, progress)), decel });
+  }
+  return samples;
+}
+
+function decelerationSamplesFromPath(
+  path: PathPoint[],
+  videoDuration: number | undefined
+): Array<{ progress: number; decel: number }> {
+  if (path.length < 3) return [];
+
+  const segmentSpeeds: Array<{ progress: number; speed: number; time: number }> = [];
+  const fallbackDt =
+    videoDuration && videoDuration > 0 ? videoDuration / (path.length - 1) : 0;
+
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const a = path[i];
+    const b = path[i + 1];
+    const timestampDt =
+      isFiniteNumber(a.timestamp) && isFiniteNumber(b.timestamp)
+        ? timestampDeltaSeconds(a.timestamp, b.timestamp)
+        : 0;
+    const dt = timestampDt > 0 ? timestampDt : fallbackDt;
+    if (dt <= 0) continue;
+    const time =
+      isFiniteNumber(a.timestamp) && isFiniteNumber(b.timestamp)
+        ? (a.timestamp + b.timestamp) / 2
+        : (i + 0.5) * dt;
+    segmentSpeeds.push({
+      progress: pathSegmentProgress(path, i),
+      speed: haversineMeters(a, b) / dt,
+      time,
+    });
+  }
+
+  const samples: Array<{ progress: number; decel: number }> = [];
+  for (let i = 1; i < segmentSpeeds.length; i += 1) {
+    const current = segmentSpeeds[i];
+    let prevIndex = i - 1;
+    while (
+      prevIndex > 0 &&
+      timestampDeltaSeconds(segmentSpeeds[prevIndex].time, current.time) <
+        DECEL_LOOKBACK_SECONDS
+    ) {
+      prevIndex -= 1;
+    }
+
+    const prev = segmentSpeeds[prevIndex];
+    const dt = timestampDeltaSeconds(prev.time, current.time);
+    if (dt <= 0) continue;
+    samples.push({
+      progress: current.progress,
+      decel: Math.max(0, (prev.speed - current.speed) / dt),
+    });
+  }
+  return samples;
+}
+
+function buildRouteSegments(
+  path: PathPoint[],
+  speedData: SpeedDataPoint[] | undefined,
+  videoDuration: number | undefined
+): GeoJSON.FeatureCollection<GeoJSON.LineString> {
+  const speedSamples = decelerationSamplesFromSpeedData(speedData);
+  const samples =
+    speedSamples.length > 0
+      ? speedSamples
+      : decelerationSamplesFromPath(path, videoDuration);
+
+  const features: GeoJSON.Feature<GeoJSON.LineString>[] = [];
+
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const point = path[index];
+    const next = path[index + 1];
+    const progress = pathSegmentProgress(path, index);
+    const decel = nearestDeceleration(samples, progress);
+    if (decel <= BRAKING_DECEL_THRESHOLD) continue;
+    features.push({
+      type: "Feature",
+      properties: { decel },
+      geometry: {
+        type: "LineString",
+        coordinates: [
+          [point.lon, point.lat],
+          [next.lon, next.lat],
+        ],
+      },
+    });
+  }
+
+  return {
+    type: "FeatureCollection",
+    features,
+  };
+}
 
 /** Project query point onto the nearest position along the path, returning a fractional index. */
 function findNearestFractionalIndex(
@@ -109,7 +312,7 @@ function interpolatePathPosition(path: PathPoint[], fracIdx: number): [number, n
   ];
 }
 
-export function EventMap({ location, path, currentTime, videoDuration, className = "", style, showMapFeatures = true, detectedActors, actorTracks, onSeek }: EventMapProps) {
+export function EventMap({ location, path, speedData, currentTime, videoDuration, className = "", style, showMapFeatures = true, detectedActors, actorTracks, detectionSegments, onSeek, followVehicle = false }: EventMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const movingMarkerRef = useRef<mapboxgl.Marker | null>(null);
@@ -117,17 +320,9 @@ export function EventMap({ location, path, currentTime, videoDuration, className
   const isDraggingRef = useRef(false);
   const onSeekRef = useRef(onSeek);
   const videoDurationRef = useRef(videoDuration);
-  const [token, setToken] = useState<string | null>(null);
-  const [tokenChecked, setTokenChecked] = useState(false);
+  const [token] = useState<string | null>(() => getMapboxToken());
   const [mapFeatures, setMapFeatures] = useState<MapFeature[]>([]);
   const [mapLoaded, setMapLoaded] = useState(false);
-
-  // Check for token on mount
-  useEffect(() => {
-    const mapboxToken = getMapboxToken();
-    setToken(mapboxToken);
-    setTokenChecked(true);
-  }, []);
 
   // Keep refs current for use in drag handlers
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
@@ -156,10 +351,8 @@ export function EventMap({ location, path, currentTime, videoDuration, className
           if (data.features) {
             setMapFeatures(data.features);
           }
-        } else {
-          const errorData = await response.json().catch(() => ({}));
         }
-      } catch (error) {
+      } catch {
       }
     };
 
@@ -167,7 +360,7 @@ export function EventMap({ location, path, currentTime, videoDuration, className
   }, [location, showMapFeatures]);
 
   useEffect(() => {
-    if (!mapContainer.current || !token || !tokenChecked) return;
+    if (!mapContainer.current || !token) return;
 
     mapboxgl.accessToken = token;
 
@@ -188,7 +381,7 @@ export function EventMap({ location, path, currentTime, videoDuration, className
       if (path && path.length > 1) {
         const coordinates = path.map((p) => [p.lon, p.lat] as [number, number]);
 
-        mapInstance.addSource("route", {
+        mapInstance.addSource("route-base", {
           type: "geojson",
           data: {
             type: "Feature",
@@ -201,17 +394,51 @@ export function EventMap({ location, path, currentTime, videoDuration, className
         });
 
         mapInstance.addLayer({
-          id: "route",
+          id: "route-base",
           type: "line",
-          source: "route",
+          source: "route-base",
           layout: {
             "line-join": "round",
             "line-cap": "round",
           },
           paint: {
-            "line-color": "#ef4444",
+            "line-color": ROUTE_BLUE,
             "line-width": 4,
-            "line-opacity": 0.8,
+            "line-opacity": 0.9,
+          },
+        });
+
+        mapInstance.addSource("route-braking", {
+          type: "geojson",
+          data: buildRouteSegments(path, undefined, undefined),
+        });
+
+        mapInstance.addLayer({
+          id: "route-braking",
+          type: "line",
+          source: "route-braking",
+          layout: {
+            "line-join": "round",
+            "line-cap": "round",
+          },
+          paint: {
+            "line-color": [
+              "interpolate",
+              ["linear"],
+              ["get", "decel"],
+              BRAKING_DECEL_THRESHOLD,
+              "#f97316",
+              1.5,
+              "#fb923c",
+              2.5,
+              "#ef4444",
+              4,
+              "#ff1f1f",
+              6,
+              "#ff0000",
+            ],
+            "line-width": 5,
+            "line-opacity": 0.95,
           },
         });
 
@@ -221,14 +448,14 @@ export function EventMap({ location, path, currentTime, videoDuration, className
         mapInstance.fitBounds(bounds, { padding: 50 });
       }
 
-      // Add moving marker (red with white border)
+      // Add moving marker (blue with white border)
       const markerEl = document.createElement("div");
       markerEl.className = "event-marker";
       markerEl.innerHTML = `
         <div style="
           width: 24px;
           height: 24px;
-          background: #ef4444;
+          background: ${ROUTE_BLUE};
           border: 3px solid white;
           border-radius: 50%;
           box-shadow: 0 2px 8px rgba(0,0,0,0.3);
@@ -305,7 +532,14 @@ export function EventMap({ location, path, currentTime, videoDuration, className
       mapInstance.remove();
       setMapLoaded(false);
     };
-  }, [location, path, token, tokenChecked]);
+  }, [location.lat, location.lon, path, token]);
+
+  useEffect(() => {
+    if (!mapLoaded || !path || path.length <= 1) return;
+
+    const source = map.current?.getSource("route-braking") as mapboxgl.GeoJSONSource | undefined;
+    source?.setData(buildRouteSegments(path, speedData, videoDuration));
+  }, [mapLoaded, path, speedData, videoDuration]);
 
   // Resize map when container dimensions change
   useEffect(() => {
@@ -382,7 +616,17 @@ export function EventMap({ location, path, currentTime, videoDuration, className
           </svg>
         `;
       } else {
-        return; // Skip unknown feature types
+        markerEl.title = featureClass ?? "feature";
+        markerEl.innerHTML = `
+          <div style="
+            width: 10px;
+            height: 10px;
+            background: #6b7280;
+            border: 1.5px solid white;
+            border-radius: 50%;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+          "></div>
+        `;
       }
 
       const marker = new mapboxgl.Marker(markerEl)
@@ -621,6 +865,86 @@ export function EventMap({ location, path, currentTime, videoDuration, className
     }
   }, [currentTime, actorTracks, mapLoaded]);
 
+  // Add detection segment dots on the map
+  useEffect(() => {
+    const mapInstance = map.current;
+    if (!mapInstance || !mapLoaded || !detectionSegments || detectionSegments.length === 0 || !path || path.length < 2 || !videoDuration) return;
+
+    const markers: mapboxgl.Marker[] = [];
+
+    detectionSegments.forEach((seg) => {
+      // Map segment midpoint time to a position on the GNSS path
+      const midMs = (seg.startMs + seg.endMs) / 2;
+      const midSec = midMs / 1000;
+      const progress = Math.max(0, Math.min(1, midSec / videoDuration));
+      const fracIdx = progress * (path.length - 1);
+      const [lon, lat] = interpolatePathPosition(path, fracIdx);
+
+      const { path: iconPath, color } = getActorIcon(seg.label);
+
+      const markerEl = document.createElement("div");
+      markerEl.className = "detection-segment-marker";
+      markerEl.style.cursor = "pointer";
+      markerEl.innerHTML = `
+        <div style="
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          filter: drop-shadow(0 1px 3px rgba(0,0,0,0.4));
+        ">
+          <div style="
+            width: 26px;
+            height: 26px;
+            background: ${color};
+            border: 2px solid white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+          ">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 15 15" style="fill: white;">
+              <path d="${iconPath}"/>
+            </svg>
+          </div>
+        </div>
+      `;
+
+      const marker = new mapboxgl.Marker({ element: markerEl, anchor: "center" })
+        .setLngLat([lon, lat])
+        .addTo(mapInstance);
+
+      // Click to seek video to segment start
+      markerEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (onSeekRef.current) {
+          onSeekRef.current(seg.startMs / 1000);
+        }
+      });
+
+      // Tooltip on hover
+      const popup = new mapboxgl.Popup({
+        offset: 16,
+        closeButton: false,
+        closeOnClick: false,
+      }).setHTML(`
+        <div style="font-size: 12px;">
+          <strong>${seg.label}</strong>
+          <div style="color: #666;">${(seg.startMs / 1000).toFixed(1)}s – ${(seg.endMs / 1000).toFixed(1)}s</div>
+          <div style="color: #666;">confidence: ${(seg.maxConfidence * 100).toFixed(0)}%</div>
+        </div>
+      `);
+
+      markerEl.addEventListener("mouseenter", () => marker.getPopup() ? marker.togglePopup() : marker.setPopup(popup).togglePopup());
+      markerEl.addEventListener("mouseleave", () => { if (marker.getPopup()?.isOpen()) marker.togglePopup(); });
+
+      markers.push(marker);
+    });
+
+    return () => {
+      markers.forEach((m) => m.remove());
+    };
+  }, [detectionSegments, path, videoDuration, mapLoaded]);
+
   // Calculate smoothed bearing by looking ahead a few points
   const calculateSmoothedBearing = (pathData: PathPoint[], currentIndex: number): number => {
     const lookAhead = 3; // Average over a few points for smoother rotation
@@ -671,39 +995,34 @@ export function EventMap({ location, path, currentTime, videoDuration, className
 
     marker.setLngLat([lon, lat]);
 
-    // Calculate smoothed bearing to orient map so vehicle moves toward top
-    const bearing = calculateSmoothedBearing(path, lowerIndex);
-
-    // Rotate map so vehicle heading points up
-    // Map bearing is the rotation of the map - if vehicle heads east (90°),
-    // we rotate map by -90° so east points up
-    mapInstance.easeTo({
-      center: [lon, lat],
-      bearing: -bearing,
-      duration: 300,
-      easing: (t) => t, // Linear easing for smooth continuous motion
-    });
-  }, [currentTime, videoDuration, path, mapLoaded]);
-
-  if (!tokenChecked) {
-    return (
-      <div
-        className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}
-      >
-        <p>Loading map...</p>
-      </div>
-    );
-  }
+    if (followVehicle) {
+      // Camera follow is intentionally opt-in; marker motion is enough for the
+      // default playback sync and avoids continuous Mapbox camera animation.
+      const bearing = calculateSmoothedBearing(path, lowerIndex);
+      mapInstance.easeTo({
+        center: [lon, lat],
+        bearing: -bearing,
+        duration: 300,
+        easing: (t) => t,
+      });
+    }
+  }, [currentTime, videoDuration, path, mapLoaded, followVehicle]);
 
   if (!token) {
     return (
       <div
-        className={`flex items-center justify-center bg-muted text-muted-foreground ${className}`}
+        className={`flex items-center justify-center overflow-hidden rounded-xl bg-muted text-muted-foreground ${className}`}
       >
         <p>Mapbox token not configured. Add it in Settings.</p>
       </div>
     );
   }
 
-  return <div ref={mapContainer} className={className} style={style} />;
+  return (
+    <div
+      ref={mapContainer}
+      className={`overflow-hidden rounded-xl ${className}`}
+      style={style}
+    />
+  );
 }

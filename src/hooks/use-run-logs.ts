@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 
 export function useRunLogs(runId: string | null, videoId: string | null) {
-  const [logs, setLogs] = useState<string>("");
+  const [logState, setLogState] = useState<{ key: string | null; logs: string }>({
+    key: null,
+    logs: "",
+  });
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -10,8 +13,7 @@ export function useRunLogs(runId: string | null, videoId: string | null) {
       return;
     }
 
-    // Clear logs when switching to a new run
-    setLogs("");
+    const key = `${videoId}:${runId}`;
 
     const es = new EventSource(
       `/api/videos/${videoId}/runs/${runId}/logs`
@@ -21,7 +23,10 @@ export function useRunLogs(runId: string | null, videoId: string | null) {
     es.onmessage = (event) => {
       try {
         const text = JSON.parse(event.data) as string;
-        setLogs((prev) => prev + text);
+        setLogState((prev) => ({
+          key,
+          logs: prev.key === key ? prev.logs + text : text,
+        }));
       } catch {
         // Ignore malformed SSE data
       }
@@ -37,5 +42,5 @@ export function useRunLogs(runId: string | null, videoId: string | null) {
     };
   }, [runId, videoId]);
 
-  return { logs };
+  return { logs: logState.logs };
 }

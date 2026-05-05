@@ -1,8 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { API_BASE_URL } from "@/lib/constants";
-import { fetchWithRetry } from "@/lib/fetch-retry";
+import {
+  fetchSearchCount,
+  getAuthCacheKey,
+  normalizeBeeMapsAuthHeader,
+} from "@/lib/metrics-counts";
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAILY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface DailyResult {
+  date: string;
+  day: string;
+  total: number;
+}
+
+const dailyCache = new Map<string, { expiresAt: number; data: DailyResult[] }>();
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,9 +26,17 @@ export async function GET(request: NextRequest) {
         { status: 401 }
       );
     }
-    const authHeader = apiKey.startsWith("Basic ")
-      ? apiKey
-      : `Basic ${apiKey}`;
+    const authHeader = normalizeBeeMapsAuthHeader(apiKey);
+    const cacheKey = getAuthCacheKey(authHeader);
+    const cached = dailyCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return NextResponse.json(cached.data, {
+        headers: {
+          "Cache-Control": "private, max-age=60, stale-while-revalidate=300",
+          "X-Metrics-Cache": "hit",
+        },
+      });
+    }
 
     const now = new Date();
     const days: { date: string; day: string; startDate: string; endDate: string }[] = [];
@@ -38,22 +58,12 @@ export async function GET(request: NextRequest) {
 
     const counts = await Promise.all(
       days.map(async (day) => {
-        const res = await fetchWithRetry(`${API_BASE_URL}/search`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: authHeader,
-          },
-          body: JSON.stringify({
-            startDate: day.startDate,
-            endDate: day.endDate,
-            limit: 1,
-            offset: 0,
-          }),
-        });
-        if (!res.ok) return 0;
-        const data = await res.json();
-        return data.pagination?.total ?? 0;
+        const result = await fetchSearchCount(
+          authHeader,
+          day.startDate,
+          day.endDate
+        );
+        return result.count;
       })
     );
 
@@ -62,8 +72,17 @@ export async function GET(request: NextRequest) {
       day: day.day,
       total: counts[i],
     }));
+    dailyCache.set(cacheKey, {
+      data: result,
+      expiresAt: Date.now() + DAILY_CACHE_TTL_MS,
+    });
 
-    return NextResponse.json(result);
+    return NextResponse.json(result, {
+      headers: {
+        "Cache-Control": "private, max-age=60, stale-while-revalidate=300",
+        "X-Metrics-Cache": "miss",
+      },
+    });
   } catch (error) {
     console.error("Daily metrics API error:", error);
     return NextResponse.json(

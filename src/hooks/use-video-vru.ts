@@ -18,7 +18,11 @@ export interface VideoVruResponse {
 export function useVideoVru(videoId: string) {
   return useSWR<VideoVruResponse>(
     videoId ? `/api/videos/${videoId}/vru` : null,
-    fetcher
+    fetcher,
+    {
+      revalidateOnFocus: false,
+      revalidateOnReconnect: false,
+    }
   );
 }
 

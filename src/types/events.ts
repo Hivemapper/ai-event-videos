@@ -81,6 +81,7 @@ export interface AIEventsRequest {
   endDate: string;
   types?: AIEventType[];
   polygon?: [number, number][]; // Array of [lon, lat] coordinates forming a closed polygon
+  vruLabels?: string[];
   limit?: number;
   offset?: number;
 }

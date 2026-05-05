@@ -10,14 +10,13 @@ Next.js 16 (App Router) web app for browsing, filtering, and analyzing AI-detect
 - **Tailwind CSS 4** + **shadcn/ui** (Radix UI primitives)
 - **Mapbox GL JS** for interactive maps
 - **FFmpeg** for server-side video frame extraction and thumbnails
-- **Anthropic Codex API** (Sonnet 4.5) for AI Filter Agent
+- **Anthropic Messages API** (Sonnet 4.5) for video scene analysis and actor detection
 
 ## Key Architecture
 
 ### API Routes (all under `src/app/api/`)
 
 - `events/` — Proxy to Bee Maps `/aievents/search` (POST) and `/aievents/{id}` (GET). Uses Basic auth.
-- `agent/` — AI Filter Agent. Sends natural language queries to Codex, which extracts structured filters via tool use.
 - `video/` — Video proxy with Range request support for seeking/scrubbing.
 - `frames/` — FFmpeg frame extraction at specific timestamps. Caches to temp dir.
 - `thumbnail/` — FFmpeg thumbnail generation (320px wide at 1s). Caches to temp dir.
@@ -27,7 +26,7 @@ Next.js 16 (App Router) web app for browsing, filtering, and analyzing AI-detect
 
 ### Pages
 
-- `/` — Event gallery with grid/map views, filters, and Agent toggle
+- `/` — Event gallery with list/grid results and filters
 - `/event/[id]` — Event detail: video player with speed overlay, map with GNSS track, speed profile, GNSS/IMU data, frame labeling
 - `/highlights` — Curated tables of extreme events (braking, speed, g-force, acceleration, swerving, international)
 
@@ -35,7 +34,7 @@ Next.js 16 (App Router) web app for browsing, filtering, and analyzing AI-detect
 
 - **Bee Maps API** (`https://beemaps.com/api/developer`): Events, map features, device intrinsics. Auth: `Basic {base64_key}`
 - **Mapbox**: Map rendering, Tilequery (road type), Geocoding (country names). Auth: access token.
-- **Anthropic Messages API**: Powers the AI Filter Agent with Codex Sonnet 4.5.
+- **Anthropic Messages API**: Powers video scene analysis and actor detection with Claude Sonnet 4.5.
 
 ### API Keys
 

@@ -13,8 +13,12 @@ export async function fetchWithRetry(
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const response = await fetch(url, init);
-      // Retry on 403 (rate limiting) and 5xx server errors
-      if (response.status !== 403 && response.status < 500 || attempt === retries) {
+      // Retry on 403 + 429 (rate limiting) and 5xx server errors
+      const shouldRetry =
+        response.status === 403 ||
+        response.status === 429 ||
+        response.status >= 500;
+      if (!shouldRetry || attempt === retries) {
         return response;
       }
       lastError = new Error(`Server error: ${response.status}`);

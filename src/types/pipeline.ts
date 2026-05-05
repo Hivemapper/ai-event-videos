@@ -144,11 +144,15 @@ export interface FrameDetection {
 
 export type DetectionRunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
+export type ProductionRunStatus = "queued" | "processing" | "completed" | "failed";
+export type ProductionStepStatus = "pending" | "processing" | "completed" | "failed";
+
 export interface DetectionRun {
   id: string;
   videoId: string;
   modelName: string;
   status: DetectionRunStatus;
+  priority: number;
   config: Record<string, unknown>;
   detectionCount: number | null;
   workerPid: number | null;
@@ -175,4 +179,23 @@ export interface PipelineDaySummary {
   currentVideoId: string | null;
   lastCompletedAt: string | null;
   countError: string | null;
+}
+
+export interface ProductionRun {
+  id: string;
+  videoId: string;
+  status: ProductionRunStatus;
+  privacyStatus: ProductionStepStatus;
+  metadataStatus: ProductionStepStatus;
+  uploadStatus: ProductionStepStatus;
+  priority: number;
+  s3VideoKey: string | null;
+  s3MetadataKey: string | null;
+  workerPid: number | null;
+  machineId: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastError: string | null;
+  createdAt: string;
 }

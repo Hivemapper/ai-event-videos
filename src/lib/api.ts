@@ -6,6 +6,9 @@ const MAPBOX_TOKEN_STORAGE_KEY = "mapbox-token";
 const ANTHROPIC_KEY_STORAGE_KEY = "anthropic-api-key";
 const CAMERA_INTRINSICS_STORAGE_KEY = "camera-intrinsics";
 const SPEED_UNIT_STORAGE_KEY = "speed-unit";
+const S3_BUCKET_STORAGE_KEY = "prod-s3-bucket";
+const DEFAULT_S3_BUCKET = "beemaps-hivemapper-event-videos";
+const DEFAULT_S3_REGION = "us-west-2";
 
 export type SpeedUnit = "mph" | "kmh";
 
@@ -99,6 +102,31 @@ export function setAnthropicKey(key: string): void {
 export function clearAnthropicKey(): void {
   if (typeof window === "undefined") return;
   localStorage.removeItem(ANTHROPIC_KEY_STORAGE_KEY);
+}
+
+export function getS3Bucket(): string {
+  if (typeof window === "undefined") return DEFAULT_S3_BUCKET;
+  return localStorage.getItem(S3_BUCKET_STORAGE_KEY) || DEFAULT_S3_BUCKET;
+}
+
+export function setS3Bucket(bucket: string): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(S3_BUCKET_STORAGE_KEY, bucket);
+}
+
+export function clearS3Bucket(): void {
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(S3_BUCKET_STORAGE_KEY);
+}
+
+export function getS3Url(): string {
+  const bucket = getS3Bucket();
+  return `s3://${bucket}/`;
+}
+
+export function getS3HttpUrl(): string {
+  const bucket = getS3Bucket();
+  return `https://${bucket}.s3.${DEFAULT_S3_REGION}.amazonaws.com/`;
 }
 
 export function getCameraIntrinsics(): DevicesResponse | null {

@@ -26,6 +26,24 @@ interface MetadataTableProps {
   eventId?: string;
 }
 
+function SortIcon({
+  column,
+  sortColumn,
+  sortDirection,
+}: {
+  column: SortColumn;
+  sortColumn: SortColumn;
+  sortDirection: SortDirection;
+}) {
+  if (sortColumn !== column) {
+    return <ArrowUpDown className="w-3 h-3 ml-1 opacity-50" />;
+  }
+  if (sortDirection === "asc") {
+    return <ArrowUp className="w-3 h-3 ml-1" />;
+  }
+  return <ArrowDown className="w-3 h-3 ml-1" />;
+}
+
 export function MetadataTable({ metadata, eventId }: MetadataTableProps) {
   const [sortColumn, setSortColumn] = useState<SortColumn>(null);
   const [copiedId, setCopiedId] = useState(false);
@@ -60,16 +78,6 @@ export function MetadataTable({ metadata, eventId }: MetadataTableProps) {
       setSortColumn(column);
       setSortDirection("asc");
     }
-  };
-
-  const SortIcon = ({ column }: { column: SortColumn }) => {
-    if (sortColumn !== column) {
-      return <ArrowUpDown className="w-3 h-3 ml-1 opacity-50" />;
-    }
-    if (sortDirection === "asc") {
-      return <ArrowUp className="w-3 h-3 ml-1" />;
-    }
-    return <ArrowDown className="w-3 h-3 ml-1" />;
   };
 
   // Get other metadata fields (not SPEED_ARRAY)
@@ -149,7 +157,7 @@ export function MetadataTable({ metadata, eventId }: MetadataTableProps) {
                   >
                     <span className="flex items-center">
                       Speed
-                      <SortIcon column="speed" />
+                      <SortIcon column="speed" sortColumn={sortColumn} sortDirection={sortDirection} />
                     </span>
                   </th>
                   <th
@@ -158,7 +166,7 @@ export function MetadataTable({ metadata, eventId }: MetadataTableProps) {
                   >
                     <span className="flex items-center">
                       Timestamp
-                      <SortIcon column="timestamp" />
+                      <SortIcon column="timestamp" sortColumn={sortColumn} sortDirection={sortDirection} />
                     </span>
                   </th>
                 </tr>

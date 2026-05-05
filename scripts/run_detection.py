@@ -34,6 +34,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import cv2
 import numpy as np
@@ -57,22 +58,26 @@ CACHE_DIR = PROJECT_ROOT / "data" / "pipeline-video-cache"
 
 
 def api_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Make an HTTP request with 403 backoff retry."""
+    """Make an HTTP request with rate-limit backoff retry (403/429)."""
     kwargs.setdefault("timeout", 60)
     wait = 30
     for attempt in range(6):  # up to ~5 min total backoff
         resp = requests.request(method, url, **kwargs)
-        if resp.status_code != 403:
+        if resp.status_code not in (403, 429):
             return resp
-        print(f"    [!] 403 rate-limited — waiting {wait}s (attempt {attempt + 1})...")
+        print(f"    [!] {resp.status_code} rate-limited — waiting {wait}s (attempt {attempt + 1})...")
         time.sleep(wait)
         wait = min(wait * 2, 120)
-    return resp  # return last 403 if all retries exhausted
+    return resp  # return last response if all retries exhausted
 PIPELINE_VERSION = "vru-yolo-v2"
-FRAMES_PER_VIDEO = 45
+# Analyze every 5th frame on standard 30 FPS clips, capped at 300 frames.
+FRAMES_PER_VIDEO = 300
+DEFAULT_FRAME_STRIDE = 5
 
 API_BASE_URL = "https://beemaps.com/api/developer/aievents"
 BEEMAPS_MAP_DATA_URL = "https://beemaps.com/api/developer/map-data"
+LOCAL_METADATA_DIR = PROJECT_ROOT / "data" / "metadata"
+PUBLIC_DIR = PROJECT_ROOT / "public"
 
 
 
@@ -198,6 +203,107 @@ def load_api_key() -> str:
     raise RuntimeError("BEEMAPS_API_KEY not found in env or .env.local")
 
 
+def parse_frame_target(value: Any) -> int:
+    """Return 0 for all frames, or a positive sampled-frame count."""
+    if value is None:
+        return FRAMES_PER_VIDEO
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "0", "all", "every", "full"}:
+            return 0
+        return max(1, int(normalized))
+    return max(0, int(value))
+
+
+def parse_frame_stride(value: Any) -> int | None:
+    """Return a positive frame stride, or None for legacy max-frame sampling."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"", "none", "max", "all", "0", "1"}:
+            return None
+        return max(2, int(normalized))
+    stride = int(value)
+    return stride if stride > 1 else None
+
+
+def describe_frame_target(num_frames: int) -> str:
+    return "every frame" if num_frames <= 0 else f"up to {num_frames} frames"
+
+
+def describe_frame_sampling(num_frames: int, frame_stride: int | None = None) -> str:
+    target = describe_frame_target(num_frames)
+    if frame_stride:
+        return f"{target}, every {frame_stride} source frames"
+    return target
+
+
+def resolve_local_video_path(video_url: str) -> Path | None:
+    """Resolve local /videos URLs to public files so clipped Top Hits work."""
+    path_part: str | None = None
+    parsed = urlparse(video_url)
+
+    if parsed.scheme in {"http", "https"}:
+        if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        path_part = parsed.path
+    elif video_url.startswith("/"):
+        path_part = video_url
+
+    if not path_part or not path_part.startswith("/videos/"):
+        return None
+
+    candidate = (PUBLIC_DIR / unquote(path_part.lstrip("/"))).resolve()
+    try:
+        candidate.relative_to(PUBLIC_DIR.resolve())
+    except ValueError:
+        return None
+
+    return candidate if candidate.exists() else None
+
+
+def load_local_event(video_id: str) -> dict | None:
+    """Load a locally clipped/edited event from data/metadata when present."""
+    metadata_path = LOCAL_METADATA_DIR / f"{video_id}.json"
+    if not metadata_path.exists():
+        return None
+
+    with metadata_path.open("r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    event = dict(metadata.get("event") or {})
+    event["id"] = event.get("id") or metadata.get("id") or video_id
+    event.setdefault("type", "UNKNOWN")
+    event.setdefault("timestamp", "")
+    event.setdefault("location", {"lat": 0, "lon": 0})
+    event.setdefault("metadata", {})
+    event.setdefault("videoUrl", f"http://localhost:3000/videos/{video_id}.mp4")
+    print(f"  Event: using local edited metadata for {video_id}")
+    return event
+
+
+def fetch_event_for_detection(video_id: str, *, include_sensor: bool = False) -> dict:
+    local_event = load_local_event(video_id)
+    if local_event is not None:
+        return local_event
+
+    api_key = load_api_key()
+    url = f"{API_BASE_URL}/{video_id}"
+    if include_sensor:
+        url = f"{url}?includeGnssData=true&includeImuData=true"
+    resp = api_request(
+        "GET",
+        url,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": api_key,
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -219,10 +325,17 @@ def free_gpu():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-        torch.mps.empty_cache()
+        try:
+            torch.mps.empty_cache()
+        except RuntimeError:
+            pass  # MPS backend not available (e.g. on Linux/CUDA)
 
 
 def download_video(video_url: str) -> Path | None:
+    local_path = resolve_local_video_path(video_url)
+    if local_path is not None:
+        return local_path
+
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     hashed = hashlib.md5(video_url.encode("utf-8")).hexdigest()
     path = CACHE_DIR / f"{hashed}.mp4"
@@ -244,19 +357,91 @@ def download_video(video_url: str) -> Path | None:
         return None
 
 
-def _extract_frames_pyav(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+def should_cleanup_video_path(path: Path) -> bool:
+    """Only delete transient detector downloads, never local clipped source assets."""
+    try:
+        path.resolve().relative_to(CACHE_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _stride_indices(total_frames: int, num_frames: int, frame_stride: int) -> list[int]:
+    indices = list(range(0, total_frames, frame_stride))
+    if num_frames <= 0 or len(indices) <= num_frames:
+        return indices
+    if num_frames == 1:
+        return [indices[len(indices) // 2]]
+    step = (len(indices) - 1) / (num_frames - 1)
+    return sorted({indices[round(i * step)] for i in range(num_frames)})
+
+
+def _extract_frames_pyav(
+    video_path: Path,
+    num_frames: int,
+    frame_stride: int | None = None,
+) -> list[tuple[int, Any, int]]:
     """Extract frames using PyAV (faster seeking than OpenCV)."""
     container = _av.open(str(video_path))
     stream = container.streams.video[0]
     total_frames = stream.frames or 0
     fps = float(stream.average_rate or 30)
 
+    if num_frames <= 0:
+        frames = []
+        time_base = float(stream.time_base)
+        for idx, frame in enumerate(container.decode(video=0)):
+            if frame.pts is not None:
+                frame_ms = int(round(frame.pts * time_base * 1000))
+            else:
+                frame_ms = int(round((idx / fps) * 1000))
+            frames.append((frame_ms, frame.to_ndarray(format="bgr24"), idx))
+        container.close()
+        return frames
+
     # Fallback: estimate total frames from duration
     if total_frames <= 0 and stream.duration and stream.time_base:
         total_frames = int(float(stream.duration * stream.time_base) * fps)
+
+    if frame_stride:
+        frames = []
+        if total_frames > 0:
+            selected_indices = _stride_indices(total_frames, num_frames, frame_stride)
+            selected = set(selected_indices)
+            last_index = selected_indices[-1] if selected_indices else -1
+        else:
+            selected = set()
+            last_index = -1
+        time_base = float(stream.time_base)
+        for idx, frame in enumerate(container.decode(video=0)):
+            should_keep = idx in selected if total_frames > 0 else idx % frame_stride == 0
+            if should_keep:
+                if frame.pts is not None:
+                    frame_ms = int(round(frame.pts * time_base * 1000))
+                else:
+                    frame_ms = int(round((idx / fps) * 1000))
+                frames.append((frame_ms, frame.to_ndarray(format="bgr24"), idx))
+                if total_frames <= 0 and num_frames > 0 and len(frames) >= num_frames:
+                    break
+            if last_index >= 0 and idx >= last_index:
+                break
+        container.close()
+        return frames
+
     if total_frames <= 0:
         container.close()
         return []
+    if total_frames <= num_frames:
+        frames = []
+        time_base = float(stream.time_base)
+        for idx, frame in enumerate(container.decode(video=0)):
+            if frame.pts is not None:
+                frame_ms = int(round(frame.pts * time_base * 1000))
+            else:
+                frame_ms = int(round((idx / fps) * 1000))
+            frames.append((frame_ms, frame.to_ndarray(format="bgr24"), idx))
+        container.close()
+        return frames
 
     margin = max(1, total_frames // 20)
     usable = total_frames - 2 * margin
@@ -265,6 +450,7 @@ def _extract_frames_pyav(video_path: Path, num_frames: int) -> list[tuple[int, A
     else:
         step = usable / (num_frames - 1)
         indices = [margin + int(i * step) for i in range(num_frames)]
+    indices = sorted(set(indices))
 
     time_base = float(stream.time_base)
     frames = []
@@ -282,16 +468,72 @@ def _extract_frames_pyav(video_path: Path, num_frames: int) -> list[tuple[int, A
     return frames
 
 
-def _extract_frames_cv2(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+def _extract_frames_cv2(
+    video_path: Path,
+    num_frames: int,
+    frame_stride: int | None = None,
+) -> list[tuple[int, Any, int]]:
     """Fallback: extract frames using OpenCV."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return []
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_stride:
+        frames = []
+        if total_frames > 0:
+            selected_indices = _stride_indices(total_frames, num_frames, frame_stride)
+            selected = set(selected_indices)
+            last_index = selected_indices[-1] if selected_indices else -1
+        else:
+            selected = set()
+            last_index = -1
+        frame_index = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            should_keep = frame_index in selected if total_frames > 0 else frame_index % frame_stride == 0
+            if should_keep:
+                frame_ms = int(round((frame_index / fps) * 1000))
+                frames.append((frame_ms, frame, frame_index))
+                if total_frames <= 0 and num_frames > 0 and len(frames) >= num_frames:
+                    break
+            if last_index >= 0 and frame_index >= last_index:
+                break
+            frame_index += 1
+        cap.release()
+        return frames
+
+    if num_frames <= 0:
+        frames = []
+        frame_index = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_ms = int(round((frame_index / fps) * 1000))
+            frames.append((frame_ms, frame, frame_index))
+            frame_index += 1
+        cap.release()
+        return frames
+
     if total_frames <= 0:
         cap.release()
         return []
+    if total_frames <= num_frames:
+        frames = []
+        frame_index = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_ms = int(round((frame_index / fps) * 1000))
+            frames.append((frame_ms, frame, frame_index))
+            frame_index += 1
+        cap.release()
+        return frames
     margin = max(1, total_frames // 20)
     usable = total_frames - 2 * margin
     if usable <= 0 or num_frames == 1:
@@ -299,6 +541,7 @@ def _extract_frames_cv2(video_path: Path, num_frames: int) -> list[tuple[int, An
     else:
         step = usable / (num_frames - 1)
         indices = [margin + int(i * step) for i in range(num_frames)]
+    indices = sorted(set(indices))
     frames = []
     for idx in indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -310,18 +553,22 @@ def _extract_frames_cv2(video_path: Path, num_frames: int) -> list[tuple[int, An
     return frames
 
 
-def extract_frames(video_path: Path, num_frames: int) -> list[tuple[int, Any, int]]:
+def extract_frames(
+    video_path: Path,
+    num_frames: int,
+    frame_stride: int | None = None,
+) -> list[tuple[int, Any, int]]:
     """Extract frames — uses PyAV if available, falls back to OpenCV."""
     if HAS_PYAV:
         try:
             t0 = time.time()
-            frames = _extract_frames_pyav(video_path, num_frames)
+            frames = _extract_frames_pyav(video_path, num_frames, frame_stride)
             print(f"    [PyAV] Extracted {len(frames)} frames in {time.time()-t0:.1f}s")
             return frames
         except Exception as exc:
             print(f"    [!] PyAV failed ({exc}), falling back to OpenCV")
     t0 = time.time()
-    frames = _extract_frames_cv2(video_path, num_frames)
+    frames = _extract_frames_cv2(video_path, num_frames, frame_stride)
     print(f"    [OpenCV] Extracted {len(frames)} frames in {time.time()-t0:.1f}s")
     return frames
 
@@ -388,15 +635,43 @@ class TursoDb:
         self._client.close()
 
 
+def _row_value(row: Any, key: str, index: int) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        return row[index]
+
+
+def ensure_column(conn, table: str, column: str, definition: str) -> None:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return
+    if not rows:
+        return
+    columns = {str(_row_value(row, "name", 1)) for row in rows}
+    if column in columns:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except Exception as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+    conn.commit()
+
+
 def get_db():
     """Connect to Turso via embedded replica, HTTP fallback, or local SQLite."""
     global _is_turso
     turso_url = _load_env_var("TURSO_DATABASE_URL")
     turso_token = _load_env_var("TURSO_AUTH_TOKEN")
+    force_http = os.environ.get("AI_EVENT_VIDEOS_TURSO_HTTP_ONLY") == "1"
 
     if turso_url and turso_token:
         # Try embedded replica first (better performance, local caching)
         try:
+            if force_http:
+                raise RuntimeError("HTTP mode forced")
             import libsql_experimental as libsql  # type: ignore
             conn = libsql.connect(
                 str(DB_PATH),  # local replica file
@@ -426,17 +701,19 @@ def get_db():
     if not _is_turso:
         conn.execute("PRAGMA journal_mode=WAL")
 
-    # Ensure columns exist on frame_detections
-    if not _is_turso:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(frame_detections)").fetchall()]
-        if "model_name" not in cols:
-            conn.execute(
-                "ALTER TABLE frame_detections ADD COLUMN model_name TEXT NOT NULL DEFAULT 'yolo11x'"
-            )
-            conn.commit()
-        if "run_id" not in cols:
-            conn.execute("ALTER TABLE frame_detections ADD COLUMN run_id TEXT")
-            conn.commit()
+    ensure_column(
+        conn,
+        "frame_detections",
+        "model_name",
+        "TEXT NOT NULL DEFAULT 'yolo11x'",
+    )
+    ensure_column(conn, "frame_detections", "run_id", "TEXT")
+    ensure_column(
+        conn,
+        "detection_runs",
+        "priority",
+        "INTEGER NOT NULL DEFAULT 100",
+    )
 
     return conn
 
@@ -2478,6 +2755,11 @@ def run_yolo26x(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Unified detection runner")
     parser.add_argument("--run-id", required=True, help="Detection run UUID from detection_runs table")
+    parser.add_argument(
+        "--allow-running",
+        action="store_true",
+        help="Allow processing a run that was pre-claimed with status=running",
+    )
     return parser.parse_args()
 
 
@@ -2501,38 +2783,33 @@ def main() -> int:
         conn.close()
         return 1
 
-    if run["status"] != "queued":
-        print(f"ERROR: run status is '{run['status']}', expected 'queued'", file=sys.stderr)
+    allowed_statuses = {"queued"}
+    if args.allow_running:
+        allowed_statuses.add("running")
+    if run["status"] not in allowed_statuses:
+        expected = "'queued'" if not args.allow_running else "'queued' or 'running'"
+        print(f"ERROR: run status is '{run['status']}', expected {expected}", file=sys.stderr)
         conn.close()
         return 1
 
     video_id = run["video_id"]
     model_name = run["model_name"]
     config = json.loads(run["config_json"] or "{}")
-    num_frames = int(config.get("framesPerVideo", FRAMES_PER_VIDEO))
+    num_frames = parse_frame_target(config.get("framesPerVideo", FRAMES_PER_VIDEO))
+    frame_stride = parse_frame_stride(config.get("frameStride"))
 
     print(f"  video_id:   {video_id}")
     print(f"  model_name: {model_name}")
     print(f"  config:     {json.dumps(config)}")
-    print(f"  frames:     {num_frames}")
+    print(f"  frames:     {describe_frame_sampling(num_frames, frame_stride)}")
 
     # Update status to running and sync so UI sees it immediately
     update_run_status(conn, run_id, "running")
 
     try:
         # Fetch event from API
-        print(f"\n[3/6] Fetching event {video_id} from API...")
-        api_key = load_api_key()
-        resp = api_request(
-            "GET",
-            f"{API_BASE_URL}/{video_id}",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": api_key,
-            },
-        )
-        resp.raise_for_status()
-        event = resp.json()
+        print(f"\n[3/6] Fetching event {video_id}...")
+        event = fetch_event_for_detection(video_id)
         video_url = event.get("videoUrl")
         if not video_url:
             # Mark as missing_video so it won't be picked again
@@ -2576,8 +2853,8 @@ def main() -> int:
         print(f"  Cached at: {video_path}")
 
         # Extract frames
-        print(f"\n[5/6] Extracting {num_frames} frames...")
-        frames = extract_frames(video_path, num_frames)
+        print(f"\n[5/6] Extracting {describe_frame_sampling(num_frames, frame_stride)}...")
+        frames = extract_frames(video_path, num_frames, frame_stride=frame_stride)
         print(f"  Extracted {len(frames)} frames")
         if not frames:
             raise RuntimeError("No frames extracted from video")

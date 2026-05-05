@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   Settings,
@@ -19,6 +20,7 @@ import {
   Tag,
   Plus,
   X,
+  CloudUpload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -43,11 +45,16 @@ import {
   getSpeedUnit,
   setSpeedUnit,
   SpeedUnit,
+  getS3Bucket,
+  setS3Bucket,
+  clearS3Bucket,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { LabelDefinition } from "@/types/pipeline";
 
 function SettingsContent() {
+  const searchParams = useSearchParams();
+  const defaultTab = searchParams.get("tab") || "general";
   const { theme, setTheme } = useTheme();
 
   // Beemaps API Key state
@@ -72,6 +79,10 @@ function SettingsContent() {
 
   // Speed unit state
   const [speedUnitValue, setSpeedUnitValue] = useState<SpeedUnit>("mph");
+
+  // S3 bucket state
+  const [s3BucketInput, setS3BucketInput] = useState("");
+  const [s3BucketSaved, setS3BucketSaved] = useState(false);
 
   // CLAUDE.md state
   const [claudeMdContent, setClaudeMdContent] = useState("");
@@ -107,6 +118,9 @@ function SettingsContent() {
 
     // Load speed unit
     setSpeedUnitValue(getSpeedUnit());
+
+    // Load S3 bucket
+    setS3BucketInput(getS3Bucket());
   }, []);
 
   // API key handlers
@@ -292,7 +306,7 @@ function SettingsContent() {
             </p>
           </div>
 
-          <Tabs defaultValue="general" className="w-full">
+          <Tabs defaultValue={defaultTab} className="w-full">
             <TabsList className="w-full">
               <TabsTrigger value="general" className="flex-1">
                 <Settings className="w-4 h-4 mr-2" />
@@ -307,6 +321,10 @@ function SettingsContent() {
               }}>
                 <Tag className="w-4 h-4 mr-2" />
                 Labels
+              </TabsTrigger>
+              <TabsTrigger value="pipeline" className="flex-1">
+                <CloudUpload className="w-4 h-4 mr-2" />
+                Pipeline
               </TabsTrigger>
               <TabsTrigger value="claude-md" className="flex-1" onClick={() => {
                 if (!claudeMdLoaded) handleLoadClaudeMd();
@@ -508,7 +526,7 @@ function SettingsContent() {
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Required for the AI Filter Agent. Uses Claude to interpret natural language queries.
+                  Required for scene analysis and actor detection. Uses Claude to inspect event videos and frames.
                 </p>
               </div>
 
@@ -745,6 +763,46 @@ function SettingsContent() {
                   <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
                   <p>System labels are owned by the VRU pipeline. Custom labels are stored in the local SQLite database and can be removed here.</p>
                 </div>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="pipeline" className="space-y-6 py-4">
+              {/* S3 Bucket */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium flex items-center gap-2">
+                  <CloudUpload className="w-4 h-4" />
+                  Production S3 Bucket
+                </label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="hivemapper-blurred-ai-event-videos"
+                    value={s3BucketInput}
+                    onChange={(e) => setS3BucketInput(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={() => {
+                      if (s3BucketInput.trim()) {
+                        setS3Bucket(s3BucketInput.trim());
+                        setS3BucketSaved(true);
+                        setTimeout(() => setS3BucketSaved(false), 2000);
+                      }
+                    }}
+                    disabled={!s3BucketInput.trim()}
+                  >
+                    {s3BucketSaved ? (
+                      <>
+                        <Check className="w-4 h-4 mr-1" />
+                        Saved
+                      </>
+                    ) : (
+                      "Save"
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  S3 destination for blurred videos and metadata. Default: hivemapper-blurred-ai-event-videos
+                </p>
               </div>
             </TabsContent>
 

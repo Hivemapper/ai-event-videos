@@ -3,10 +3,11 @@ import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { execFile } from "child_process";
-import { tmpdir } from "os";
 import { cleanupOldFiles } from "@/lib/ffmpeg";
 
-const THUMBNAIL_DIR = join(tmpdir(), "thumbnails");
+const THUMBNAIL_DIR =
+  process.env.THUMBNAIL_CACHE_DIR ??
+  join(process.cwd(), "data", "thumbnail-cache");
 const FRAME_TIME = "00:00:01"; // Extract frame at 1 second
 
 // Limit concurrent FFmpeg processes
@@ -123,8 +124,9 @@ export async function GET(request: NextRequest) {
 
     const imageBuffer = readFileSync(thumbnailPath);
 
-    // Opportunistic cleanup of old thumbnails (24h)
-    cleanupOldFiles(THUMBNAIL_DIR, 24 * 60 * 60 * 1000);
+    // Opportunistic cleanup of old thumbnails. Keep the cache warm across
+    // server restarts, but avoid unbounded growth.
+    cleanupOldFiles(THUMBNAIL_DIR, 7 * 24 * 60 * 60 * 1000);
 
     return new NextResponse(imageBuffer, {
       status: 200,

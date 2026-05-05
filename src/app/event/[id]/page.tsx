@@ -1,18 +1,22 @@
 "use client";
 
-import { useEffect, useState, use, useRef, useCallback, useMemo } from "react";
+import { memo, useEffect, useLayoutEffect, useState, use, useRef, useCallback, useMemo, useSyncExternalStore, type ComponentProps } from "react";
 import Link from "next/link";
 import { Header } from "@/components/layout/header";
 import {
+  Activity,
   ArrowLeft,
   Check,
   Download,
+  EyeOff,
   FileQuestion,
   Ghost,
   Loader2,
   Maximize2,
   Route,
-  Tag,
+  Scissors,
+  Trophy,
+  Upload,
   VideoOff,
   X,
   ChevronRight,
@@ -24,7 +28,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import dynamic from "next/dynamic";
+import useSWR from "swr";
 
 const EventMap = dynamic(
   () => import("@/components/map/event-map").then((m) => m.EventMap),
@@ -33,12 +39,14 @@ const EventMap = dynamic(
     loading: () => <Skeleton className="aspect-video" />,
   }
 );
-import { EVENT_TYPE_CONFIG } from "@/lib/constants";
-import { getCameraIntrinsics, BEE_HFOV, DevicesResponse, getSpeedUnit, SpeedUnit } from "@/lib/api";
+import { ALL_EVENT_TYPES, EVENT_TYPE_CONFIG } from "@/lib/constants";
+import { getApiKey, getCameraIntrinsics, BEE_HFOV, DevicesResponse, getSpeedUnit, SpeedUnit } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { getTimeOfDay, getTimeOfDayStyle } from "@/lib/sun";
+import { haversineDistance } from "@/lib/geo-utils";
 import { useRoadType } from "@/hooks/use-road-type";
 import { useTriageStatus, TriageCategory } from "@/hooks/use-triage-status";
+import { useTopHits } from "@/lib/top-hits";
 import { useDetectionRuns } from "@/hooks/use-detection-runs";
 import { useDetectionTimestamps } from "@/hooks/use-detection-timestamps";
 import { useRunLogs } from "@/hooks/use-run-logs";
@@ -54,13 +62,20 @@ const VideoVruPanel = dynamic(
   { loading: () => <Skeleton className="h-16" /> }
 );
 import { ClipSummary } from "@/components/events/clip-summary";
+import {
+  bucketLabel as frameTimingQcBucketLabel,
+  FrameTimingQcPanel,
+  probeFrameTimingQc,
+  type FrameTimingQc,
+} from "@/components/events/frame-timing-qc-panel";
+import { VideoClipper } from "@/components/events/video-clipper";
 import { summarizeDetections } from "@/lib/detection-summary";
 import { DetectionOverlay } from "@/components/events/detection-overlay";
 import { SpeedOverlay } from "@/components/events/speed-overlay";
-import { calculateBearing } from "@/lib/geo-projection";
+import type { AIEventLocation, AIEventType, GnssDataPoint } from "@/types/events";
+import type { FrameDetection, ProductionRun } from "@/types/pipeline";
 import {
   SpeedDataPoint,
-  formatDateTime,
   formatCoordinates,
   formatSpeed,
   getProxyVideoUrl,
@@ -119,6 +134,66 @@ const COUNTRY_FLAGS: Record<string, string> = {
   Croatia: "\u{1F1ED}\u{1F1F7}",
 };
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatBitrate(bytes: number, durationSec: number): string {
+  const bps = (bytes * 8) / durationSec;
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(2)} Mbps`;
+  if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} kbps`;
+  return `${bps.toFixed(0)} bps`;
+}
+
+function formatCompactDateTime(timestamp: string, lon?: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+
+  let displayDate = date;
+  let offsetLabel = "";
+
+  if (lon !== undefined) {
+    const offsetHours = Math.round(lon / 15);
+    displayDate = new Date(date.getTime() + offsetHours * 60 * 60 * 1000);
+    offsetLabel = ` UTC${offsetHours >= 0 ? "+" : ""}${offsetHours}`;
+  }
+
+  const datePart = displayDate.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+  });
+  const timePart = displayDate.toLocaleTimeString("en-US", {
+    timeZone: "UTC",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  return `${datePart} ${timePart}${offsetLabel}`;
+}
+
+function parseFirmwareVersion(value: string | null): [number, number, number] | null {
+  if (!value) return null;
+  const match = value.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function isFrameQualityFirmwareEligible(value: string | null): boolean {
+  const version = parseFirmwareVersion(value);
+  if (!version) return false;
+  const minimum = [7, 4, 3] as const;
+  for (let i = 0; i < minimum.length; i += 1) {
+    if (version[i] > minimum[i]) return true;
+    if (version[i] < minimum[i]) return false;
+  }
+  return true;
+}
+
 function countryFlag(name: string): string {
   // name may be "City, Country" — try full string first, then country part
   if (COUNTRY_FLAGS[name]) return COUNTRY_FLAGS[name];
@@ -129,13 +204,287 @@ function countryFlag(name: string): string {
   return "";
 }
 
+function isAIEventType(value: string | null | undefined): value is AIEventType {
+  return typeof value === "string" && (ALL_EVENT_TYPES as readonly string[]).includes(value);
+}
+
+function isFiniteCoordinate(location: AIEventLocation | null | undefined): location is AIEventLocation {
+  return (
+    Boolean(location) &&
+    Number.isFinite(location?.lat) &&
+    Number.isFinite(location?.lon)
+  );
+}
+
+function clampPlaybackTime(value: number, duration: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (!Number.isFinite(duration) || duration <= 0) return Math.max(value, 0);
+  return Math.min(Math.max(value, 0), duration);
+}
+
+function timeFromGnssPoint(point: GnssDataPoint, firstTimestamp: number): number | null {
+  const timestamp = Number(point.timestamp);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(firstTimestamp)) return null;
+  return (timestamp - firstTimestamp) / 1000;
+}
+
+function deriveIncidentPlaybackTime({
+  location,
+  timestamp,
+  gnssData,
+  duration,
+}: {
+  location: AIEventLocation;
+  timestamp: string;
+  gnssData?: GnssDataPoint[];
+  duration: number;
+}): number | null {
+  if (!gnssData?.length) return null;
+
+  const firstTimestamp = Number(gnssData[0]?.timestamp);
+  if (!Number.isFinite(firstTimestamp)) return null;
+
+  if (isFiniteCoordinate(location)) {
+    let bestTime: number | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const point of gnssData) {
+      if (!isFiniteCoordinate(point)) continue;
+      const pointTime = timeFromGnssPoint(point, firstTimestamp);
+      if (pointTime === null) continue;
+      const distance = haversineDistance(location.lat, location.lon, point.lat, point.lon);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestTime = pointTime;
+      }
+    }
+
+    if (bestTime !== null) {
+      return clampPlaybackTime(bestTime, duration);
+    }
+  }
+
+  const eventTimestamp = Date.parse(timestamp);
+  if (!Number.isNaN(eventTimestamp)) {
+    return clampPlaybackTime((eventTimestamp - firstTimestamp) / 1000, duration);
+  }
+
+  return null;
+}
+
+function formatIncidentTime(seconds: number): string {
+  const safeSeconds = Math.max(seconds, 0);
+  const minutes = Math.floor(safeSeconds / 60);
+  const remaining = safeSeconds - minutes * 60;
+  return `${minutes}:${remaining.toFixed(1).padStart(4, "0")}`;
+}
+
+function IncidentVideoMarker({
+  timeSeconds,
+  durationSeconds,
+  onSeek,
+}: {
+  timeSeconds: number | null;
+  durationSeconds: number;
+  onSeek: (time: number) => void;
+}) {
+  if (timeSeconds === null || !Number.isFinite(timeSeconds)) return null;
+  const markerTime = clampPlaybackTime(timeSeconds, durationSeconds);
+  const progress = durationSeconds > 0 ? Math.min(Math.max(markerTime / durationSeconds, 0), 1) : 0;
+
+  return (
+    <div className="pointer-events-none absolute bottom-6 left-14 right-8 z-20 h-4">
+      <button
+        type="button"
+        className="pointer-events-auto absolute top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white bg-red-500 shadow-[0_0_0_3px_rgba(239,68,68,0.25)] outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-white/80"
+        style={{ left: `${progress * 100}%` }}
+        onClick={() => onSeek(markerTime)}
+        aria-label={`Seek to incident location at ${formatIncidentTime(markerTime)}`}
+        title={`Incident location: ${formatIncidentTime(markerTime)}`}
+      >
+        <span className="sr-only">Incident location</span>
+      </button>
+    </div>
+  );
+}
+
 const TRIAGE_OPTIONS: { value: TriageCategory; label: string; icon: typeof Ghost; color: string }[] = [
   { value: "missing_video", label: "Missing Video", icon: VideoOff, color: "text-blue-600" },
   { value: "missing_metadata", label: "Missing Metadata", icon: FileQuestion, color: "text-violet-600" },
   { value: "ghost", label: "Ghost", icon: Ghost, color: "text-red-600" },
   { value: "open_road", label: "Open Road", icon: Route, color: "text-amber-600" },
   { value: "signal", label: "Signal", icon: Zap, color: "text-green-600" },
+  { value: "non_linear", label: "Non Linear", icon: Activity, color: "text-teal-600" },
+  { value: "privacy", label: "Privacy", icon: EyeOff, color: "text-indigo-600" },
 ];
+
+interface ProductionPipelineResponse {
+  run: ProductionRun | null;
+  created?: boolean;
+  prioritized?: boolean;
+  requeued?: boolean;
+  error?: string;
+}
+
+interface PlaybackSnapshot {
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+}
+
+type TelemetryTab = "map" | "positioning" | "fps";
+
+function createPlaybackStore() {
+  let snapshot: PlaybackSnapshot = {
+    currentTime: 0,
+    duration: 0,
+    isPlaying: false,
+  };
+  const listeners = new Set<() => void>();
+
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set: (patch: Partial<PlaybackSnapshot>) => {
+      const next = { ...snapshot, ...patch };
+      if (
+        next.currentTime === snapshot.currentTime &&
+        next.duration === snapshot.duration &&
+        next.isPlaying === snapshot.isPlaying
+      ) {
+        return;
+      }
+      snapshot = next;
+      listeners.forEach((listener) => listener());
+    },
+  };
+}
+
+type PlaybackStore = ReturnType<typeof createPlaybackStore>;
+
+function usePlaybackSnapshot(store: PlaybackStore): PlaybackSnapshot {
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+}
+
+const PlaybackDetectionOverlay = memo(function PlaybackDetectionOverlay({
+  playbackStore,
+  videoRef,
+  timestamps,
+  detectionsByFrame,
+  minConfidence,
+}: {
+  playbackStore: PlaybackStore;
+  videoRef: React.RefObject<HTMLVideoElement | null>;
+  timestamps: number[];
+  detectionsByFrame: Map<number, FrameDetection[]>;
+  minConfidence: number;
+}) {
+  const { currentTime, isPlaying } = usePlaybackSnapshot(playbackStore);
+  return (
+    <DetectionOverlay
+      videoRef={videoRef}
+      isPlaying={isPlaying}
+      currentTime={currentTime}
+      timestamps={timestamps}
+      detectionsByFrame={detectionsByFrame}
+      minConfidence={minConfidence}
+    />
+  );
+});
+
+const PlaybackSpeedOverlay = memo(function PlaybackSpeedOverlay({
+  playbackStore,
+  speedData,
+  duration,
+  unit,
+  speedLimit,
+}: {
+  playbackStore: PlaybackStore;
+  speedData: SpeedDataPoint[];
+  duration: number;
+  unit: SpeedUnit;
+  speedLimit?: { limit: number; unit: string } | null;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return (
+    <SpeedOverlay
+      speedData={speedData}
+      currentTime={currentTime}
+      duration={duration}
+      unit={unit}
+      speedLimit={speedLimit}
+    />
+  );
+});
+
+const PlaybackVideoVruPanel = memo(function PlaybackVideoVruPanel({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof VideoVruPanel>, "currentTime" | "isPlaying"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime, isPlaying } = usePlaybackSnapshot(playbackStore);
+  return (
+    <VideoVruPanel
+      {...props}
+      currentTime={currentTime}
+      isPlaying={isPlaying}
+    />
+  );
+});
+
+const PlaybackSpeedProfileChart = memo(function PlaybackSpeedProfileChart({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof SpeedProfileChart>, "currentTime"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return <SpeedProfileChart {...props} currentTime={currentTime} />;
+});
+
+const PlaybackEventMap = memo(function PlaybackEventMap({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof EventMap>, "currentTime"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return <EventMap {...props} currentTime={currentTime} />;
+});
+
+const PlaybackPositioningSection = memo(function PlaybackPositioningSection({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof PositioningSection>, "currentTime"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return <PositioningSection {...props} currentTime={currentTime} />;
+});
+
+const PlaybackFrameTimingQcPanel = memo(function PlaybackFrameTimingQcPanel({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof FrameTimingQcPanel>, "currentTime"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return <FrameTimingQcPanel {...props} currentTime={currentTime} />;
+});
+
+const PlaybackVideoClipper = memo(function PlaybackVideoClipper({
+  playbackStore,
+  ...props
+}: Omit<ComponentProps<typeof VideoClipper>, "currentTime"> & {
+  playbackStore: PlaybackStore;
+}) {
+  const { currentTime } = usePlaybackSnapshot(playbackStore);
+  return <VideoClipper {...props} currentTime={currentTime} />;
+});
 
 function CollapsibleSection({
   title,
@@ -174,33 +523,68 @@ export default function EventDetailPage({
     event?.location.lat ?? null,
     event?.location.lon ?? null
   );
-  const { data: triageStatus, setTriage, removeTriage } = useTriageStatus(id, event?.type);
+  const { data: triageStatus, setTriage, setEventType, removeTriage } = useTriageStatus(id, event?.type);
+  const { has: hasTopHit, toggle: toggleTopHit } = useTopHits();
+  const isTopHit = hasTopHit(id);
+  const [manualEventType, setManualEventType] = useState<AIEventType | null>(null);
   const [copied, setCopied] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const frameQualityRef = useRef<HTMLDivElement>(null);
   const [videoContainerHeight, setVideoContainerHeight] = useState<number | null>(null);
   const [cameraIntrinsics, setCameraIntrinsics] = useState<DevicesResponse | null>(null);
-  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [speedUnit, setSpeedUnitState] = useState<SpeedUnit>("mph");
+  const [showClipper, setShowClipper] = useState(false);
+  const [activeTelemetryTab, setActiveTelemetryTab] = useState<TelemetryTab>("map");
+  const [isFrameQualityProbing, setIsFrameQualityProbing] = useState(false);
+  const [frameQualityProbeError, setFrameQualityProbeError] = useState<string | null>(null);
+  const frameQualityProbeRef = useRef<Promise<void> | null>(null);
+  const firmwareVersion = typeof event?.metadata?.FIRMWARE_VERSION === "string"
+    ? event.metadata.FIRMWARE_VERSION
+    : null;
+  const canRunFrameQuality = isFrameQualityFirmwareEligible(firmwareVersion);
+
+  const {
+    data: frameTimingQcData,
+    isLoading: isFrameTimingQcLoading,
+    mutate: mutateFrameTimingQc,
+  } = useSWR<{ qc: FrameTimingQc | null }>(
+    `/api/videos/${id}/frame-timing-qc`,
+    (url: string) => fetch(url).then((r) => r.json()),
+    { revalidateOnFocus: false, revalidateOnReconnect: false }
+  );
+  const frameTimingQc = frameTimingQcData?.qc ?? null;
+  const [speedUnit] = useState<SpeedUnit>(() => getSpeedUnit());
+  const [videoBytes, setVideoBytes] = useState<number | null>(null);
+  const playbackStore = useMemo(() => createPlaybackStore(), []);
 
   useEffect(() => {
-    setSpeedUnitState(getSpeedUnit());
-  }, []);
+    setManualEventType(null);
+  }, [id, triageStatus?.event_type]);
 
-  // Measure video container height to sync map height
-  useEffect(() => {
+  // Measure video container height to sync the telemetry card and next row.
+  useLayoutEffect(() => {
     const el = videoContainerRef.current;
     if (!el) return;
-    const observer = new ResizeObserver(([entry]) => {
-      setVideoContainerHeight(entry.contentRect.height);
-    });
+
+    const measure = () => {
+      setVideoContainerHeight(el.getBoundingClientRect().height);
+    };
+
+    measure();
+    const frame = window.requestAnimationFrame(measure);
+    const observer = new ResizeObserver(measure);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+    window.addEventListener("resize", measure);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [event?.videoUrl, canRunFrameQuality, showClipper]);
 
   // Fullscreen: escape key + body scroll lock
   useEffect(() => {
@@ -226,15 +610,17 @@ export default function EventDetailPage({
       const now = performance.now();
       if (now - lastUpdate < 200) return; // Throttle to ~5Hz
       lastUpdate = now;
-      setVideoCurrentTime(video.currentTime);
+      playbackStore.set({ currentTime: video.currentTime });
     };
 
     const handleLoadedMetadata = () => {
-      setVideoDuration(video.duration || 0);
+      const duration = video.duration || 0;
+      setVideoDuration(duration);
+      playbackStore.set({ duration });
     };
 
-    const handlePlay = () => setIsPlaying(true);
-    const handlePause = () => setIsPlaying(false);
+    const handlePlay = () => playbackStore.set({ isPlaying: true });
+    const handlePause = () => playbackStore.set({ isPlaying: false });
 
     video.addEventListener("timeupdate", handleTimeUpdate);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
@@ -244,6 +630,7 @@ export default function EventDetailPage({
     // Set initial duration if already loaded
     if (video.duration) {
       setVideoDuration(video.duration);
+      playbackStore.set({ duration: video.duration });
     }
 
     return () => {
@@ -252,7 +639,7 @@ export default function EventDetailPage({
       video.removeEventListener("play", handlePlay);
       video.removeEventListener("pause", handlePause);
     };
-  }, [event]); // Re-run when event loads (video element gets src)
+  }, [event, playbackStore]); // Re-run when event loads (video element gets src)
 
   // Load camera intrinsics from localStorage
   useEffect(() => {
@@ -260,8 +647,45 @@ export default function EventDetailPage({
     setCameraIntrinsics(intrinsics);
   }, []);
 
+  // Fetch video file size for bitrate display
+  useEffect(() => {
+    setVideoBytes(null);
+    const videoUrl = event?.videoUrl;
+    if (!videoUrl) return;
+    const controller = new AbortController();
+    const proxyUrl = getProxyVideoUrl(videoUrl);
+    (async () => {
+      try {
+        // Use a 1-byte Range GET — the video proxy returns Content-Range: bytes 0-0/<total>
+        const res = await fetch(proxyUrl, {
+          headers: { Range: "bytes=0-0" },
+          signal: controller.signal,
+        });
+        // Drain/cancel body to avoid leaking a stream
+        res.body?.cancel().catch(() => {});
+        const cr = res.headers.get("content-range");
+        if (cr) {
+          const total = cr.split("/").pop();
+          if (total && total !== "*") {
+            const n = parseInt(total, 10);
+            if (!isNaN(n) && n > 0) setVideoBytes(n);
+          }
+        } else {
+          const len = res.headers.get("content-length");
+          if (len) {
+            const n = parseInt(len, 10);
+            if (!isNaN(n) && n > 1024) setVideoBytes(n);
+          }
+        }
+      } catch {
+        // ignore (abort or network error)
+      }
+    })();
+    return () => controller.abort();
+  }, [event?.videoUrl]);
+
   // Fetch road type from Mapbox (samples multiple GNSS points for accuracy)
-  const { roadType, isLoading: roadTypeLoading } = useRoadType(
+  const { roadType } = useRoadType(
     event?.location.lat ?? null,
     event?.location.lon ?? null,
     event?.gnssData
@@ -286,6 +710,7 @@ export default function EventDetailPage({
     }
   }, [detectionRuns, selectedRunId]);
   const { timestamps: detectionTimestamps, detectionsByFrame, segments: detectionSegments, sceneAttributes, timeline, mutate: mutateDetections } = useDetectionTimestamps(event?.videoUrl ? id : null, selectedRunId);
+  const emptyDetectionsByFrame = useMemo(() => new Map<number, FrameDetection[]>(), []);
 
   // Summarize detections for clip summary
   const detectionSummary = useMemo(() => {
@@ -302,6 +727,121 @@ export default function EventDetailPage({
   // Log streaming for active or selected in-progress run
   const logRunId = activeDetectionRun?.id ?? null;
   const { logs } = useRunLogs(logRunId, id);
+  const completedDetectionRun = useMemo(
+    () => detectionRuns.find((run) => run.status === "completed") ?? null,
+    [detectionRuns]
+  );
+  const [productionRun, setProductionRun] = useState<ProductionRun | null>(null);
+  const [productionLoading, setProductionLoading] = useState(true);
+  const [productionActionPending, setProductionActionPending] = useState(false);
+  const [productionNotice, setProductionNotice] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+
+  const refreshProductionStatus = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      if (!silent) setProductionLoading(true);
+      try {
+        const response = await fetch(`/api/videos/${id}/production-pipeline`, {
+          cache: "no-store",
+        });
+        const result = (await response.json()) as ProductionPipelineResponse;
+        if (!response.ok) {
+          throw new Error(result.error ?? "Failed to load production status");
+        }
+        setProductionRun(result.run ?? null);
+      } catch (error) {
+        setProductionNotice({
+          type: "error",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (!silent) setProductionLoading(false);
+      }
+    },
+    [id]
+  );
+
+  useEffect(() => {
+    refreshProductionStatus();
+  }, [refreshProductionStatus]);
+
+  useEffect(() => {
+    if (productionRun?.status !== "queued" && productionRun?.status !== "processing") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      refreshProductionStatus({ silent: true });
+    }, 5000);
+
+    return () => window.clearInterval(interval);
+  }, [productionRun?.status, refreshProductionStatus]);
+
+  const handleRunProduction = useCallback(async () => {
+    setProductionActionPending(true);
+    setProductionNotice(null);
+
+    try {
+      const response = await fetch(`/api/videos/${id}/production-pipeline`, {
+        method: "POST",
+      });
+      const result = (await response.json()) as ProductionPipelineResponse;
+      if (!response.ok) {
+        throw new Error(result.error ?? "Failed to run production");
+      }
+
+      setProductionRun(result.run ?? null);
+      const status = result.run?.status;
+      const message =
+        status === "completed"
+          ? "Production is already complete."
+          : status === "processing"
+            ? "Production is already processing."
+            : result.requeued
+              ? "Requeued as the next production item."
+              : result.created
+                ? "Queued as the next production item."
+                : result.prioritized
+                  ? "Moved to the next production slot."
+                  : "Already in the priority production queue.";
+      setProductionNotice({ type: "success", message });
+    } catch (error) {
+      setProductionNotice({
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setProductionActionPending(false);
+    }
+  }, [id]);
+
+  const productionCompleted = productionRun?.status === "completed";
+  const productionProcessing = productionRun?.status === "processing";
+  const visibleProductionNotice =
+    productionNotice &&
+    !(
+      productionNotice.type === "success" &&
+      (productionCompleted || productionProcessing || productionRun?.status === "failed")
+    )
+      ? productionNotice
+      : null;
+  const hasCompletedVru = Boolean(completedDetectionRun);
+  const showProductionPanel = hasCompletedVru || Boolean(productionRun);
+  const canRunProduction =
+    hasCompletedVru && !productionProcessing && !productionCompleted;
+  const productionButtonDisabled =
+    productionLoading || productionActionPending || !canRunProduction;
+  const productionButtonTitle = !hasCompletedVru
+    ? "Run VRU detections before production"
+    : productionCompleted
+      ? "Production has completed for this event"
+      : productionProcessing
+        ? "Production is already running for this event"
+        : productionRun?.status === "queued"
+          ? "Move this event to the front of the production queue"
+          : "Push this event into the production pipeline";
 
   // Auto-select the latest completed run when runs become available
   useEffect(() => {
@@ -315,12 +855,20 @@ export default function EventDetailPage({
 
   const handleRunDetection = useCallback(
     async (modelName: string) => {
-      await fetch(`/api/videos/${id}/runs`, {
+      const response = await fetch(`/api/videos/${id}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ modelName }),
       });
-      mutateRuns();
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof result.error === "string"
+            ? result.error
+            : "Failed to start detection run"
+        );
+      }
+      await mutateRuns();
     },
     [id, mutateRuns]
   );
@@ -349,48 +897,6 @@ export default function EventDetailPage({
     prevActiveRunRef.current = currentId;
   }, [activeDetectionRun?.id, mutateDetections]);
 
-  // Reusable camera state interpolation from GNSS path
-  const getCameraState = useCallback((timestamp: number): { lat: number; lon: number; bearing: number } => {
-    if (!event?.gnssData || event.gnssData.length < 2 || !videoDuration || videoDuration <= 0) {
-      return { lat: event?.location.lat ?? 0, lon: event?.location.lon ?? 0, bearing: 0 };
-    }
-    const gnss = event.gnssData;
-
-    // Map video time (seconds) to GNSS time domain (milliseconds)
-    const gnssStart = gnss[0].timestamp;
-    const gnssEnd = gnss[gnss.length - 1].timestamp;
-    const progress = Math.max(0, Math.min(1, timestamp / videoDuration));
-    const gnssTime = gnssStart + progress * (gnssEnd - gnssStart);
-
-    // Find bracketing GNSS points by actual timestamp
-    let lowerIndex = 0;
-    for (let i = 0; i < gnss.length - 1; i++) {
-      if (gnss[i + 1].timestamp >= gnssTime) {
-        lowerIndex = i;
-        break;
-      }
-      lowerIndex = i;
-    }
-    const upperIndex = Math.min(lowerIndex + 1, gnss.length - 1);
-
-    // Interpolate based on actual timestamps, not array index
-    const segmentDuration = gnss[upperIndex].timestamp - gnss[lowerIndex].timestamp;
-    const t = segmentDuration > 0 ? (gnssTime - gnss[lowerIndex].timestamp) / segmentDuration : 0;
-
-    const p1 = gnss[lowerIndex];
-    const p2 = gnss[upperIndex];
-    const lat = p1.lat + (p2.lat - p1.lat) * t;
-    const lon = p1.lon + (p2.lon - p1.lon) * t;
-
-    const lookAhead = 3;
-    const endIndex = Math.min(lowerIndex + lookAhead, gnss.length - 1);
-    const bearing = endIndex > lowerIndex
-      ? calculateBearing(gnss[lowerIndex].lat, gnss[lowerIndex].lon, gnss[endIndex].lat, gnss[endIndex].lon)
-      : calculateBearing(gnss[Math.max(0, lowerIndex - 1)].lat, gnss[Math.max(0, lowerIndex - 1)].lon, gnss[lowerIndex].lat, gnss[lowerIndex].lon);
-
-    return { lat, lon, bearing };
-  }, [event, videoDuration]);
-
   const copyCoordinates = async () => {
     if (!event) return;
     const coords = `${event.location.lat}, ${event.location.lon}`;
@@ -399,25 +905,168 @@ export default function EventDetailPage({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const getDownloadDate = () => {
+    if (!event) return "";
+    const d = new Date(event.timestamp);
+    return `${(d.getMonth() + 1).toString().padStart(2, "0")}-${d.getDate().toString().padStart(2, "0")}-${d.getFullYear()}`;
+  };
+
   const downloadVideo = async () => {
     if (!event?.videoUrl) return;
     setIsDownloading(true);
+    const dateStr = getDownloadDate();
     try {
       const response = await fetch(getProxyVideoUrl(event.videoUrl));
+      if (!response.ok) throw new Error(`Video download failed: ${response.status}`);
       const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `event_${event.id}.mp4`;
-      link.click();
-      URL.revokeObjectURL(url);
+      triggerDownload(blob, `event_${event.id}_${dateStr}.mp4`);
     } catch {
       // Fallback: open in new tab
       window.open(getProxyVideoUrl(event.videoUrl), "_blank");
+      setIsDownloading(false);
+      return;
+    }
+
+    try {
+      const headers: Record<string, string> = {};
+      const apiKey = getApiKey();
+      if (apiKey) headers.Authorization = apiKey;
+
+      const metadataResponse = await fetch(
+        `/api/events/${event.id}/production-metadata`,
+        { headers }
+      );
+      if (!metadataResponse.ok) {
+        const errorBody = await metadataResponse.json().catch(() => null);
+        throw new Error(errorBody?.error ?? `Metadata download failed: ${metadataResponse.status}`);
+      }
+      const metadataBlob = await metadataResponse.blob();
+      triggerDownload(metadataBlob, `event_${event.id}_${dateStr}_metadata.json`);
+    } catch (error) {
+      console.error("Metadata download failed:", error);
     } finally {
       setIsDownloading(false);
     }
   };
+
+  const showFrameQualityDetails = useCallback(
+    (scroll = true) => {
+      setActiveTelemetryTab("fps");
+      if (isFullscreen) {
+        setIsFullscreen(false);
+      }
+      if (scroll) {
+        window.setTimeout(() => {
+          frameQualityRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 0);
+      }
+    },
+    [isFullscreen]
+  );
+
+  const runFrameQuality = useCallback(
+    async ({
+      reveal = true,
+      scroll = reveal,
+    }: {
+      reveal?: boolean;
+      scroll?: boolean;
+    } = {}) => {
+      if (reveal) {
+        showFrameQualityDetails(scroll);
+      }
+
+      if (!event?.videoUrl || !canRunFrameQuality || frameTimingQc) {
+        return;
+      }
+
+      if (frameQualityProbeRef.current) {
+        return frameQualityProbeRef.current;
+      }
+
+      setIsFrameQualityProbing(true);
+      setFrameQualityProbeError(null);
+      const probePromise = probeFrameTimingQc(id, event.videoUrl, firmwareVersion)
+        .then((result) => {
+          mutateFrameTimingQc(result, false);
+        })
+        .catch((error) => {
+          setFrameQualityProbeError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          frameQualityProbeRef.current = null;
+          setIsFrameQualityProbing(false);
+        });
+
+      frameQualityProbeRef.current = probePromise;
+      return probePromise;
+    },
+    [
+      canRunFrameQuality,
+      event?.videoUrl,
+      firmwareVersion,
+      frameTimingQc,
+      id,
+      mutateFrameTimingQc,
+      showFrameQualityDetails,
+    ]
+  );
+
+  const frameQualityButtonLabel =
+    frameTimingQc?.probe_status === "failed"
+      ? "Failed"
+      : frameTimingQc
+        ? frameTimingQcBucketLabel(frameTimingQc.bucket)
+        : frameQualityProbeError
+          ? "Failed"
+          : isFrameQualityProbing || isFrameTimingQcLoading
+            ? "Checking"
+            : "Check";
+  const frameQualityButtonTitle = event?.videoUrl
+    ? frameTimingQc
+      ? `Frame quality QC: ${frameQualityButtonLabel}`
+      : frameQualityProbeError
+        ? `Frame quality QC failed: ${frameQualityProbeError}`
+        : isFrameQualityProbing || isFrameTimingQcLoading
+          ? "Checking frame quality QC"
+          : "Run frame quality QC"
+    : "Video required for frame quality QC";
+  const rawSpeedData = event?.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
+  const overlaySpeedData = useMemo(() => {
+    const metadataSpeedData = Array.isArray(rawSpeedData) ? rawSpeedData : [];
+    if (metadataSpeedData.length > 0) return metadataSpeedData;
+    return event?.gnssData ? deriveSpeedFromGnss(event.gnssData) : [];
+  }, [event?.gnssData, rawSpeedData]);
+  const incidentTimeSeconds = useMemo(
+    () => (
+      event
+        ? deriveIncidentPlaybackTime({
+            location: event.location,
+            timestamp: event.timestamp,
+            gnssData: event.gnssData,
+            duration: videoDuration,
+          })
+        : null
+    ),
+    [event, videoDuration]
+  );
+  const seekToIncident = useCallback(() => {
+    if (incidentTimeSeconds === null) return;
+    if (videoRef.current) {
+      videoRef.current.currentTime = incidentTimeSeconds;
+    }
+    playbackStore.set({ currentTime: incidentTimeSeconds });
+  }, [incidentTimeSeconds, playbackStore]);
+  const constrainTelemetryHeight = true;
 
   if (isLoading) {
     return <EventDetailSkeleton />;
@@ -446,12 +1095,11 @@ export default function EventDetailPage({
     );
   }
 
-  const config = EVENT_TYPE_CONFIG[event.type] || EVENT_TYPE_CONFIG.UNKNOWN;
+  const selectedEventType = manualEventType
+    ?? (isAIEventType(triageStatus?.event_type) ? triageStatus.event_type : event.type);
+  const config = EVENT_TYPE_CONFIG[selectedEventType] || EVENT_TYPE_CONFIG.UNKNOWN;
 
-  const speedData = event.metadata?.SPEED_ARRAY as SpeedDataPoint[] | undefined;
-  const overlaySpeedData = speedData && speedData.length > 0
-    ? speedData
-    : event.gnssData ? deriveSpeedFromGnss(event.gnssData) : [];
+  const speedData = Array.isArray(rawSpeedData) ? rawSpeedData : undefined;
   const maxSpeed = speedData
     ? Math.max(...speedData.map((s) => s.AVG_SPEED_MS))
     : null;
@@ -477,8 +1125,8 @@ export default function EventDetailPage({
         </Link>
       </Header>
 
-      {/* Main content */}
       <main className="container mx-auto px-4 py-6">
+
         {triageStatus?.triage_result === "missing_video" && (
           <div className="mb-4 flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
             <VideoOff className="w-5 h-5 mt-0.5 shrink-0 text-blue-500" />
@@ -571,12 +1219,11 @@ export default function EventDetailPage({
                     >
                       Your browser does not support the video tag.
                     </video>
-                    <DetectionOverlay
+                    <PlaybackDetectionOverlay
+                      playbackStore={playbackStore}
                       videoRef={videoRef}
-                      isPlaying={isPlaying}
-                      currentTime={videoCurrentTime}
                       timestamps={detectionTimestamps ?? []}
-                      detectionsByFrame={detectionsByFrame ?? new Map()}
+                      detectionsByFrame={detectionsByFrame ?? emptyDetectionsByFrame}
                       minConfidence={minConfidence}
                     />
                   </>
@@ -586,12 +1233,19 @@ export default function EventDetailPage({
                   </div>
                 )}
                 {overlaySpeedData.length > 0 && (
-                  <SpeedOverlay
+                  <PlaybackSpeedOverlay
+                    playbackStore={playbackStore}
                     speedData={overlaySpeedData}
-                    currentTime={videoCurrentTime}
                     duration={videoDuration}
                     unit={speedUnit}
                     speedLimit={nearestSpeedLimit}
+                  />
+                )}
+                {event.videoUrl && (
+                  <IncidentVideoMarker
+                    timeSeconds={incidentTimeSeconds}
+                    durationSeconds={videoDuration}
+                    onSeek={seekToIncident}
                   />
                 )}
               </div>
@@ -602,67 +1256,166 @@ export default function EventDetailPage({
                 )}>
                   <Button
                     variant="ghost"
-                    size="sm"
-                    className="text-white/70 hover:text-white hover:bg-white/10"
-                    onClick={() => setIsFullscreen((f) => !f)}
+                    size="icon-sm"
+                    className={cn(
+                      "h-9 w-9 text-white/70 hover:text-white hover:bg-white/10",
+                      isTopHit && "text-amber-400 hover:text-amber-300"
+                    )}
+                    onClick={() => toggleTopHit(id)}
+                    aria-label={isTopHit ? "Remove from Top Hits" : "Add to Top Hits"}
+                    title={isTopHit ? "Remove from Top Hits" : "Add to Top Hits"}
                   >
-                    <Maximize2 className="w-4 h-4 mr-2" />
-                    Fullscreen
+                    <Trophy className={cn("w-4 h-4", isTopHit && "fill-current")} />
                   </Button>
                   <Button
                     variant="ghost"
-                    size="sm"
-                    className="text-white/70 hover:text-white hover:bg-white/10"
+                    size="icon-sm"
+                    className={cn(
+                      "h-9 w-9 text-white/70 hover:text-white hover:bg-white/10",
+                      showClipper && "text-white bg-white/10"
+                    )}
+                    onClick={() => setShowClipper((visible) => !visible)}
+                    aria-label={showClipper ? "Hide clipper" : "Clip video and metadata"}
+                    title={showClipper ? "Hide clipper" : "Clip video and metadata"}
+                  >
+                    <Scissors className="w-4 h-4" />
+                  </Button>
+                  {canRunFrameQuality && (
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="h-9 w-9 text-white/70 hover:text-white hover:bg-white/10"
+                      onClick={() => void runFrameQuality()}
+                      disabled={!event.videoUrl}
+                      aria-label={frameQualityButtonTitle}
+                      title={frameQualityButtonTitle}
+                    >
+                      {isFrameQualityProbing || isFrameTimingQcLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Activity className="w-4 h-4" />
+                      )}
+                    </Button>
+                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className={cn(
+                      "h-9 w-9 text-white/70 hover:text-white hover:bg-white/10",
+                      productionRun?.status === "queued" && "text-amber-300 hover:text-amber-200",
+                      productionCompleted && "text-green-300 hover:text-green-200"
+                    )}
+                    onClick={handleRunProduction}
+                    disabled={productionButtonDisabled}
+                    aria-label={productionButtonTitle}
+                    title={productionButtonTitle}
+                  >
+                    {productionLoading || productionActionPending || productionProcessing ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : productionCompleted ? (
+                      <Check className="w-4 h-4" />
+                    ) : (
+                      <Upload className="w-4 h-4" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-9 w-9 text-white/70 hover:text-white hover:bg-white/10"
+                    onClick={() => setIsFullscreen((f) => !f)}
+                    aria-label="Expand video"
+                    title="Expand video"
+                  >
+                    <Maximize2 className="w-4 h-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="h-9 w-9 text-white/70 hover:text-white hover:bg-white/10"
                     onClick={downloadVideo}
                     disabled={isDownloading}
+                    aria-label={isDownloading ? "Downloading video" : "Download video"}
+                    title={isDownloading ? "Downloading video" : "Download video"}
                   >
                     {isDownloading ? (
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
-                      <Download className="w-4 h-4 mr-2" />
+                      <Download className="w-4 h-4" />
                     )}
-                    {isDownloading ? "Downloading..." : "Download"}
                   </Button>
                 </div>
               )}
             </div>
 
-            {/* Metadata bar */}
-            <div className="space-y-2 px-1">
-              {/* Badges row */}
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge
-                  className={cn(
-                    config.bgColor,
-                    config.color,
-                    config.borderColor,
-                    "border"
-                  )}
-                  variant="outline"
+            {showClipper && event.videoUrl && (
+              <PlaybackVideoClipper
+                playbackStore={playbackStore}
+                eventId={id}
+                duration={videoDuration}
+              />
+            )}
+
+            <div className="space-y-4 rounded-xl border bg-card px-4 py-3 shadow-sm">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <Select
+                  value={selectedEventType}
+                  onValueChange={(val) => {
+                    const nextType = val as AIEventType;
+                    setManualEventType(nextType);
+                    void setEventType(nextType);
+                  }}
                 >
-                  {config.label}
-                </Badge>
+                  <SelectTrigger
+                    size="sm"
+                    className={cn(
+                      "w-auto rounded-full border px-2.5 text-xs font-medium",
+                      config.bgColor,
+                      config.color,
+                      config.borderColor
+                    )}
+                    title="Event type"
+                  >
+                    <SelectValue placeholder="Type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {ALL_EVENT_TYPES.map((type) => {
+                      const typeConfig = EVENT_TYPE_CONFIG[type];
+                      const TypeIcon = typeConfig.icon;
+
+                      return (
+                        <SelectItem key={type} value={type} textValue={typeConfig.label}>
+                          <TypeIcon className={cn("w-4 h-4", typeConfig.color)} />
+                          {typeConfig.label}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectContent>
+                </Select>
+
                 <Select
                   value={triageStatus?.triage_result ?? "none"}
                   onValueChange={(val) => {
                     if (val === "none") {
-                      removeTriage();
+                      void removeTriage();
                     } else {
-                      setTriage(val as TriageCategory);
+                      void setTriage(val as TriageCategory, selectedEventType);
                     }
                   }}
                 >
                   <SelectTrigger
                     size="sm"
                     className={cn(
-                      "rounded-full px-2.5 text-xs font-medium",
+                      "w-auto rounded-full border px-2.5 text-xs font-medium",
                       !triageStatus && "text-muted-foreground",
                       triageStatus?.triage_result === "missing_video" && "bg-blue-50 text-blue-700 border-blue-200",
                       triageStatus?.triage_result === "missing_metadata" && "bg-violet-50 text-violet-700 border-violet-200",
                       triageStatus?.triage_result === "ghost" && "bg-red-50 text-red-700 border-red-200",
                       triageStatus?.triage_result === "open_road" && "bg-amber-50 text-amber-700 border-amber-200",
                       triageStatus?.triage_result === "signal" && "bg-green-50 text-green-700 border-green-200",
+                      triageStatus?.triage_result === "non_linear" && "bg-teal-50 text-teal-700 border-teal-200",
+                      triageStatus?.triage_result === "privacy" && "bg-indigo-50 text-indigo-700 border-indigo-200",
                     )}
+                    title="Triage category"
                   >
                     <SelectValue placeholder="Triage" />
                   </SelectTrigger>
@@ -675,84 +1428,219 @@ export default function EventDetailPage({
                     ))}
                   </SelectContent>
                 </Select>
+
                 {roadType?.classLabel && (
-                  <Badge variant="outline">
+                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
                     {roadType.classLabel}
                   </Badge>
                 )}
-                {sunInfo && (() => {
-                  const style = getTimeOfDayStyle(sunInfo.timeOfDay);
-                  return (
-                    <Badge variant="outline" className={cn(style.bgColor, style.color)}>
-                      {sunInfo.timeOfDay}
-                    </Badge>
-                  );
-                })()}
-                {sceneAttributes?.weather && (
-                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
-                    {sceneAttributes.weather.value}
-                    {sceneAttributes.weather.confidence !== null && (
-                      <span className="ml-1 opacity-60">{Math.round(sceneAttributes.weather.confidence * 100)}%</span>
-                    )}
+                {sunInfo && (
+                  <Badge
+                    variant="outline"
+                    className={cn(getTimeOfDayStyle(sunInfo.timeOfDay).bgColor, getTimeOfDayStyle(sunInfo.timeOfDay).color)}
+                  >
+                    {sunInfo.timeOfDay}
                   </Badge>
                 )}
-              </div>
-              {/* Details row */}
-              <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
-                <span>{formatDateTime(event.timestamp, event.location.lon)}</span>
-                <span>·</span>
-                <button
-                  onClick={copyCoordinates}
-                  className="font-mono hover:text-foreground transition-colors"
-                  title="Copy coordinates"
+                {sceneAttributes?.weather && (
+                  <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
+                    {sceneAttributes.weather.confidence !== null
+                      ? `${sceneAttributes.weather.value} ${Math.round(sceneAttributes.weather.confidence * 100)}%`
+                      : sceneAttributes.weather.value}
+                  </Badge>
+                )}
+                <a
+                  href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex min-w-0 max-w-full items-center gap-1 rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-sm transition-colors hover:text-primary"
+                  title={countryName ?? "Google Maps"}
                 >
-                  {formatCoordinates(event.location.lat, event.location.lon)}
-                  {copied && <Check className="w-3 h-3 text-green-500 inline ml-1" />}
-                </button>
-                {maxSpeed !== null && (
-                  <>
-                    <span>·</span>
-                    <span>
-                      Max <span className="text-foreground font-mono">{formatSpeed(maxSpeed)}</span>
-                    </span>
-                  </>
-                )}
-                {acceleration !== undefined && (
-                  <>
-                    <span>·</span>
-                    <span>
-                      Accel <span className="text-foreground font-mono">{acceleration.toFixed(2)} m/s²</span>
-                    </span>
-                  </>
-                )}
-                {countryName && (
-                  <>
-                    <span>·</span>
-                    <a
-                      href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-foreground hover:text-primary transition-colors"
-                    >
-                      {countryFlag(countryName)} {countryName}
-                    </a>
-                  </>
-                )}
-                {!countryName && (
-                  <>
-                    <span>·</span>
-                    <a
-                      href={`https://www.google.com/maps?q=${event.location.lat},${event.location.lon}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hover:text-primary transition-colors"
-                    >
-                      Google Maps
-                    </a>
-                  </>
-                )}
+                  <span className="truncate">
+                    {countryName ? `${countryFlag(countryName)} ${countryName}` : "Google Maps"}
+                  </span>
+                </a>
+              </div>
+
+              <div className="grid grid-cols-2 gap-x-5 gap-y-4 text-sm sm:grid-cols-3 xl:grid-cols-4">
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Date</p>
+                  <p
+                    className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight"
+                    title={formatCompactDateTime(event.timestamp, event.location.lon)}
+                  >
+                    {formatCompactDateTime(event.timestamp, event.location.lon)}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Coordinates</p>
+                  <button
+                    onClick={copyCoordinates}
+                    className="block max-w-full truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight hover:text-primary"
+                    title={`Copy ${formatCoordinates(event.location.lat, event.location.lon)}`}
+                  >
+                    {event.location.lat.toFixed(4)},{event.location.lon.toFixed(4)}
+                    {copied && <Check className="ml-1 inline h-3 w-3 text-green-500" />}
+                  </button>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Video Size</p>
+                  <p className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight">
+                    {videoBytes === null ? "-" : formatBytes(videoBytes)}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Bitrate</p>
+                  <p className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight">
+                    {videoBytes !== null && videoDuration > 0 ? formatBitrate(videoBytes, videoDuration) : "-"}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Max</p>
+                  <p className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight">
+                    {maxSpeed === null ? "-" : formatSpeed(maxSpeed)}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Acceleration</p>
+                  <p className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight">
+                    {acceleration === undefined ? "-" : `${acceleration.toFixed(2)} m/s²`}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">Firmware</p>
+                  <p className="truncate whitespace-nowrap font-mono text-[13px] leading-tight tracking-tight">
+                    {firmwareVersion ?? "-"}
+                  </p>
+                </div>
               </div>
             </div>
+
+            <PlaybackVideoVruPanel
+              playbackStore={playbackStore}
+              videoId={id}
+              duration={videoDuration}
+              detectionTimestamps={detectionTimestamps}
+              detectionsByFrame={detectionsByFrame}
+              minConfidence={minConfidence}
+              onMinConfidenceChange={setMinConfidence}
+              activeDetectionRun={activeDetectionRun}
+              detectionRuns={detectionRuns}
+              runDeviceLabel="AWS GPU"
+              onRunDetection={handleRunDetection}
+              selectedRunId={selectedRunId}
+              onSelectRun={setSelectedRunId}
+              onCancelRun={handleCancelRun}
+              segments={detectionSegments}
+              sceneAttributes={sceneAttributes}
+              logs={logs}
+              onRemoveSegment={async (label, startMs, endMs) => {
+                const params = new URLSearchParams({ label, startMs: String(startMs), endMs: String(endMs) });
+                if (selectedRunId) params.set("runId", selectedRunId);
+                await fetch(`/api/videos/${id}/detections?${params}`, { method: "DELETE" });
+                mutateDetections();
+              }}
+              onSeek={(time) => {
+                if (videoRef.current) {
+                  videoRef.current.currentTime = time;
+                }
+              }}
+            />
+
+            {showProductionPanel && (
+              <div className="rounded-lg border bg-card px-4 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="text-sm font-semibold">Production Pipeline</h3>
+                      {productionLoading ? (
+                        <Badge variant="outline" className="gap-1">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Checking
+                        </Badge>
+                      ) : productionProcessing ? (
+                        <Badge
+                          variant="outline"
+                          className="bg-blue-50 text-blue-700 border-blue-200 gap-1"
+                        >
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Processing
+                        </Badge>
+                      ) : productionRun?.status === "queued" ? (
+                        <Badge
+                          variant="outline"
+                          className="bg-amber-50 text-amber-700 border-amber-200"
+                        >
+                          {productionRun.priority === 0 ? "Priority Queue" : "Queued"}
+                        </Badge>
+                      ) : productionCompleted ? (
+                        <Badge
+                          variant="outline"
+                          className="bg-green-50 text-green-700 border-green-200"
+                        >
+                          Complete
+                        </Badge>
+                      ) : productionRun?.status === "failed" ? (
+                        <Badge
+                          variant="outline"
+                          className="bg-red-50 text-red-700 border-red-200"
+                        >
+                          Failed
+                        </Badge>
+                      ) : (
+                        <Badge
+                          variant="outline"
+                          className="bg-green-50 text-green-700 border-green-200"
+                        >
+                          VRU Complete
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {productionCompleted
+                        ? "Production has completed for this event."
+                        : productionProcessing
+                          ? "Production is already running for this event."
+                          : !hasCompletedVru
+                            ? "Run VRU detections before sending this event through production."
+                            : "VRU detections are complete. Run Production moves this event to the front of the production queue."}
+                    </p>
+                    {visibleProductionNotice && (
+                      <p
+                        className={cn(
+                          "text-sm",
+                          visibleProductionNotice.type === "success"
+                            ? "text-green-700"
+                            : "text-destructive"
+                        )}
+                      >
+                        {visibleProductionNotice.message}
+                      </p>
+                    )}
+                    {productionRun?.lastError && productionRun.status === "failed" && (
+                      <p className="text-sm text-destructive">
+                        {productionRun.lastError}
+                      </p>
+                    )}
+                  </div>
+                  {canRunProduction && (
+                    <Button
+                      size="sm"
+                      onClick={handleRunProduction}
+                      disabled={productionLoading || productionActionPending}
+                      className="sm:self-start"
+                    >
+                      {productionActionPending || productionLoading ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <Upload className="w-4 h-4 mr-2" />
+                      )}
+                      {productionLoading ? "Checking..." : "Run Production"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
 
             <ClipSummary
               videoId={id}
@@ -769,30 +1657,143 @@ export default function EventDetailPage({
               timeline={timeline}
             />
 
-            <VideoVruPanel
-              videoId={id}
-              currentTime={videoCurrentTime}
-              duration={videoDuration}
-              isPlaying={isPlaying}
-              detectionTimestamps={detectionTimestamps}
-              detectionsByFrame={detectionsByFrame}
-              minConfidence={minConfidence}
-              onMinConfidenceChange={setMinConfidence}
-              activeDetectionRun={activeDetectionRun}
-              detectionRuns={detectionRuns}
-              onRunDetection={handleRunDetection}
-              selectedRunId={selectedRunId}
-              onSelectRun={setSelectedRunId}
-              onCancelRun={handleCancelRun}
-              segments={detectionSegments}
-              sceneAttributes={sceneAttributes}
-              logs={logs}
-              onSeek={(time) => {
-                if (videoRef.current) {
-                  videoRef.current.currentTime = time;
-                }
-              }}
-            />
+            {/* Camera Info */}
+            {cameraIntrinsics?.bee && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Bee Camera</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Horizontal FOV</p>
+                      <p className="font-mono">{BEE_HFOV}°</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Focal Length</p>
+                      <p className="font-mono">{cameraIntrinsics.bee.focal.toFixed(4)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Radial k1</p>
+                      <p className="font-mono">{cameraIntrinsics.bee.k1.toFixed(4)}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Radial k2</p>
+                      <p className="font-mono">{cameraIntrinsics.bee.k2.toFixed(4)}</p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+
+          {/* Right column - Map and metadata */}
+          <div className="space-y-4">
+            {/* Map, positioning, and FPS quality */}
+            <Card
+              ref={frameQualityRef}
+              className={cn(
+                "overflow-hidden rounded-xl py-0 flex flex-col bg-card",
+                constrainTelemetryHeight && !videoContainerHeight && "aspect-[16/10]"
+              )}
+              style={constrainTelemetryHeight && videoContainerHeight ? { height: videoContainerHeight } : undefined}
+            >
+              <CardContent
+                className={cn(
+                  "flex flex-col p-0",
+                  constrainTelemetryHeight && "min-h-0 flex-1"
+                )}
+              >
+                <Tabs
+                  value={activeTelemetryTab}
+                  onValueChange={(value) => setActiveTelemetryTab(value as TelemetryTab)}
+                  className={cn(
+                    "flex flex-col gap-0",
+                    constrainTelemetryHeight && "min-h-0 flex-1"
+                  )}
+                >
+                  <div className="shrink-0 px-4 pb-3 pt-4">
+                    <TabsList className="grid h-9 w-full grid-cols-3 gap-1 bg-transparent p-0">
+                      <TabsTrigger
+                        value="map"
+                        className="h-9 w-full rounded-md border-0 bg-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-muted hover:text-foreground data-[state=active]:bg-primary/10 data-[state=active]:text-primary data-[state=active]:shadow-none"
+                      >
+                        Map
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="positioning"
+                        className="h-9 w-full rounded-md border-0 bg-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-muted hover:text-foreground data-[state=active]:bg-primary/10 data-[state=active]:text-primary data-[state=active]:shadow-none"
+                      >
+                        Positioning
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="fps"
+                        className="h-9 w-full rounded-md border-0 bg-transparent px-3 py-1.5 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-muted hover:text-foreground data-[state=active]:bg-primary/10 data-[state=active]:text-primary data-[state=active]:shadow-none"
+                      >
+                        FPS
+                      </TabsTrigger>
+                    </TabsList>
+                  </div>
+                  <div
+                    className={cn(
+                      "flex flex-col px-4 pb-4",
+                      constrainTelemetryHeight && "min-h-0 flex-1"
+                    )}
+                  >
+                    <TabsContent
+                      value="map"
+                      className="m-0 h-full min-h-0 flex-1 overflow-hidden"
+                    >
+                      <div className="h-full min-h-0 w-full overflow-hidden rounded-lg bg-muted">
+                        <PlaybackEventMap
+                          playbackStore={playbackStore}
+                          location={event.location}
+                          path={event.gnssData}
+                          speedData={overlaySpeedData}
+                          videoDuration={videoDuration}
+                          detectionSegments={detectionSegments}
+                          className="h-full rounded-lg"
+                          onSeek={(time) => {
+                            if (videoRef.current) videoRef.current.currentTime = time;
+                          }}
+                        />
+                      </div>
+                    </TabsContent>
+                    <TabsContent
+                      value="positioning"
+                      className="m-0 h-full min-h-0 flex-1 overflow-auto"
+                    >
+                      <div className="h-full overflow-auto rounded-lg border bg-background p-3">
+                        <PlaybackPositioningSection
+                          playbackStore={playbackStore}
+                          eventId={id}
+                          gnssData={event.gnssData}
+                          videoDuration={videoDuration}
+                          embedded
+                        />
+                      </div>
+                    </TabsContent>
+                    <TabsContent
+                      value="fps"
+                      className="m-0 h-full min-h-0 flex-1 overflow-auto"
+                    >
+                      <div className="h-full overflow-auto rounded-lg border bg-background p-3">
+                        <PlaybackFrameTimingQcPanel
+                          playbackStore={playbackStore}
+                          videoId={id}
+                          videoUrl={event.videoUrl}
+                          firmwareVersion={firmwareVersion}
+                          isProbingExternal={isFrameQualityProbing}
+                          incidentTimeSeconds={incidentTimeSeconds}
+                          embedded
+                          title={null}
+                        />
+                      </div>
+                    </TabsContent>
+                  </div>
+                </Tabs>
+              </CardContent>
+            </Card>
 
             {/* Speed Profile */}
             <div className="space-y-3 rounded-lg border bg-card px-4 py-3">
@@ -804,11 +1805,11 @@ export default function EventDetailPage({
                   </Badge>
                 )}
               </h3>
-              <SpeedProfileChart
+              <PlaybackSpeedProfileChart
+                playbackStore={playbackStore}
                 speedArray={speedData}
                 gnssData={event.gnssData}
                 imuData={event.imuData}
-                currentTime={videoCurrentTime}
                 duration={videoDuration}
                 speedLimit={nearestSpeedLimit}
                 unit={speedUnit}
@@ -817,72 +1818,6 @@ export default function EventDetailPage({
                 }}
               />
             </div>
-
-            {/* Camera Info */}
-            {cameraIntrinsics?.bee && (
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-lg">
-                    Bee Camera
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <p className="text-muted-foreground">Horizontal FOV</p>
-                      <p className="font-medium font-mono">
-                        {BEE_HFOV}°
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-muted-foreground">Focal Length</p>
-                      <p className="font-medium font-mono">
-                        {cameraIntrinsics.bee.focal.toFixed(4)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-muted-foreground">Radial Distortion (k1)</p>
-                      <p className="font-medium font-mono">
-                        {cameraIntrinsics.bee.k1.toFixed(4)}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-muted-foreground">Radial Distortion (k2)</p>
-                      <p className="font-medium font-mono">
-                        {cameraIntrinsics.bee.k2.toFixed(4)}
-                      </p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-          </div>
-
-          {/* Right column - Map and metadata */}
-          <div className="space-y-4">
-            {/* Map */}
-            <Card
-              className="overflow-hidden py-0 flex flex-col"
-              style={videoContainerHeight ? { height: videoContainerHeight } : undefined}
-            >
-              <CardContent className="p-0 flex-1 min-h-0">
-                <div className="rounded-lg shadow-inner overflow-hidden h-full">
-                  <EventMap
-                    location={event.location}
-                    path={event.gnssData}
-                    currentTime={videoCurrentTime}
-                    videoDuration={videoDuration}
-                    className={videoContainerHeight ? "h-full" : "aspect-video"}
-                    onSeek={(time) => {
-                      if (videoRef.current) videoRef.current.currentTime = time;
-                    }}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Positioning section */}
-            <PositioningSection eventId={id} gnssData={event.gnssData} />
 
             {/* Metadata table */}
             {event.metadata && Object.keys(event.metadata).length > 0 && (

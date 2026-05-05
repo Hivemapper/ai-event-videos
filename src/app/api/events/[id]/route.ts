@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { API_BASE_URL } from "@/lib/constants";
 import { fetchWithRetry } from "@/lib/fetch-retry";
+import { loadLocalEditedMetadata, localEditedMetadataToEvent } from "@/lib/local-edited-events";
 
 export async function GET(
   request: NextRequest,
@@ -8,6 +9,14 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
+
+    const localMetadata = await loadLocalEditedMetadata(id);
+    if (localMetadata) {
+      return NextResponse.json(localEditedMetadataToEvent(id, localMetadata), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+
     const apiKey = request.headers.get("Authorization") || process.env.BEEMAPS_API_KEY;
 
     if (!apiKey) {
@@ -116,31 +125,35 @@ export async function GET(
       }
     }
 
-    // Append enrichment data (our computed fields) to the BeeMaps response
-    try {
-      const lat = data.location?.lat;
-      const lon = data.location?.lon;
-      const enrichParams = new URLSearchParams();
-      if (lat !== undefined) enrichParams.set("lat", String(lat));
-      if (lon !== undefined) enrichParams.set("lon", String(lon));
-      if (data.timestamp) enrichParams.set("timestamp", data.timestamp);
-      const mapboxToken = searchParams.get("mapboxToken");
-      if (mapboxToken) enrichParams.set("mapboxToken", mapboxToken);
+    // Append enrichment data only when requested. The event detail page loads
+    // its video-first payload from this route and hydrates most enrichments
+    // separately, so doing this by default delays the first usable render.
+    if (searchParams.get("includeEnrichment") === "true") {
+      try {
+        const lat = data.location?.lat;
+        const lon = data.location?.lon;
+        const enrichParams = new URLSearchParams();
+        if (lat !== undefined) enrichParams.set("lat", String(lat));
+        if (lon !== undefined) enrichParams.set("lon", String(lon));
+        if (data.timestamp) enrichParams.set("timestamp", data.timestamp);
+        const mapboxToken = searchParams.get("mapboxToken");
+        if (mapboxToken) enrichParams.set("mapboxToken", mapboxToken);
 
-      const enrichUrl = new URL(
-        `/api/events/${id}/enrichment?${enrichParams.toString()}`,
-        request.nextUrl.origin
-      );
-      const enrichResp = await fetch(enrichUrl.toString(), {
-        headers: {
-          Authorization: authHeader,
-        },
-      });
-      if (enrichResp.ok) {
-        data.enrichment = await enrichResp.json();
+        const enrichUrl = new URL(
+          `/api/events/${id}/enrichment?${enrichParams.toString()}`,
+          request.nextUrl.origin
+        );
+        const enrichResp = await fetch(enrichUrl.toString(), {
+          headers: {
+            Authorization: authHeader,
+          },
+        });
+        if (enrichResp.ok) {
+          data.enrichment = await enrichResp.json();
+        }
+      } catch {
+        // Enrichment is optional — don't fail the response if it errors
       }
-    } catch {
-      // Enrichment is optional — don't fail the response if it errors
     }
 
     return NextResponse.json(data, {
